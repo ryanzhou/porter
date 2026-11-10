@@ -110,15 +110,17 @@ struct AdblockPage: View {
                         Spacer()
                         if lists.contains(preset.url) {
                             Image(systemName: "checkmark")
+                                .foregroundStyle(.tint)
                         }
                     }
+                    .contentShape(Rectangle())
                 }
-                .disabled(isLastList(preset.url))
+                .buttonStyle(.plain)
             }
         } header: {
             Text("Block lists")
         } footer: {
-            Text("More lists block more, use more of the router's memory, and are more likely to break something. One is usually enough.")
+            Text("More lists block more, use more of the router's memory, and are more likely to break something. One is usually enough. While blocking is on, at least one list stays selected.")
         }
     }
 
@@ -144,6 +146,7 @@ struct AdblockPage: View {
                     customURL = ""
                     toggle(url)
                 }
+                .buttonStyle(.borderless)
                 .disabled(!customURLValid)
             }
         } header: {
@@ -168,6 +171,8 @@ struct AdblockPage: View {
     }
 
     private func toggle(_ url: String) {
+        // The last list cannot be removed while blocking is on.
+        guard !isLastList(url) else { return }
         Task {
             await model.update { cfg in
                 if let index = cfg.dns.adblock.lists.firstIndex(of: url) {
