@@ -57,8 +57,11 @@ type Options struct {
 	GeoIPPath string
 	// MPQUIC lists where the mpquic program may be, in order of
 	// preference.
-	MPQUIC  []string
-	Version string
+	MPQUIC []string
+	// PhoneRecords is where usbmuxd keeps its records of iPhones that
+	// trust the router; a factory reset empties it. Empty: there is none.
+	PhoneRecords string
+	Version      string
 	// Update installs new versions; nil where that is not possible.
 	// UpdateURL is where the newest release's files are, ending in a
 	// slash. UpdateSettle is how long a new version has to run before it

@@ -127,8 +127,8 @@ func main() {
 		DHCPHook: hooks[dhcpHook], LeaseHook: hooks[leaseHook],
 		WGUserspace: *wgImpl, GeoIPPath: *geoPath, Version: version, BuildTime: time.Unix(bt, 0),
 		Update: updater, UpdateURL: releaseURL(), UpdateSettle: 45 * time.Second,
-		MPQUIC: mpquicPrograms(*dataDir),
-		Log:    log, Logs: ring,
+		MPQUIC: mpquicPrograms(*dataDir), PhoneRecords: phoneRecords(*dataDir),
+		Log: log, Logs: ring,
 	})
 	if err != nil {
 		log.Error("startup", "err", err)
@@ -148,6 +148,16 @@ func main() {
 
 // hook forwards one dhcpcd or dnsmasq event to the daemon. It must never
 // fail loudly or block: the calling daemon waits for it.
+// phoneRecords is where usbmuxd keeps its records of trusted iPhones on
+// the router itself. Anywhere else (a development machine, a test) there
+// is no such directory that would be the daemon's to empty.
+func phoneRecords(dataDir string) string {
+	if filepath.Clean(dataDir) == "/data/porter" {
+		return "/data/lockdown"
+	}
+	return ""
+}
+
 func hook(kind string) {
 	msg := core.HookMessage{Kind: kind, Args: os.Args[1:], Env: map[string]string{}}
 	if kind == "dhcpcd" {

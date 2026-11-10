@@ -1039,6 +1039,14 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		for _, e := range entries {
 			os.RemoveAll(filepath.Join(c.opt.DataDir, e.Name()))
 		}
+		// And the iPhones that were told to trust the router, which
+		// usbmuxd keeps in a directory of its own.
+		if c.opt.PhoneRecords != "" {
+			records, _ := os.ReadDir(c.opt.PhoneRecords)
+			for _, e := range records {
+				os.RemoveAll(filepath.Join(c.opt.PhoneRecords, e.Name()))
+			}
+		}
 		go func() { time.Sleep(500 * time.Millisecond); system.Reboot() }()
 		return nil, nil
 	}

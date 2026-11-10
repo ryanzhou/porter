@@ -26,4 +26,10 @@ if ! writable; then
 fi
 mkdir -p /data/porter
 chmod 700 /data/porter
+# Where usbmuxd keeps the records of iPhones that trust the router; see
+# tmpfiles.d/porter.conf. Made here as well for a data partition that has
+# just been recreated.
+if [ ! -d /data/lockdown ]; then
+    mkdir -p /data/lockdown && chown usbmux:plugdev /data/lockdown 2>/dev/null
+fi
 exit 0

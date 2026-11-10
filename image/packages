@@ -28,6 +28,11 @@ iw
 rfkill
 wireless-regdb
 
+# An iPhone sharing its connection over USB: the phone only brings the
+# link up for a computer it has been told to trust, and usbmuxd is what
+# asks it (started by udev when an iPhone is plugged in)
+usbmuxd
+
 # Firmware for USB Wi-Fi adapters
 firmware-mediatek
 firmware-realtek
