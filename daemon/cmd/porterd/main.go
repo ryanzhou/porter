@@ -24,13 +24,25 @@ import (
 
 	"github.com/ryanzhou/porter/daemon/internal/core"
 	"github.com/ryanzhou/porter/daemon/internal/geoip"
+	"github.com/ryanzhou/porter/daemon/internal/update"
 )
 
 // Set at build time.
 var (
 	version   = "dev"
 	buildTime = "0"
+	// releases is where the newest release's files are downloaded from.
+	// The image build points it at the repository the image is built
+	// from, so a fork updates from its own releases.
+	releases = "https://github.com/ryanzhou/porter/releases/latest/download/"
 )
+
+func releaseURL() string {
+	if u := os.Getenv("PORTER_UPDATE_URL"); u != "" {
+		return u
+	}
+	return releases
+}
 
 const (
 	dhcpHook  = "porter-dhcp-hook"
@@ -94,6 +106,7 @@ func main() {
 		DataDir: *dataDir, RunDir: *runDir,
 		DHCPHook: hooks[dhcpHook], LeaseHook: hooks[leaseHook],
 		WGUserspace: *wgImpl, GeoIPPath: *geoPath, Version: version, BuildTime: time.Unix(bt, 0),
+		Update: update.Router(*dataDir, *runDir), UpdateURL: releaseURL(), UpdateSettle: 45 * time.Second,
 		Log: log, Logs: ring,
 	})
 	if err != nil {

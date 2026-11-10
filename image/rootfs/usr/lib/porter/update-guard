@@ -1,0 +1,19 @@
+#!/bin/sh
+# The way back from an update that starts but does not work.
+#
+# After installing an update the router is restarted into it as a trial.
+# The router daemon confirms the trial once it has been running for a
+# while, and removes the note the installer left. If the note is still
+# there five minutes after a trial start, the new version is not doing its
+# job: restart, and the boot loader returns to the version before it.
+#
+# A new version that does not even get this far is covered elsewhere: the
+# trial is good for one start only, so any restart ends it, and a system
+# that hangs is restarted by the hardware watchdog.
+flag=/proc/device-tree/chosen/bootloader/tryboot
+[ -r "$flag" ] || exit 0
+[ "$(od -An -v -tx1 "$flag" | tr -d ' \n')" = 00000001 ] || exit 0
+sleep 300
+[ -e /data/porter/update-pending ] || exit 0
+echo "update-guard: the update was not confirmed; going back to the previous version" >&2
+systemctl reboot

@@ -18,6 +18,7 @@ public enum RouterEvent {
     case status(RouterStatus)
     case activity(ActivityEvent)
     case speedTest(SpeedTestProgress)
+    case firmware(FirmwareProgress)
 }
 
 public struct Empty: Codable, Equatable { public init() {} }
@@ -124,6 +125,8 @@ public actor RouterConnection {
                 if let w = try? decoder.decode(Wrapper<ActivityEvent>.self, from: message) { eventSink.yield(.activity(w.d)) }
             case "speedtest":
                 if let w = try? decoder.decode(Wrapper<SpeedTestProgress>.self, from: message) { eventSink.yield(.speedTest(w.d)) }
+            case "firmware":
+                if let w = try? decoder.decode(Wrapper<FirmwareProgress>.self, from: message) { eventSink.yield(.firmware(w.d)) }
             default:
                 break
             }

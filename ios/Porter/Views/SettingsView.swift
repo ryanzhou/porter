@@ -9,6 +9,7 @@ struct SettingsView: View {
         List {
             RouterSettingsSection()
             Section {
+                SettingsLink(symbol: "arrow.down.circle.fill", title: "Software", value: model.status?.version ?? "") { SoftwarePage() }
                 SettingsLink(symbol: "iphone", title: "Phones") { PairedPhonesPage() }
                 SettingsLink(symbol: "clock", title: "Activity") { ActivityPage() }
                 SettingsLink(symbol: "text.alignleft", title: "Logs") { LogsPage() }
@@ -482,6 +483,151 @@ private struct SpeedTestServerFields: View {
             Text("Upload")
         } footer: {
             Text("Accepts POST.")
+        }
+    }
+}
+
+// MARK: - Software
+
+/// The router's version, whether a newer one exists, and installing it.
+struct SoftwarePage: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var info: FirmwareInfo? = nil
+    @State private var checking = false
+    @State private var asking = false
+
+    private var progress: FirmwareProgress? { model.firmwareProgress }
+    private var installing: Bool { progress?.state == "installing" }
+
+    private var version: String {
+        info?.current ?? model.status?.version ?? ""
+    }
+
+    private var available: Bool { info?.newer == true }
+
+    /// One line under the version: what there is to know right now.
+    private var summary: String {
+        if installing { return "Installing " + (progress?.version ?? "") }
+        if checking && info == nil { return "Checking" }
+        guard let info else { return "" }
+        if info.newer, let latest = info.latest {
+            let size: String = formatBytes(UInt64(max(info.download ?? 0, 0)))
+            return latest + " available · " + size
+        }
+        return "Up to date"
+    }
+
+    private var phaseLabel: String {
+        switch progress?.phase ?? "" {
+        case "download": return "Downloading"
+        case "verify": return "Checking"
+        case "restart": return "Restarting"
+        default: return "Working"
+        }
+    }
+
+    var body: some View {
+        List {
+            Section {
+                VStack(spacing: 10) {
+                    Glyph(symbol: available ? "arrow.down.circle.fill" : "checkmark.seal.fill", size: 64, filled: true)
+                    Text(version)
+                        .font(.title2.weight(.bold))
+                        .fontDesign(.rounded)
+                    Text(summary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .listRowBackground(Color.clear)
+            }
+            if installing {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView(value: Double(progress?.percent ?? 0), total: 100)
+                        HStack {
+                            Text(phaseLabel)
+                            Spacer()
+                            Text("\(progress?.percent ?? 0) %")
+                                .monospacedDigit()
+                        }
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                } footer: {
+                    Text("Keep the router powered. It restarts by itself.")
+                }
+            } else if available {
+                installSection
+            }
+            if progress?.state == "failed", let error = progress?.error {
+                Section {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.footnote)
+                }
+            }
+            if !installing {
+                Section {
+                    Button {
+                        Task { await check() }
+                    } label: {
+                        HStack {
+                            Label("Check again", systemImage: "arrow.clockwise")
+                            Spacer()
+                            if checking { ProgressView() }
+                        }
+                    }
+                    .disabled(checking)
+                }
+            }
+        }
+        .navigationTitle("Software")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await check() }
+        .confirmationDialog("Install " + (info?.latest ?? ""), isPresented: $asking, titleVisibility: .visible) {
+            Button("Install and restart") {
+                Task { await model.attempt { try await $0.firmwareInstall() } }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Settings are kept. The network is down for a minute or two.")
+        }
+    }
+
+    @ViewBuilder
+    private var installSection: some View {
+        if info?.supported == true {
+            Section {
+                Button {
+                    asking = true
+                } label: {
+                    Text("Install")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+            }
+        } else {
+            Section {
+                Label("This card was flashed before the router could update itself. Flash the newest image once.", systemImage: "sdcard")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func check() async {
+        checking = true
+        let found: FirmwareInfo? = await model.fetch { try await $0.firmwareCheck() }
+        checking = false
+        if let found {
+            info = found
         }
     }
 }

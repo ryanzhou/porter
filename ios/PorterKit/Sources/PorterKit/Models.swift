@@ -595,6 +595,37 @@ public struct SpeedTestProgress: Codable, Equatable {
     }
 }
 
+/// What the router knows about its own software and the newest release.
+public struct FirmwareInfo: Codable, Equatable {
+    public var current: String
+    /// False on a card flashed before the router could update itself.
+    public var supported: Bool
+    public var latest: String?
+    public var newer: Bool
+    /// Size of the update in bytes.
+    public var download: Int64?
+    public var built: Int64?
+}
+
+/// The state of an installation.
+public struct FirmwareProgress: Codable, Equatable {
+    /// "idle", "installing" or "failed".
+    public var state: String
+    /// While installing: "download", "verify" or "restart".
+    public var phase: String?
+    public var percent: Int
+    public var version: String?
+    public var error: String?
+
+    public init(state: String, phase: String? = nil, percent: Int = 0, version: String? = nil, error: String? = nil) {
+        self.state = state
+        self.phase = phase
+        self.percent = percent
+        self.version = version
+        self.error = error
+    }
+}
+
 // MARK: - Typed calls
 
 public extension RouterConnection {
@@ -645,6 +676,12 @@ public extension RouterConnection {
 
     /// Looks for newer block lists and a newer country database now.
     func checkForUpdates() async throws { try await run("updates.check") }
+
+    /// Asks the router whether a newer version of its software exists.
+    func firmwareCheck() async throws -> FirmwareInfo { try await call("firmware.check") }
+    /// Starts installing the newest version; progress arrives as events.
+    func firmwareInstall() async throws { try await run("firmware.install") }
+    func firmwareStatus() async throws -> FirmwareProgress { try await call("firmware.status") }
 
     func activity() async throws -> [ActivityEvent] { try await call("events.list") }
     func logs() async throws -> [String] { try await call("system.logs") }

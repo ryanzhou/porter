@@ -1,7 +1,10 @@
-Porter travel router - boot partition
+Porter travel router
 
 Everything is configured from the Porter app over Bluetooth. There is
 nothing to edit here for normal use.
+
+autoboot.txt tells the Raspberry Pi which copy of the system to start. The
+router rewrites it when it updates itself; leave it alone.
 
 Debug access: create an empty file named "porter-debug" on this partition
 to get a root shell on an attached HDMI display and keyboard, and on the

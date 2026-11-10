@@ -3,8 +3,8 @@
 Porter is its own router software on a minimal Debian base, not a
 distribution of an existing router OS. The router and the app are the
 only two components: there is no server anywhere, so no cloud control
-plane, no account, no central management and no automatic software
-updates.
+plane, no account and no central management. Software updates come from
+the project's GitHub releases, and only when asked for from the app.
 
 | Part | Where | What |
 |------|-------|------|
@@ -87,7 +87,7 @@ The image is deliberately appliance-like:
 - The root file system is mounted read-only; `/var` and `/tmp` are in
   RAM. Pulling the power cannot corrupt the system.
 - Settings, pairings, cached block lists and the refreshed country
-  database live on a small third partition (`/data`). If it is ever
+  database live on their own partition (`/data`). If it is ever
   unrecoverable it is recreated and the router returns to factory state
   rather than failing to start.
 - There is no password login. SSH is off unless enabled in the app
@@ -97,6 +97,57 @@ The image is deliberately appliance-like:
 - Time: the Pi 5 has no clock battery by default. Besides NTP, the app
   sets the clock at the start of every session and the last known time
   is restored at boot, so that WireGuard never sees time run backwards.
+
+### Updates
+
+The card holds the system twice:
+
+| Partition | | |
+|---|---|---|
+| 1 | selector, FAT | `autoboot.txt`: which boot partition to start |
+| 2, 3 | boot A, boot B, FAT | kernel, device trees, kernel command line |
+| 5, 6 | root A, root B, ext4 | the read-only root file system |
+| 7 | data, ext4 | settings; shared |
+
+A release carries, besides the image to flash, the two partition images
+of a slot (`porter-<version>-boot.vfat.gz`, `-root.ext4.gz`) and
+`update.json`, which gives their sizes and SHA-256 hashes.
+`daemon/internal/update` does the rest:
+
+1. `firmware.check` fetches `update.json` from the newest release.
+2. `firmware.install` downloads both images into the slot that is not
+   running, checking the hashes as they arrive and again by reading the
+   card back, and rewrites the root partition in that slot's
+   `cmdline.txt`.
+3. It points `[tryboot]` in `autoboot.txt` at the new slot and restarts
+   with `systemctl reboot --reboot-argument="0 tryboot"`. The Raspberry
+   Pi boot loader starts the `[tryboot]` partition once.
+4. In the new system, `porterd` makes the slot the default after 45
+   seconds of running. If it never gets that far, the next restart is a
+   normal one and starts the old slot: `porter-update-guard` forces one
+   after five minutes, the hardware watchdog on a hang, the kernel on a
+   panic. Back on the old slot, `porterd` records that the update did
+   not hold.
+
+Partition numbers and slot sizes are fixed (see the top of
+`image/build.sh`): every later version has to fit a card flashed today.
+A change to them needs a new `Layout` number in the update package, and
+cards have to be flashed again.
+
+**Signing.** By default a router trusts an update because it came from
+GitHub over HTTPS. To make it require a signature as well, create a key
+pair:
+
+```bash
+cd daemon && go run ./cmd/porter-release keygen
+```
+
+Store the signing key as the repository secret `PORTER_UPDATE_KEY` and
+commit the public key as `image/keys/update.pub`. Images built from then
+on install only updates signed with that key, and the Image workflow
+signs each release. Routers flashed before the key existed keep
+accepting unsigned updates, so do this before the first release if you
+want it at all.
 
 ### Built-in radio client limit
 
@@ -198,8 +249,9 @@ git push origin v0.2.0
 ```
 
 The Image workflow builds the image for it, named after the tag, and
-attaches it to a release of that name. The router and the app both show
-the version.
+attaches it and the update files to a release of that name. Routers
+offer a release as an update once it is the newest one that is not a
+draft or pre-release. The router and the app both show the version.
 
 ## Things that are sampled or approximate
 

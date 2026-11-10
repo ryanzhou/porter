@@ -3,7 +3,7 @@
 # daemon starts. A data partition that cannot be repaired is recreated:
 # the router then comes up in its factory state instead of not at all.
 set -u
-DEV=/dev/disk/by-partuuid/504f5254-03
+DEV=/dev/disk/by-partuuid/504f5254-07
 
 mounted() { mountpoint -q /data; }
 writable() { mounted && touch /data/.rw 2>/dev/null && rm -f /data/.rw; }

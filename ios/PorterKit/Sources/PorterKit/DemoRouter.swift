@@ -34,7 +34,7 @@ public enum DemoRouter {
                 config = next
                 return Data("{\"rev\":\(next.rev)}".utf8)
             case "hello":
-                return Data(#"{"name":"Porter","id":"3fa9c210","version":"1.0 (demo)","paired":true,"claimed":true,"pairing":false,"ready":true}"#.utf8)
+                return Data(#"{"name":"Porter","id":"3fa9c210","version":"v1.0.0","paired":true,"claimed":true,"pairing":false,"ready":true}"#.utf8)
             case "status.get":
                 return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name).utf8)
             case "devices.list":
@@ -70,6 +70,10 @@ public enum DemoRouter {
                 [{"key":"qk3vN2xQxq0S1f8W8l7m2cQ8m3w1vR0b4yZk9a5uT2E=","name":"iPhone","added":\(now - 40 * 86_400),"last_seen":\(now),"self":true},
                  {"key":"Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4Zm9vYmFyYmE=","name":"iPad","added":\(now - 12 * 86_400),"last_seen":\(now - 2 * 86_400),"self":false}]
                 """.utf8)
+            case "firmware.check":
+                return Data(#"{"current":"v1.0.0","supported":true,"latest":"v1.1.0","newer":true,"download":268435456,"built":\#(now - 86_400)}"#.utf8)
+            case "firmware.status":
+                return Data(#"{"state":"idle","percent":0}"#.utf8)
             case "system.logs":
                 return Data(#"["2026-11-10T08:14:02Z INFO porterd starting version=1.0","2026-11-10T08:14:09Z INFO access point up iface=wlan0 channel=36 mode=ac/80MHz","2026-11-10T08:14:21Z INFO uplink reachability if=wlan1 state=captive","2026-11-10T08:15:40Z INFO uplink reachability if=wlan1 state=online","2026-11-10T08:15:44Z INFO vpn state vpn=Home state=up"]"#.utf8)
             case "vpn.genkey":
@@ -130,7 +134,7 @@ public enum DemoRouter {
     static func status(now: Int64, rev: UInt64, name: String) -> String {
         let safeName = name.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "\"", with: "'")
         return """
-        {"name":"\(safeName)","id":"3fa9c210","version":"1.0 (demo)","time":\(now),"uptime":93784,"temp":51.3,"ready":true,"rev":\(rev),"pairing":false,
+        {"name":"\(safeName)","id":"3fa9c210","version":"v1.0.0","time":\(now),"uptime":93784,"temp":51.3,"ready":true,"rev":\(rev),"pairing":false,
          "internet":"online","active":"wlan1",
          "wan":[{"if":"eth0","kind":"eth","metric":100,"carrier":false,"internet":"down","has_v6":false,"mac":"2c:cf:67:1a:44:90"},
                 {"if":"wlan1","kind":"wifi","metric":200,"carrier":true,"internet":"online","ipv4":"172.20.14.87/22","gateway":"172.20.12.1",

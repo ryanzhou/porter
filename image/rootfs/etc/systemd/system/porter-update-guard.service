@@ -1,0 +1,10 @@
+[Unit]
+Description=Go back to the previous version if an update does not work
+ConditionPathExists=/proc/device-tree/chosen/bootloader/tryboot
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/porter/update-guard
+
+[Install]
+WantedBy=multi-user.target

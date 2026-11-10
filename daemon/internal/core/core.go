@@ -33,6 +33,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/speedtest"
 	"github.com/ryanzhou/porter/daemon/internal/stats"
 	"github.com/ryanzhou/porter/daemon/internal/system"
+	"github.com/ryanzhou/porter/daemon/internal/update"
 	"github.com/ryanzhou/porter/daemon/internal/vpn"
 	"github.com/ryanzhou/porter/daemon/internal/wan"
 	"github.com/ryanzhou/porter/daemon/internal/wifi"
@@ -52,9 +53,16 @@ type Options struct {
 	// country rules and country display.
 	GeoIPPath string
 	Version   string
-	BuildTime time.Time
-	Log       *slog.Logger
-	Logs      *LogRing
+	// Update installs new versions; nil where that is not possible.
+	// UpdateURL is where the newest release's files are, ending in a
+	// slash. UpdateSettle is how long a new version has to run before it
+	// is kept.
+	Update       *update.System
+	UpdateURL    string
+	UpdateSettle time.Duration
+	BuildTime    time.Time
+	Log          *slog.Logger
+	Logs         *LogRing
 }
 
 // Event is an entry of the router's activity log.
@@ -68,6 +76,8 @@ type Event struct {
 type Core struct {
 	opt Options
 	log *slog.Logger
+
+	firmware firmware
 
 	store    *config.Store
 	cfg      *config.Config
@@ -275,6 +285,7 @@ func (c *Core) Run(ctx context.Context) error {
 	c.reconcile()
 	go c.ads.Run(ctx, c.online)
 	go c.runGeoUpdates(ctx)
+	go c.settleUpdate(ctx)
 	system.Notify("READY=1")
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()

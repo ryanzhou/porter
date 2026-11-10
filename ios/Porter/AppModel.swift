@@ -26,6 +26,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var knownRouters: [KnownRouter] = []
     /// Progress of the speed test currently running, if any.
     @Published private(set) var speedTestProgress: SpeedTestProgress?
+    /// The state of a software update being installed, if the router has
+    /// reported one in this session.
+    @Published private(set) var firmwareProgress: FirmwareProgress?
     /// A message for the user; views present it as an alert and clear it.
     @Published var errorMessage: String?
 
@@ -178,6 +181,8 @@ final class AppModel: ObservableObject {
                     if entry.kind == "device" { try? await self.refreshDevices() }
                 case .speedTest(let progress):
                     self.speedTestProgress = progress.phase == "done" ? nil : progress
+                case .firmware(let progress):
+                    self.firmwareProgress = progress
                 }
             }
             // The stream ends when the link is lost.
@@ -201,6 +206,7 @@ final class AppModel: ObservableObject {
         devices = []
         radios = []
         speedTestProgress = nil
+        firmwareProgress = nil
         phase = .searching
         central.startScanning()
     }

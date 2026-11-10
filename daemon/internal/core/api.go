@@ -879,6 +879,19 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		}
 		return nil, nil
 
+	case "firmware.check":
+		info, _, perr := c.firmwareCheck()
+		if perr != nil {
+			return nil, perr
+		}
+		return info, nil
+
+	case "firmware.install":
+		return nil, c.firmwareInstall()
+
+	case "firmware.status":
+		return c.firmwareProgress(), nil
+
 	case "events.list":
 		c.evMu.Lock()
 		out := append([]Event{}, c.events...)

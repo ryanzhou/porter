@@ -226,6 +226,20 @@ Profiles are part of the configuration. Helpers:
 The app sends `system.set_time` at the start of every session: the Pi has
 no battery-backed clock.
 
+### Software updates
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `firmware.check` | – | `{current,supported,latest?,newer,download?,built?}` – asks the release server now |
+| `firmware.install` | – | `{}` – starts installing the newest release |
+| `firmware.status` | – | `{state,phase?,percent,version?,error?}` |
+
+`supported` is false on a card without the two-slot layout. An
+installation runs in the background and reports as `firmware` events;
+it ends with the router restarting, which drops the session. `state` is
+`idle`, `installing` or `failed`; `phase` is `download`, `verify` or
+`restart`.
+
 ### Events
 
 | Event | Data |
@@ -233,3 +247,4 @@ no battery-backed clock.
 | `status` | Status, whenever something other than a counter changed |
 | `event` | `{t,kind,msg,mac?}` – a new activity log entry |
 | `speedtest` | `{phase: "latency"\|"download"\|"upload"\|"done", mbps}` – progress of a running test |
+| `firmware` | the result of `firmware.status`, whenever it changes |

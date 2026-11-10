@@ -1,7 +1,14 @@
 # The root file system is never written to at run time. Everything that
 # must survive a reboot lives on /data; everything else is in RAM.
-PARTUUID=504f5254-02  /               ext4   ro,noatime                            0 1
+#
+# There is no line for / here: the kernel mounts it, read-only, from the
+# partition its command line names, which is slot A's or slot B's
+# depending on which one was started.
+#
+# /boot/firmware is the small first partition: the boot loader's choice of
+# slot (autoboot.txt) and the porter-debug marker. Not the kernel; that is
+# on the slot's own boot partition, which nothing needs mounted.
 PARTUUID=504f5254-01  /boot/firmware  vfat   ro,noatime,nofail,umask=0077          0 2
-PARTUUID=504f5254-03  /data           ext4   rw,noatime,nofail,x-systemd.device-timeout=10s  0 2
+PARTUUID=504f5254-07  /data           ext4   rw,noatime,nofail,x-systemd.device-timeout=10s  0 2
 tmpfs                 /var            tmpfs  mode=0755,nosuid,nodev,size=128m      0 0
 tmpfs                 /tmp            tmpfs  mode=1777,nosuid,nodev,size=64m       0 0

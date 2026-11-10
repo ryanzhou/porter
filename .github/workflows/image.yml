@@ -28,13 +28,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends mmdebstrap qemu-user-static binfmt-support arch-test \
             dosfstools mtools fdisk e2fsprogs xz-utils gpg curl
       - name: Build image
-        run: sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" image/build.sh "$PWD/build"
+        env:
+          # Signs the release's update files. Without the secret they are
+          # published unsigned, which a router accepts only if its image
+          # was built without image/keys/update.pub.
+          PORTER_UPDATE_KEY: ${{ secrets.PORTER_UPDATE_KEY }}
+        run: |
+          sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "PORTER_UPDATE_KEY=$PORTER_UPDATE_KEY" image/build.sh "$PWD/build"
       - uses: actions/upload-artifact@v4
         with:
           name: porter-image
           path: |
             build/*.img.xz
             build/*.sha256
+            build/*.gz
+            build/update.json*
           compression-level: 0
           retention-days: 30
       - name: Publish the release
@@ -45,15 +54,15 @@ jobs:
         run: |
           set -euo pipefail
           cat > notes.md <<EOF
-          Flash \`porter-$TAG.img.xz\` with Raspberry Pi Imager; the README has the steps.
+          A router already running Porter updates itself: in the app, Settings, Software. Settings and pairings are kept.
 
-          Flashing replaces the router's settings and pairings. In the app, forget the router, then pair and set it up again. Build the app from the source at this tag.
+          For a new card, flash \`porter-$TAG.img.xz\` with Raspberry Pi Imager; the README has the steps. Its SHA-256 is in \`porter-$TAG.img.xz.sha256\`. Build the app from the source at this tag.
 
-          SHA-256 of the image is in \`porter-$TAG.img.xz.sha256\`.
+          The other files (\`update.json\`, \`*-boot.vfat.gz\`, \`*-root.ext4.gz\`) are what routers download to update; there is no need to fetch them by hand.
           EOF
           sed -i 's/^          //' notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" build/*.img.xz build/*.sha256 --clobber
+            gh release upload "$TAG" build/*.img.xz build/*.sha256 build/*.gz build/update.json* --clobber
           else
-            gh release create "$TAG" build/*.img.xz build/*.sha256 --title "Porter $TAG" --notes-file notes.md --generate-notes --verify-tag
+            gh release create "$TAG" build/*.img.xz build/*.sha256 build/*.gz build/update.json* --title "Porter $TAG" --notes-file notes.md --generate-notes --verify-tag
           fi

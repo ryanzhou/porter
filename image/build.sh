@@ -16,8 +16,24 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(dirname "$HERE")
 OUT=${1:-$REPO/build}
 SUITE=trixie
-DISK_ID=504f5254          # must match fstab, cmdline.txt and ensure-data
+DISK_ID=504f5254          # must match fstab, cmdline.txt, ensure-data and the updater
+# The card holds the system twice, so that an update can be written beside
+# the running system and tried without giving the running one up:
+#
+#   1  selector  FAT   autoboot.txt: which boot partition to start
+#   2  boot A    FAT   kernel, device trees, kernel command line
+#   3  boot B    FAT
+#   4  (extended)
+#   5  root A    ext4  read-only root file system
+#   6  root B    ext4
+#   7  data      ext4  settings; shared by both
+#
+# The numbers are fixed: the boot loader, the kernel command line and
+# daemon/internal/update all go by them. Slot sizes are fixed too, since
+# every later version has to fit the partitions of a card flashed today.
+SELECT_MB=64
 BOOT_MB=128
+ROOT_SLOT_MB=1024
 DATA_MB=256
 
 VERSION=${PORTER_VERSION:-$(git -C "$REPO" describe --tags --always --dirty 2>/dev/null || echo dev)}
@@ -39,9 +55,14 @@ ROOT=$WORK/root
 mkdir -p "$OUT"
 
 echo "==> porterd $VERSION (arm64)"
+# Routers look for updates in the releases of the repository their image
+# was built from.
+RELEASES=${PORTER_UPDATE_URL:-https://github.com/${GITHUB_REPOSITORY:-ryanzhou/porter}/releases/latest/download/}
 ( cd "$REPO/daemon" && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-    -ldflags "-s -w -X main.version=$VERSION -X main.buildTime=$BUILD_TIME" \
+    -ldflags "-s -w -X main.version=$VERSION -X main.buildTime=$BUILD_TIME -X main.releases=$RELEASES" \
     -o "$WORK/bin/" ./cmd/porterd ./cmd/porterctl )
+# The tool that describes and signs a release runs here, not on the router.
+( cd "$REPO/daemon" && CGO_ENABLED=0 go build -trimpath -o "$WORK/host/" ./cmd/porter-release )
 
 echo "==> package signing keys"
 gpg --batch --yes --dearmor -o "$WORK/rpi.gpg" < "$HERE/keys/raspberrypi-archive.asc"
@@ -108,6 +129,13 @@ install -m 755 "$WORK/bin/porterd" "$ROOT/usr/sbin/porterd"
 install -m 755 "$WORK/bin/porterctl" "$ROOT/usr/sbin/porterctl"
 mkdir -p "$ROOT/data" "$ROOT/boot/firmware"
 printf 'PORTER_VERSION=%s\nPORTER_BUILD_TIME=%s\n' "$VERSION" "$BUILD_TIME" > "$ROOT/etc/porter-release"
+# With a key here, the router installs only updates signed with it.
+if [ -f "$HERE/keys/update.pub" ]; then
+    install -m 644 "$HERE/keys/update.pub" "$ROOT/usr/lib/porter/update.pub"
+    echo "    updates must be signed with image/keys/update.pub"
+else
+    echo "    no image/keys/update.pub: updates are trusted on the HTTPS connection alone"
+fi
 
 if [ -n "$GEO_DATE" ]; then
     install -D -m 644 "$WORK/geoip.csv.gz" "$ROOT/usr/share/porter/geoip.csv.gz"
@@ -142,7 +170,7 @@ $SYSTEMCTL mask hostapd.service wpa_supplicant.service sshd-keygen.service \
     e2scrub_reap.service systemd-pstore.service systemd-random-seed.service \
     systemd-update-utmp.service systemd-machine-id-commit.service 2>/dev/null || true
 $SYSTEMCTL disable ssh.service ssh.socket 2>/dev/null || true
-$SYSTEMCTL enable porterd.service bluetooth.service systemd-timesyncd.service
+$SYSTEMCTL enable porterd.service porter-update-guard.service bluetooth.service systemd-timesyncd.service
 
 # Trim what was only needed to install packages.
 rm -rf "$ROOT"/var/lib/apt/lists/* "$ROOT"/var/cache/apt/* "$ROOT"/var/log/*.log "$ROOT"/var/log/apt
@@ -155,29 +183,52 @@ cp "$ROOT/boot/firmware/kernel_2712.img" "$BOOT/"
 cp "$ROOT"/boot/firmware/bcm2712*.dtb "$BOOT/"
 cp -r "$ROOT/boot/firmware/overlays" "$BOOT/"
 cp "$ROOT/boot/firmware/LICENCE.broadcom" "$BOOT/" 2>/dev/null || true
-cp "$HERE/boot/config.txt" "$HERE/boot/cmdline.txt" "$HERE/boot/README.txt" "$BOOT/"
-# The files live on the FAT partition; the directory is its mount point.
+cp "$HERE/boot/config.txt" "$HERE/boot/cmdline.txt" "$BOOT/"
+# The selector partition is mounted here; the directory is its mount point.
 rm -rf "$ROOT/boot/firmware" && mkdir "$ROOT/boot/firmware"
 
-truncate -s "${BOOT_MB}M" "$WORK/boot.vfat"
-mkfs.vfat -F 32 -n BOOTFS -i "${DISK_ID}" "$WORK/boot.vfat" >/dev/null
-mcopy -s -i "$WORK/boot.vfat" "$BOOT"/* ::/
+# One boot image serves both slots. Its kernel command line names slot A's
+# root partition; the updater rewrites that when it installs into slot B.
+grep -q "root=PARTUUID=$DISK_ID-05 " "$BOOT/cmdline.txt" || { echo "cmdline.txt must name root=PARTUUID=$DISK_ID-05" >&2; exit 1; }
+BOOT_IMG=$WORK/porter-$VERSION-boot.vfat
+truncate -s "${BOOT_MB}M" "$BOOT_IMG"
+mkfs.vfat -F 32 -n PORTERBOOT -i 504f5242 "$BOOT_IMG" >/dev/null
+mcopy -s -i "$BOOT_IMG" "$BOOT"/* ::/
+
+echo "==> selector partition"
+# Slot A is the one to start, also when asked for a trial: slot B is empty
+# until the first update.
+SELECT=$WORK/select
+mkdir -p "$SELECT"
+printf '[all]\ntryboot_a_b=1\nboot_partition=2\n[tryboot]\nboot_partition=2\n' > "$SELECT/autoboot.txt"
+cp "$HERE/boot/README.txt" "$SELECT/"
+truncate -s "${SELECT_MB}M" "$WORK/select.vfat"
+mkfs.vfat -F 32 -n BOOTFS -i "${DISK_ID}" "$WORK/select.vfat" >/dev/null
+mcopy -s -i "$WORK/select.vfat" "$SELECT"/* ::/
 
 echo "==> root and data partitions"
 ROOT_KB=$(du -sk --apparent-size "$ROOT" | cut -f1)
 ROOT_MB=$(( ROOT_KB * 125 / 100 / 1024 + 96 ))
-truncate -s "${ROOT_MB}M" "$WORK/root.ext4"
-mkfs.ext4 -q -F -L rootfs -d "$ROOT" "$WORK/root.ext4"
+[ "$ROOT_MB" -le "$ROOT_SLOT_MB" ] || { echo "the root file system (${ROOT_MB} MB) no longer fits its ${ROOT_SLOT_MB} MB slot" >&2; exit 1; }
+echo "    root file system: ${ROOT_MB} MB of a ${ROOT_SLOT_MB} MB slot"
+ROOT_IMG=$WORK/porter-$VERSION-root.ext4
+truncate -s "${ROOT_MB}M" "$ROOT_IMG"
+mkfs.ext4 -q -F -L rootfs -d "$ROOT" "$ROOT_IMG"
 mkdir -p "$WORK/data"
 truncate -s "${DATA_MB}M" "$WORK/data.ext4"
 mkfs.ext4 -q -F -L porter-data -d "$WORK/data" "$WORK/data.ext4"
 
 echo "==> disk image"
 IMG=$OUT/porter-$VERSION.img
-ALIGN_MB=4
-BOOT_START=$ALIGN_MB
-ROOT_START=$(( BOOT_START + BOOT_MB ))
-DATA_START=$(( ROOT_START + ROOT_MB ))
+SELECT_START=4
+BOOTA_START=$(( SELECT_START + SELECT_MB ))
+BOOTB_START=$(( BOOTA_START + BOOT_MB ))
+EXT_START=$(( BOOTB_START + BOOT_MB ))
+# Each partition inside the extended one is preceded by a megabyte for its
+# own little partition table.
+ROOTA_START=$(( EXT_START + 1 ))
+ROOTB_START=$(( ROOTA_START + ROOT_SLOT_MB + 1 ))
+DATA_START=$(( ROOTB_START + ROOT_SLOT_MB + 1 ))
 TOTAL_MB=$(( DATA_START + DATA_MB ))
 rm -f "$IMG" "$IMG.xz"
 truncate -s "${TOTAL_MB}M" "$IMG"
@@ -185,16 +236,37 @@ sfdisk --quiet "$IMG" <<PARTS
 label: dos
 label-id: 0x$DISK_ID
 unit: sectors
-start=$(( BOOT_START * 2048 )), size=$(( BOOT_MB * 2048 )), type=c, bootable
-start=$(( ROOT_START * 2048 )), size=$(( ROOT_MB * 2048 )), type=83
+start=$(( SELECT_START * 2048 )), size=$(( SELECT_MB * 2048 )), type=c, bootable
+start=$(( BOOTA_START * 2048 )), size=$(( BOOT_MB * 2048 )), type=c
+start=$(( BOOTB_START * 2048 )), size=$(( BOOT_MB * 2048 )), type=c
+start=$(( EXT_START * 2048 )), size=$(( (TOTAL_MB - EXT_START) * 2048 )), type=5
+start=$(( ROOTA_START * 2048 )), size=$(( ROOT_SLOT_MB * 2048 )), type=83
+start=$(( ROOTB_START * 2048 )), size=$(( ROOT_SLOT_MB * 2048 )), type=83
 start=$(( DATA_START * 2048 )), size=$(( DATA_MB * 2048 )), type=83
 PARTS
-dd if="$WORK/boot.vfat" of="$IMG" bs=1M seek=$BOOT_START conv=notrunc,sparse status=none
-dd if="$WORK/root.ext4" of="$IMG" bs=1M seek=$ROOT_START conv=notrunc,sparse status=none
+# The layout is a promise to every later update; make sure it came out as
+# intended.
+LAYOUT=$(sfdisk -d "$IMG" | grep -c "^$IMG[1-7] ")
+[ "$LAYOUT" = 7 ] || { echo "the partition table did not come out with seven partitions" >&2; sfdisk -l "$IMG" >&2; exit 1; }
+dd if="$WORK/select.vfat" of="$IMG" bs=1M seek=$SELECT_START conv=notrunc,sparse status=none
+dd if="$BOOT_IMG" of="$IMG" bs=1M seek=$BOOTA_START conv=notrunc,sparse status=none
+dd if="$ROOT_IMG" of="$IMG" bs=1M seek=$ROOTA_START conv=notrunc,sparse status=none
 dd if="$WORK/data.ext4" of="$IMG" bs=1M seek=$DATA_START conv=notrunc,sparse status=none
 
 echo "==> compressing"
 xz -T0 -6 -f "$IMG"
 ( cd "$OUT" && sha256sum "$(basename "$IMG").xz" > "$(basename "$IMG").xz.sha256" )
 ls -lh "$IMG.xz"
+
+echo "==> update files"
+# What a router downloads to update itself: the two partition images of a
+# slot, and a description of them (signed, with PORTER_UPDATE_KEY set).
+rm -f "$OUT"/porter-*-boot.vfat.gz "$OUT"/porter-*-root.ext4.gz "$OUT/update.json" "$OUT/update.json.sig"
+"$WORK/host/porter-release" describe "$VERSION" "$BUILD_TIME" "$BOOT_IMG" "$ROOT_IMG" "$OUT"
+mv "$BOOT_IMG.gz" "$ROOT_IMG.gz" "$OUT/"
+if [ -f "$HERE/keys/update.pub" ] && [ ! -f "$OUT/update.json.sig" ]; then
+    echo "image/keys/update.pub exists but PORTER_UPDATE_KEY is not set: routers built from this tree would refuse this release" >&2
+    [ "${PORTER_ALLOW_UNSIGNED:-0}" = 1 ] || exit 1
+fi
+ls -lh "$OUT"/porter-*-boot.vfat.gz "$OUT"/porter-*-root.ext4.gz
 echo "==> done: $IMG.xz (${TOTAL_MB} MB uncompressed)"

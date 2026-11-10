@@ -75,6 +75,8 @@ struct DemoScreen: View {
             NavigationStack { AdblockPage() }
         case "device":
             NavigationStack { DeviceDetailView(mac: model.devices.first?.mac ?? "") }
+        case "software":
+            NavigationStack { SoftwarePage() }
         case "setup":
             NavigationStack { SetupView() }
         case "connect":

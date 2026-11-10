@@ -32,7 +32,7 @@ and can send some or all of your traffic through your VPN.
 ## What you need
 
 - A **Raspberry Pi 5** with its power supply (any RAM size)
-- A **microSD card**, 2 GB or larger
+- A **microSD card**, 4 GB or larger
 - An **iPhone** on iOS 17 or later
 - A **Mac with Xcode 16** or later, to put the app on your phone
 - Optional: an Ethernet cable for a wired uplink, a USB Wi-Fi adapter
@@ -242,16 +242,20 @@ settings and pairings. Re-flashing the card does the same.
 
 ## Good to know
 
-- **Updating** means flashing the image from a newer
-  [release](https://github.com/ryanzhou/porter/releases). That also
-  erases your settings; there is no backup and restore yet. Forget the
-  router in the app before pairing again, and update the app from the
-  same version of the source.
+- **Updating.** Settings → Software shows the router's version and
+  whether a newer [release](https://github.com/ryanzhou/porter/releases)
+  exists; **Install** downloads it, restarts into it and keeps your
+  settings. The card holds the system twice: the update goes into the
+  spare copy, and if the new version does not come up properly the
+  router goes back to the one before. The router only looks for updates
+  when you open that page. Update the app from the same version of the
+  source. (A card flashed before v0.1.0 has to be flashed once more.)
 - **What the router contacts by itself:** a time server; one small page
   on `captive.apple.com` to detect sign-in pages (the same check an
   iPhone makes); your chosen ad block lists, daily, when ad blocking is
   on; and a country database from db-ip.com, monthly. A speed test
-  contacts its test server only when you run one. Nothing reports to
+  contacts its test server only when you run one, and the router asks
+  github.com for a newer version only when you open Settings → Software. Nothing reports to
   the authors of this project; there is nowhere for it to report to.
 - **Security.** The app's connection to the router is encrypted and
   authenticated independently of Bluetooth pairing, and a phone can only

@@ -61,7 +61,7 @@ jobs:
           xcrun simctl status_bar "$udid" override --time "9:41" --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 || true
           xcrun simctl install "$udid" "$app"
           mkdir -p screenshots
-          for screen in overview internet devices vpn settings traffic flows speedtest device adblock setup connect share; do
+          for screen in overview internet devices vpn settings traffic flows speedtest device adblock setup connect share software; do
             xcrun simctl launch "$udid" com.example.porter -demo -demoScreen "$screen"
             sleep 6
             xcrun simctl io "$udid" screenshot "screenshots/$screen.png"
