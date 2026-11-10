@@ -63,6 +63,7 @@ func TestWifi(t *testing.T) {
 			try("ip netns del %s", ns)
 		}
 		try("modprobe -r mac80211_hwsim")
+		try("iw reg set 00")
 		os.RemoveAll(run)
 	}
 	cleanup()
@@ -107,6 +108,15 @@ func TestWifi(t *testing.T) {
 	if len(phys) < 5 {
 		t.Skipf("expected 5 simulated radios, found %d", len(phys))
 	}
+	// The regulatory domain belongs to the machine, not to a network
+	// namespace, and only the first namespace may set it. Without one,
+	// nothing may transmit first on 5 GHz, so the hotel could not have an
+	// access point there.
+	sh(t, "iw reg set US")
+	eventually(t, "regulatory domain set", 10*time.Second, func() bool {
+		out, _ := exec.Command("iw", "reg", "get").Output()
+		return strings.Contains(string(out), "country US")
+	})
 	for _, ns := range []string{nsHotel, nsRouter, nsClient} {
 		sh(t, "ip netns add %s && ip -n %s link set lo up", ns, ns)
 	}
