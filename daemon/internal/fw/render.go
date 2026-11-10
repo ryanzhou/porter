@@ -166,7 +166,9 @@ func render(p *Plan, full bool) string {
 	w("\t\tiifname \"lo\" accept")
 	w("\t\tct state established,related accept")
 	w("\t\tct state invalid drop")
-	w("\t\tmeta l4proto ipv6-icmp accept")
+	// "icmpv6" is a word nft knows by itself. Its other name, "ipv6-icmp",
+	// is looked up in /etc/protocols, which the router image does not have.
+	w("\t\tmeta l4proto icmpv6 accept")
 	w("\t\ticmp type echo-request limit rate 20/second accept")
 	w("\t\tiifname %q meta l4proto { tcp, udp } th dport 53 accept", LANBridge)
 	w("\t\tiifname %q udp dport { 67, 547 } accept", LANBridge)

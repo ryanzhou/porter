@@ -155,10 +155,7 @@ func TestWifi(t *testing.T) {
 	}))
 
 	// --- the router -----------------------------------------------------------------
-	bin := filepath.Join(dir, "porterd")
-	if out, err := exec.Command("go", "build", "-o", bin, "../cmd/porterd").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
+	bin := daemonBinary(t, dir)
 	start("porterd", "porterd.log", "ip", "netns", "exec", nsRouter, bin, "-data", filepath.Join(dir, "data"), "-run", run, "-no-ble", "-debug")
 	var c *client.Client
 	eventually(t, "control socket", 10*time.Second, func() bool {

@@ -114,6 +114,17 @@ need root and `ip`, `nft`, `dnsmasq`, `dhcpcd` and `wg`:
 cd daemon && sudo go test -tags e2e -count=1 -v ./e2e/
 ```
 
+A development machine has more installed, and other versions of it, than
+the router does. To run the same tests against what the router actually
+runs (Debian with exactly the packages in `image/packages`, built for
+this machine's architecture):
+
+```bash
+sudo daemon/e2e/in-image-userland.sh
+```
+
+CI runs the end-to-end tests this way.
+
 - `TestRouter` simulates an upstream network (DHCP, router
   advertisements, DNS, a captive portal, a WireGuard server, block lists
   and a country database to download) and two client devices, and checks
@@ -164,7 +175,7 @@ screen directly: a tab name (`overview`, `internet`, `devices`, `vpn`,
 
 | Workflow | Runs on | Does |
 |---|---|---|
-| Daemon | pushes touching `daemon/` | unit tests, kernel-level firewall tests, both end-to-end tests |
+| Daemon | pushes touching `daemon/` | unit tests, kernel-level firewall tests, both end-to-end tests inside the image's userland |
 | iOS | pushes touching `ios/` | PorterKit tests, app build for the simulator, screenshots |
 | Image | manually, and on `v*` tags | builds the SD card image as an artifact |
 

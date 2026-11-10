@@ -2,7 +2,7 @@ name: Daemon
 
 on:
   push:
-    paths: ["daemon/**", "ios/PorterKit/Tests/PorterKitTests/Resources/**", ".github/workflows/daemon.yml"]
+    paths: ["daemon/**", "image/packages", "ios/PorterKit/Tests/PorterKitTests/Resources/**", ".github/workflows/daemon.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -39,6 +39,10 @@ jobs:
       - name: Kernel-level tests (firewall, policy routing) as root
         working-directory: daemon
         run: sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" go test -count=1 -v ./internal/fw/
-      - name: End-to-end test in network namespaces
-        working-directory: daemon
-        run: sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" go test -tags e2e -count=1 -v -timeout 10m ./e2e/
+      - name: The same tests, and the end-to-end tests, inside the image's userland
+        # Debian with exactly the image's packages, so that the versions of
+        # nft, dnsmasq, dhcpcd, hostapd and wpa_supplicant are the router's
+        # and nothing the image lacks is there to lean on.
+        run: |
+          sudo apt-get install -y --no-install-recommends mmdebstrap
+          sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" daemon/e2e/in-image-userland.sh

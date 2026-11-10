@@ -205,10 +205,7 @@ func TestRouter(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(run) })
 
-	bin := filepath.Join(dir, "porterd")
-	if out, err := exec.Command("go", "build", "-o", bin, "../cmd/porterd").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
+	bin := daemonBinary(t, dir)
 
 	var procs []*exec.Cmd
 	start := func(name string, logTo string, argv ...string) *exec.Cmd {
@@ -860,7 +857,9 @@ func TestRouter(t *testing.T) {
 		// Captive portal while a device is kill-switched: only the portal
 		// device gets through, straight to the upstream network.
 		setCaptive(true)
-		eventually(t, "captive portal detected", 30*time.Second, func() bool {
+		// A working uplink is probed every 45 seconds, so that is how long
+		// noticing can take.
+		eventually(t, "captive portal detected", 60*time.Second, func() bool {
 			s := getStatus()
 			return s.Internet == "captive" && s.Portal.Captive
 		})
@@ -949,4 +948,19 @@ func TestRouter(t *testing.T) {
 		b, _ := json.Marshal(kinds)
 		t.Logf("events: %s", b)
 	})
+}
+
+// daemonBinary returns the porterd to test: the one PORTER_E2E_BIN names
+// (for running the compiled tests somewhere without a Go toolchain, such
+// as inside the image's userland), or else one built from this tree.
+func daemonBinary(t *testing.T, dir string) string {
+	t.Helper()
+	if bin := os.Getenv("PORTER_E2E_BIN"); bin != "" {
+		return bin
+	}
+	bin := filepath.Join(dir, "porterd")
+	if out, err := exec.Command("go", "build", "-o", bin, "../cmd/porterd").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	return bin
 }
