@@ -33,7 +33,6 @@ public struct SpeedTestConfig: Codable, Equatable {
 public struct SystemConfig: Codable, Equatable {
     public var name: String
     public var country: String
-    public var ntp: Bool
     public var ssh: SSHConfig
 }
 
@@ -108,7 +107,6 @@ public struct SavedNetwork: Codable, Equatable, Identifiable {
 }
 
 public struct ProbeConfig: Codable, Equatable {
-    public var enabled: Bool
     public var url: String
     public var expect: String
 }

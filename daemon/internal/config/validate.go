@@ -300,14 +300,12 @@ func (c *Config) validateWAN() error {
 	if err := validMACPolicy(w.EthMAC, "wan.eth_mac"); err != nil {
 		return err
 	}
-	if w.Probe.Enabled {
-		u, err := url.Parse(w.Probe.URL)
-		if err != nil || u.Scheme != "http" || u.Hostname() == "" {
-			return fmt.Errorf("probe URL must be a plain http:// URL")
-		}
-		if w.Probe.Expect == "" || len(w.Probe.Expect) > 128 {
-			return fmt.Errorf("probe needs an expected response text")
-		}
+	u, err := url.Parse(w.Probe.URL)
+	if err != nil || u.Scheme != "http" || u.Hostname() == "" {
+		return fmt.Errorf("probe URL must be a plain http:// URL")
+	}
+	if w.Probe.Expect == "" || len(w.Probe.Expect) > 128 {
+		return fmt.Errorf("probe needs an expected response text")
 	}
 	return nil
 }

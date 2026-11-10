@@ -8,13 +8,6 @@ struct SettingsView: View {
     var body: some View {
         List {
             RouterSettingsSection()
-            Section {
-                Toggle("Set the clock from the network", isOn: model.binding(\.system.ntp, fallback: true))
-            } header: {
-                Text("Time")
-            } footer: {
-                Text("Uses NTP when the router is online. This phone also sets the router's clock each time it connects, so this can be off.")
-            }
             Section("Access and history") {
                 NavigationLink("Paired phones") { PairedPhonesPage() }
                 NavigationLink("Activity") { ActivityPage() }

@@ -28,7 +28,6 @@ const (
 	StLimited    = "limited"    // address, but the probe gets no answer
 	StCaptive    = "captive"    // a captive portal intercepts traffic
 	StOnline     = "online"
-	StUnknown    = "unknown" // address, probing disabled
 )
 
 // Uplink is an interface to use as WAN.
@@ -296,9 +295,7 @@ func (m *Manager) refresh() {
 			st.Internet, st.PortalURL = StDown, ""
 		case !hasAddr:
 			st.Internet, st.PortalURL = StConnecting, ""
-		case !m.probe.Enabled:
-			st.Internet, st.PortalURL = StUnknown, ""
-		case st.Internet == StDown || st.Internet == StConnecting || st.Internet == StUnknown:
+		case st.Internet == StDown || st.Internet == StConnecting:
 			st.Internet = StLimited
 			u.probeAt = time.Time{}
 		}
@@ -306,7 +303,7 @@ func (m *Manager) refresh() {
 			changed = true
 		}
 		u.st = st
-		if hasAddr && st.Carrier && m.probe.Enabled && !u.probing && !now.Before(u.probeAt) {
+		if hasAddr && st.Carrier && !u.probing && !now.Before(u.probeAt) {
 			u.probing = true
 			go m.runProbe(u, m.probe, st.DNS)
 		}

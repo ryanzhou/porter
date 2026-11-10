@@ -414,7 +414,7 @@ func TestRouter(t *testing.T) {
 				cfg.Ethernet[i].Role = config.EthLAN
 			}
 		}
-		cfg.WAN.Probe = config.Probe{Enabled: true, URL: "http://probe.test/ok", Expect: "Success"}
+		cfg.WAN.Probe = config.Probe{URL: "http://probe.test/ok", Expect: "Success"}
 		cfg.SpeedTest = config.SpeedTest{DownloadURL: "http://" + siteA + "/down", UploadURL: "http://" + siteA + "/up"}
 	})
 

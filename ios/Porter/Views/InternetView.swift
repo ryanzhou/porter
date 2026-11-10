@@ -14,7 +14,6 @@ struct InternetView: View {
             RadiosSection()
             WiredPortsSection()
             UpstreamIdentitySection()
-            ProbeSection()
         }
         .navigationTitle("Internet")
         .refreshable { await model.refresh() }
@@ -655,28 +654,6 @@ private struct MACPolicyRows: View {
             if ok && mode == .custom {
                 enteringCustom = false
             }
-        }
-    }
-}
-
-// MARK: - Connectivity check
-
-private struct ProbeSection: View {
-    @EnvironmentObject private var model: AppModel
-
-    private var footer: String {
-        let url = model.config?.wan.probe.url ?? ""
-        let what = url.isEmpty ? "one small page" : "one small page (\(url))"
-        return "The router fetches \(what) now and then to tell whether the internet is reachable and to notice sign-in pages. When this is off, it cannot detect sign-in pages and shows uplinks as not checked."
-    }
-
-    var body: some View {
-        Section {
-            Toggle("Check connectivity", isOn: model.binding(\.wan.probe.enabled, fallback: true))
-        } header: {
-            Text("Connectivity check")
-        } footer: {
-            Text(footer)
         }
     }
 }

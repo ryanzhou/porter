@@ -248,7 +248,7 @@ func TestWifi(t *testing.T) {
 	editConfig(func(cfg *config.Config) {
 		cfg.System.Country = "US"
 		cfg.AP.SSID, cfg.AP.Passphrase = ssid, pass
-		cfg.WAN.Probe = config.Probe{Enabled: true, URL: "http://probe.test/ok", Expect: "Success"}
+		cfg.WAN.Probe = config.Probe{URL: "http://probe.test/ok", Expect: "Success"}
 		for i := range cfg.Radios {
 			switch cfg.Radios[i].ID {
 			case apRadio.ID:

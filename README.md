@@ -4,9 +4,9 @@ A travel router for the Raspberry Pi 5, controlled from an iPhone over
 Bluetooth Low Energy.
 
 Porter is its own router software on a minimal Debian base, not a
-distribution of an existing router OS. There is no cloud service, no
-account, no telemetry and no update channel: the image and the app are the
-whole product.
+distribution of an existing router OS. The router and the app are the
+only two components: there is no server anywhere, so no cloud control
+plane, no account, no central management and no automatic updates.
 
 | Part | Where | What |
 |------|-------|------|
@@ -180,13 +180,13 @@ place if the daemon restarts.
 
 ## Things to know
 
-- **Time.** The Pi 5 has no clock battery by default. The app sets the
-  router's clock at the start of every session, the last known time is
-  restored at boot, and NTP runs when enabled (*Settings → Time*).
-- **Connectivity check.** To tell a captive portal from a working
-  uplink the router fetches one small page (by default Apple's
-  `captive.apple.com`, the same one an iPhone asks). The URL can be
-  changed or the check switched off under *Internet*.
+- **Time.** The Pi 5 has no clock battery by default. The router keeps
+  time by NTP, the app also sets its clock at the start of every session
+  (which covers a router that is not online yet), and the last known time
+  is restored at boot.
+- **Connectivity check.** To tell a captive portal from a working uplink
+  the router fetches one small page every so often (Apple's
+  `captive.apple.com`, the same one an iPhone asks).
 - **Country database.** The image build downloads DB-IP's free "IP to
   Country Lite" database (CC BY 4.0, attribution in the app's About
   page) and bakes it in; the router never fetches it. It is as old as

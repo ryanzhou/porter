@@ -133,7 +133,7 @@ Status (`daemon/internal/core/api.go`):
 
 ```
 name id version time uptime temp ready rev pairing
-internet   "down" | "connecting" | "limited" | "captive" | "online" | "unknown"
+internet   "down" | "connecting" | "limited" | "captive" | "online"
 active     interface carrying the default route
 wan[]      {if kind metric carrier internet ipv4 gateway ipv6[] has_v6 dns[] portal_url captive_api mac}
 portal     {captive url device}

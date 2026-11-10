@@ -831,12 +831,11 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 }
 
 func (c *Core) applySystem(cfg *config.Config) {
-	key := fmt.Sprintf("%v|%+v", cfg.System.NTP, cfg.System.SSH)
+	key := fmt.Sprintf("%+v", cfg.System.SSH)
 	if key == c.sysKey {
 		return
 	}
 	c.sysKey = key
-	system.SetNTP(cfg.System.NTP)
 	if err := system.SetSSH(c.opt.DataDir, cfg.System.SSH.Enabled, cfg.System.SSH.AuthorizedKeys); err != nil {
 		c.log.Warn("SSH setup", "err", err)
 	}

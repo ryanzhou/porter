@@ -73,15 +73,6 @@ func ntpSynced() bool {
 	return err == nil
 }
 
-// SetNTP starts or stops network time synchronisation.
-func SetNTP(on bool) {
-	verb := "stop"
-	if on {
-		verb = "start"
-	}
-	_ = exec.Command("systemctl", "--no-block", verb, "systemd-timesyncd.service").Run()
-}
-
 // SetSSH starts or stops the SSH server and installs the authorized
 // keys. Host keys live on the data partition and are created on first
 // use.

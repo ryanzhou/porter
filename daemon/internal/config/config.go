@@ -57,9 +57,6 @@ type System struct {
 	// Country is the ISO 3166-1 alpha-2 regulatory domain for all radios.
 	// Radios stay off until it is set.
 	Country string `json:"country"`
-	// NTP enables network time sync. Time is also set from the phone on
-	// every control session, so this can be switched off.
-	NTP bool `json:"ntp"`
 	// SSH enables an OpenSSH server reachable from the LAN only.
 	SSH SSH `json:"ssh"`
 }
@@ -154,7 +151,6 @@ type WAN struct {
 }
 
 type Probe struct {
-	Enabled bool `json:"enabled"`
 	// URL must be plain HTTP and return a body containing Expect when the
 	// internet is reachable.
 	URL    string `json:"url"`
@@ -290,7 +286,7 @@ type Device struct {
 func Default() *Config {
 	return &Config{
 		Version: SchemaVersion,
-		System:  System{Name: "Porter", NTP: true},
+		System:  System{Name: "Porter"},
 		Radios:  []Radio{{ID: "builtin", Role: RoleAP, Band: "5"}},
 		Ethernet: []EthPort{
 			{Name: "eth0", Role: EthWAN},
@@ -300,9 +296,8 @@ func Default() *Config {
 			WifiMAC: MACPolicy{Mode: MACHardware},
 			EthMAC:  MACPolicy{Mode: MACHardware},
 			Probe: Probe{
-				Enabled: true,
-				URL:     "http://captive.apple.com/hotspot-detect.html",
-				Expect:  "Success",
+				URL:    "http://captive.apple.com/hotspot-detect.html",
+				Expect: "Success",
 			},
 		},
 		LAN: LAN{

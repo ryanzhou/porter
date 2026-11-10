@@ -134,15 +134,15 @@ chmod 555 "$ROOT/etc/bluetooth"
 rm -f "$ROOT"/boot/initrd.img-* "$ROOT"/boot/firmware/initramfs*
 
 # porterd runs hostapd, wpa_supplicant, dnsmasq and dhcpcd itself and
-# switches SSH and time sync on demand; nothing may start them behind its
-# back, and nothing may try to update the system.
+# switches SSH on demand; nothing may start them behind its back, and
+# nothing may try to update the system. Network time sync stays on.
 SYSTEMCTL="systemctl --root=$ROOT --quiet"
 $SYSTEMCTL mask hostapd.service wpa_supplicant.service sshd-keygen.service \
     apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer e2scrub_all.timer \
     e2scrub_reap.service systemd-pstore.service systemd-random-seed.service \
     systemd-update-utmp.service systemd-machine-id-commit.service 2>/dev/null || true
-$SYSTEMCTL disable ssh.service ssh.socket systemd-timesyncd.service 2>/dev/null || true
-$SYSTEMCTL enable porterd.service bluetooth.service
+$SYSTEMCTL disable ssh.service ssh.socket 2>/dev/null || true
+$SYSTEMCTL enable porterd.service bluetooth.service systemd-timesyncd.service
 
 # Trim what was only needed to install packages.
 rm -rf "$ROOT"/var/lib/apt/lists/* "$ROOT"/var/cache/apt/* "$ROOT"/var/log/*.log "$ROOT"/var/log/apt
