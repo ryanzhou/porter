@@ -29,8 +29,10 @@ jobs:
       - name: Tools for the end-to-end test
         run: |
           sudo apt-get update -q
+          # wireless-regdb is for the kernel, which reads the regulatory
+          # database from this machine whatever userland the tests run in.
           sudo apt-get install -y --no-install-recommends dnsmasq-base dhcpcd-base wireguard-tools nftables iproute2 \
-            hostapd wpasupplicant iw rfkill
+            hostapd wpasupplicant iw rfkill wireless-regdb
           sudo modprobe wireguard
           # Simulated radios for the Wi-Fi test; it is skipped if the
           # runner's kernel does not ship the module.

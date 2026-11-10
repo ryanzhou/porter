@@ -112,8 +112,11 @@ func TestWifi(t *testing.T) {
 	// namespace, and only the first namespace may set it. Without one,
 	// nothing may transmit first on 5 GHz, so the hotel could not have an
 	// access point there.
+	// (The kernel reads the database for it from /lib/firmware on the
+	// machine itself: the wireless-regdb package.)
+	try("iw reg reload")
 	sh(t, "iw reg set US")
-	eventually(t, "regulatory domain set", 10*time.Second, func() bool {
+	eventually(t, "regulatory domain set (is wireless-regdb installed on this machine?)", 10*time.Second, func() bool {
 		out, _ := exec.Command("iw", "reg", "get").Output()
 		return strings.Contains(string(out), "country US")
 	})
