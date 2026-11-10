@@ -100,14 +100,21 @@ public final class BLECentral: NSObject, ObservableObject {
         } else {
             throw BLEError.connectionFailed("the router is not in range")
         }
-        links[id]?.close()
+        // An earlier link to this router has to be torn down now, not
+        // later: its teardown cancels the peripheral's connection, and
+        // must not land on the attempt that is about to start.
+        links[id]?.fail(BLEError.disconnected)
         let link = BLELink(peripheral: peripheral) { [weak central] in
             central?.cancelPeripheralConnection(peripheral)
         }
         links[id] = link
         central.connect(peripheral, options: nil)
         let watchdog = Task { [weak link] in
-            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            do {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            } catch {
+                return // cancelled: the link became ready (or failed) in time
+            }
             link?.fail(BLEError.timeout)
         }
         defer { watchdog.cancel() }
@@ -161,7 +168,20 @@ extension BLECentral: CBCentralManagerDelegate {
 
     public nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         MainActor.assumeIsolated {
-            links[peripheral.identifier]?.fail(BLEError.disconnected)
+            guard let link = links[peripheral.identifier] else { return }
+            if link.hasFailed {
+                // Already given up on; this is its connection ending.
+                links[peripheral.identifier] = nil
+                return
+            }
+            guard link.hasConnected else {
+                // This is the end of an earlier connection, cancelled just
+                // before the current attempt began. The attempt stands;
+                // asking again is harmless if it was never dropped.
+                central.connect(peripheral, options: nil)
+                return
+            }
+            link.fail(BLEError.disconnected)
             links[peripheral.identifier] = nil
         }
     }
@@ -182,6 +202,9 @@ public final class BLELink: NSObject, PacketTransport {
 
     private var failure: Error?
     private var isReady = false
+    /// Whether this link's own connection was ever established.
+    private(set) var hasConnected = false
+    var hasFailed: Bool { failure != nil }
     private var readyWaiters: [CheckedContinuation<Void, Error>] = []
     private var packets: [Data] = []
     private var packetWaiters: [CheckedContinuation<Data, Error>] = []
@@ -200,6 +223,8 @@ public final class BLELink: NSObject, PacketTransport {
     public var peripheralID: UUID { peripheral.identifier }
 
     func didConnect() {
+        guard failure == nil else { return }
+        hasConnected = true
         peripheral.discoverServices([PorterUUID.service])
     }
 
@@ -224,6 +249,11 @@ public final class BLELink: NSObject, PacketTransport {
         for w in sendQueue { w.resume() }
         sendQueue.removeAll()
         disconnect()
+    }
+
+    /// Gives up on the link, for a caller whose own deadline has passed.
+    public func abandon(_ error: Error = BLEError.timeout) {
+        fail(error)
     }
 
     /// Reads the unauthenticated Info characteristic.

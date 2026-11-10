@@ -108,10 +108,23 @@ final class AppModel: ObservableObject {
             let link = try await central.connect(to: peripheral)
             self.link = link
             let known = knownRouters.first { $0.peripheral == peripheral }
+            // The secure handshake and the first exchange get a deadline of
+            // their own: a router that accepts the Bluetooth connection but
+            // never answers must not leave the app waiting for ever.
+            let deadline = Task { [weak link] in
+                do {
+                    try await Task.sleep(nanoseconds: 15_000_000_000)
+                } catch {
+                    return // cancelled: the router answered
+                }
+                link?.abandon()
+            }
+            defer { deadline.cancel() }
             let connection = try await RouterConnection.connect(
                 transport: link, identity: try store.identity(), expectedRouterKey: known?.publicKey)
             self.connection = connection
             var hello = try await connection.hello()
+            deadline.cancel()
 
             // Not paired yet: ask, and keep asking while the user goes to
             // press the button.
@@ -173,6 +186,9 @@ final class AppModel: ObservableObject {
         eventTask = nil
         let old = connection
         connection = nil
+        // Dropped here and now: an attempt that failed before a session
+        // existed has nothing else that would end the Bluetooth connection.
+        link?.abandon(BLEError.disconnected)
         link = nil
         Task { await old?.close() }
         status = nil
