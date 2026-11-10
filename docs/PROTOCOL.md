@@ -141,6 +141,7 @@ aps[]      {radio iface state band channel mode error}
 stas[]     {radio iface state ssid bssid freq signal failed fail_reason}
 lan        {address ula clients}
 vpns[]     {id name if state error endpoint handshake rx tx}
+geoip      {available date}   country database for country rules and flows
 ```
 
 ### Radios and upstream Wi-Fi
@@ -166,6 +167,27 @@ the network that was refused.
 | `device.set` | `{mac,name,route,paused,ip}` | `{}` – replaces the device's settings |
 | `device.forget` | `{mac}` | `{}` |
 | `device.queries` | `{mac}` | `[{t,mac,name,type,path,failed}]` recent DNS queries |
+
+### Traffic
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `stats.get` | `{mac}` (`""` = whole network) | `{minutes: [60 × {t,up,down}], hours: [72 × {t,up,down}]}`, oldest first, evenly spaced |
+| `stats.top` | `{hours}` | `[{mac,up,down}]`, busiest first |
+| `flows.list` | `{mac}` (`""` = all devices) | `[{mac,proto,dst,port,name?,country?,path,up,down,started,last,active}]` – active first (busiest first), then recently ended (latest first) |
+| `speedtest.run` | `{via: "direct"\|"vpn:<id>"}` | `{t,via,latency_ms,down_mbps,up_mbps,error?}` after about 20 s |
+| `speedtest.history` | – | the last 20 results, newest first |
+
+A flow is a connection from a LAN device to somewhere beyond the router,
+read from connection tracking every few seconds. `name` is the host name
+the address was resolved as through the router's DNS, `country` comes
+from the country database, `path` is the route the connection was
+classified onto. Connections that were refused by a block rule never
+enter connection tracking and are not listed.
+
+`speedtest.run` measures from the router itself, against the server in
+`config.speedtest`, optionally through a connected VPN. While it runs the
+router sends `speedtest` events.
 
 ### VPN
 
@@ -202,3 +224,4 @@ no battery-backed clock.
 |-------|------|
 | `status` | Status, whenever something other than a counter changed |
 | `event` | `{t,kind,msg,mac?}` – a new activity log entry |
+| `speedtest` | `{phase: "latency"\|"download"\|"upload"\|"done", mbps}` – progress of a running test |

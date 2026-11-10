@@ -43,6 +43,8 @@ type Table struct {
 	lastDown map[netip.Addr]uint64
 	// OnNew is called once for every device never seen before.
 	OnNew func(e Entry)
+	// OnTraffic receives every increment of a device's counters.
+	OnTraffic func(mac string, up, down uint64)
 }
 
 type persisted struct {
@@ -203,11 +205,17 @@ func (t *Table) Account(c *fw.Counters) {
 		}
 		return cur // counter was reset
 	}
+	note := func(mac string, up, down uint64) {
+		if t.OnTraffic != nil {
+			t.OnTraffic(mac, up, down)
+		}
+	}
 	for mac, v := range c.Up {
 		if e := t.entries[mac]; e != nil {
 			if d := delta(v, t.lastUp[mac]); d > 0 {
 				e.Up += d
 				t.dirty = true
+				note(mac, d, 0)
 			}
 		}
 	}
@@ -220,6 +228,7 @@ func (t *Table) Account(c *fw.Counters) {
 				if d := delta(v, t.lastDown[ip]); d > 0 {
 					e.Down += d
 					t.dirty = true
+					note(e.MAC, 0, d)
 				}
 			}
 		}

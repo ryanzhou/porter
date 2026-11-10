@@ -21,10 +21,14 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/devices"
 	"github.com/ryanzhou/porter/daemon/internal/dnsfwd"
+	"github.com/ryanzhou/porter/daemon/internal/flows"
 	"github.com/ryanzhou/porter/daemon/internal/fw"
+	"github.com/ryanzhou/porter/daemon/internal/geoip"
 	"github.com/ryanzhou/porter/daemon/internal/lan"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
+	"github.com/ryanzhou/porter/daemon/internal/speedtest"
+	"github.com/ryanzhou/porter/daemon/internal/stats"
 	"github.com/ryanzhou/porter/daemon/internal/system"
 	"github.com/ryanzhou/porter/daemon/internal/vpn"
 	"github.com/ryanzhou/porter/daemon/internal/wan"
@@ -41,10 +45,13 @@ type Options struct {
 	// WGUserspace is a wireguard-go binary to use instead of the kernel
 	// module (tests).
 	WGUserspace string
-	Version     string
-	BuildTime   time.Time
-	Log         *slog.Logger
-	Logs        *LogRing
+	// GeoIPPath is the country database; a missing file only disables
+	// country rules and country display.
+	GeoIPPath string
+	Version   string
+	BuildTime time.Time
+	Log       *slog.Logger
+	Logs      *LogRing
 }
 
 // Event is an entry of the router's activity log.
@@ -70,6 +77,15 @@ type Core struct {
 	wan  *wan.Manager
 	vpn  *vpn.Manager
 	devs *devices.Table
+
+	geo   *geoip.DB
+	flows *flows.Tracker
+	stats *stats.Store
+
+	speedMu      sync.Mutex // held while a speed test runs
+	speedHistMu  sync.Mutex
+	speedHistory []speedtest.Result
+	acctEnabled  bool
 
 	radios []wifi.Radio
 	aps    map[string]*wifi.AP  // by radio id
@@ -139,7 +155,40 @@ func New(opt Options) (*Core, error) {
 	if c.pairings, err = proto.LoadPairings(filepath.Join(opt.DataDir, "pairings.json")); err != nil {
 		return nil, fmt.Errorf("pairings: %w", err)
 	}
+	if opt.GeoIPPath != "" {
+		if db, err := geoip.Load(opt.GeoIPPath); err != nil {
+			c.log.Warn("country database not available; country rules will match nothing", "err", err)
+		} else {
+			c.geo = db
+			c.log.Info("country database loaded", "date", db.Date)
+		}
+	}
+	c.stats = stats.Load(filepath.Join(opt.DataDir, "stats.json"))
 	c.devs = devices.Load(filepath.Join(opt.DataDir, "devices.json"))
+	c.devs.OnTraffic = func(mac string, up, down uint64) { c.stats.Add(mac, up, down, time.Now()) }
+	// The flow tracker is polled from the control loop, so its hooks may
+	// read the configuration directly.
+	c.flows = flows.New(flows.Hooks{
+		LAN: func(a netip.Addr) bool {
+			_, lan4 := c.cfg.LANPrefix()
+			_, ula := c.cfg.ULA()
+			return lan4.Contains(a) || ula.Contains(a)
+		},
+		LookupMAC: c.devs.LookupMAC,
+		NameFor:   func(a netip.Addr) string { return c.dns.NameFor(a) },
+		Country:   func(a netip.Addr) string { return c.geo.Lookup(a) },
+		Path: func(mark uint32) string {
+			switch class := mark & fw.ClassMask; {
+			case class == fw.MarkBlock:
+				return config.ActBlock
+			case class >= fw.MarkVPN(0):
+				if i := int(class - fw.MarkVPN(0)); i < len(c.cfg.VPNs) {
+					return config.ActVPN(c.cfg.VPNs[i].ID)
+				}
+			}
+			return config.ActDirect
+		},
+	})
 	c.devs.OnNew = func(e devices.Entry) {
 		c.addEvent("device", "New device joined", e.MAC)
 		c.Kick()
@@ -237,6 +286,7 @@ func (c *Core) shutdown() {
 	c.log.Info("shutting down")
 	system.SaveClock(filepath.Join(c.opt.DataDir, "clock"))
 	c.devs.Save()
+	c.stats.Save()
 	for _, ap := range c.aps {
 		ap.Stop()
 	}
@@ -263,7 +313,7 @@ func (c *Core) periodic() {
 
 	// Read traffic counters often while someone is looking, rarely
 	// otherwise.
-	every := 60 * time.Second
+	every := 20 * time.Second
 	c.sessMu.Lock()
 	if len(c.sessions) > 0 {
 		every = 5 * time.Second
@@ -275,9 +325,15 @@ func (c *Core) periodic() {
 			c.devs.Account(ctr)
 		}
 	}
+	if c.planKey != "" {
+		if err := c.flows.Poll(); err != nil {
+			c.log.Debug("reading connection table", "err", err)
+		}
+	}
 	if now.Sub(c.lastSave) >= 10*time.Minute {
 		c.lastSave = now
 		c.devs.Save()
+		c.stats.Save()
 		system.SaveClock(filepath.Join(c.opt.DataDir, "clock"))
 	}
 	c.updateLED()
@@ -634,15 +690,22 @@ func (c *Core) reconcile() {
 	for _, u := range uplinks {
 		wanIfs = append(wanIfs, u.If)
 	}
-	plan := fw.BuildPlan(cfg, fw.Runtime{WANIfs: wanIfs, PortalDevs: portalDevs})
+	plan := fw.BuildPlan(cfg, fw.Runtime{WANIfs: wanIfs, PortalDevs: portalDevs, Geo: c.geo.Ranges})
 	flush := false
-	if key := fw.Render(plan); key != c.planKey {
+	if key := fw.Fingerprint(plan); key != c.planKey {
 		if err := c.fwm.Apply(plan); err != nil {
 			c.log.Error("firewall", "err", err)
 		} else {
 			flush = c.planKey != ""
 			c.planKey = key
 		}
+	}
+	if !c.acctEnabled && c.planKey != "" {
+		// Per-connection byte counters for the flow list. The setting
+		// only exists once connection tracking is loaded, which the
+		// ruleset above has just seen to.
+		netx.Sysctl("net/netfilter/nf_conntrack_acct", "1")
+		c.acctEnabled = true
 	}
 	routes := c.vpn.Routes(cfg.VPNs)
 	if key := fmt.Sprintf("%+v", routes); key != c.routeKey {
@@ -658,6 +721,8 @@ func (c *Core) reconcile() {
 		// than continue on a route that no longer applies to them.
 		if err := fw.FlushConntrack(); err != nil {
 			c.log.Debug("conntrack flush", "err", err)
+		} else {
+			c.log.Debug("connection tracking flushed: paths changed")
 		}
 	}
 

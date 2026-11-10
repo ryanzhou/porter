@@ -17,6 +17,7 @@ public struct RouterError: Error, Codable, Equatable, LocalizedError {
 public enum RouterEvent {
     case status(RouterStatus)
     case activity(ActivityEvent)
+    case speedTest(SpeedTestProgress)
 }
 
 public struct Empty: Codable, Equatable { public init() {} }
@@ -107,6 +108,8 @@ public actor RouterConnection {
                 if let w = try? decoder.decode(Wrapper<RouterStatus>.self, from: message) { eventSink.yield(.status(w.d)) }
             case "event":
                 if let w = try? decoder.decode(Wrapper<ActivityEvent>.self, from: message) { eventSink.yield(.activity(w.d)) }
+            case "speedtest":
+                if let w = try? decoder.decode(Wrapper<SpeedTestProgress>.self, from: message) { eventSink.yield(.speedTest(w.d)) }
             default:
                 break
             }

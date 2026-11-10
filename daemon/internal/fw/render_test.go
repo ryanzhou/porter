@@ -28,6 +28,7 @@ func testConfig() *config.Config {
 		{ID: "r3", Enabled: true, Dst: config.Dst{Ports: []string{"25"}}, Action: "block"},
 		{ID: "r4", Enabled: false, Action: "block"},
 		{ID: "r5", Enabled: true, Dst: config.Dst{CIDRs: []string{"203.0.113.9"}}, Action: "vpn:off"},
+		{ID: "r6", Enabled: true, Dst: config.Dst{Countries: []string{"JP", "NZ"}, Proto: "tcp"}, Action: "vpn:home"},
 	}
 	return c
 }
@@ -43,6 +44,15 @@ func TestRender(t *testing.T) {
 	p := BuildPlan(c, Runtime{
 		WANIfs:     []string{"eth0", "wlan1"},
 		PortalDevs: []string{"02:00:00:00:00:09"},
+		Geo: func(cc string) ([]string, []string) {
+			switch cc {
+			case "JP":
+				return []string{"198.51.100.0-198.51.100.255", "192.0.2.0-192.0.2.127"}, []string{"2001:db8::-2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"}
+			case "NZ":
+				return []string{"203.0.113.7", "192.0.2.128-192.0.2.255"}, nil
+			}
+			return nil, nil
+		},
 		Learned: map[string][]Elem{
 			SetName("r1", false): {{Addr: netip.MustParseAddr("93.184.216.34"), TTL: 300}},
 			SetName("r1", true):  {{Addr: netip.MustParseAddr("2606:2800:220:1::1"), TTL: 60}},
@@ -59,6 +69,9 @@ func TestRender(t *testing.T) {
 		`meta mark & 0xff == 0x10 oifname "wg-home" accept`,
 		`meta mark & 0xff == 0x10 jump refuse`,
 		`meta mark & 0xff == 0x12 jump refuse`,
+		`set r_r6_g4 { type ipv4_addr; flags interval; auto-merge; elements = { 198.51.100.0-198.51.100.255, 192.0.2.0-192.0.2.127, 203.0.113.7, 192.0.2.128-192.0.2.255 } }`,
+		`meta l4proto tcp ip daddr @r_r6_g4 meta mark set 0x10`,
+		`meta l4proto tcp ip6 daddr @r_r6_g6 meta mark set 0x10`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("ruleset lacks %q", want)
@@ -66,6 +79,12 @@ func TestRender(t *testing.T) {
 	}
 	if strings.Contains(out, `"wg-off"`) {
 		t.Error("switched-off VPN must not get interface rules")
+	}
+	// The fingerprint names the countries but carries none of their ranges,
+	// and changes when the countries do.
+	fp := Fingerprint(p)
+	if strings.Contains(fp, "198.51.100.0-") || !strings.Contains(fp, "# countries: JP NZ") {
+		t.Errorf("fingerprint wrong:\n%s", fp)
 	}
 	if strings.Contains(out, "r_r4") {
 		t.Error("disabled rule rendered")

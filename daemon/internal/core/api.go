@@ -16,7 +16,11 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/devices"
 	"github.com/ryanzhou/porter/daemon/internal/dnsfwd"
+	"github.com/ryanzhou/porter/daemon/internal/flows"
+	"github.com/ryanzhou/porter/daemon/internal/fw"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
+	"github.com/ryanzhou/porter/daemon/internal/speedtest"
+	"github.com/ryanzhou/porter/daemon/internal/stats"
 	"github.com/ryanzhou/porter/daemon/internal/system"
 	"github.com/ryanzhou/porter/daemon/internal/vpn"
 	"github.com/ryanzhou/porter/daemon/internal/wan"
@@ -253,6 +257,13 @@ type Status struct {
 	STAs     []wifi.STAStatus `json:"stas"`
 	LAN      LANStatus        `json:"lan"`
 	VPNs     []VPNStatus      `json:"vpns"`
+	GeoIP    GeoIPStatus      `json:"geoip"`
+}
+
+// GeoIPStatus says whether country rules and country display can work.
+type GeoIPStatus struct {
+	Available bool   `json:"available"`
+	Date      string `json:"date,omitempty"`
 }
 
 type PortalStatus struct {
@@ -285,6 +296,9 @@ func (c *Core) status() Status {
 	}
 	if st.WAN == nil {
 		st.WAN = []wan.State{}
+	}
+	if c.geo != nil {
+		st.GeoIP = GeoIPStatus{Available: true, Date: c.geo.Date}
 	}
 	if a := wan.Active(states); a != nil {
 		st.Internet, st.Active = a.Internet, a.If
@@ -651,6 +665,102 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 			q = []dnsfwd.Query{}
 		}
 		return q, nil
+
+	case "stats.get":
+		p, perr := decode[struct {
+			MAC string `json:"mac"`
+		}](req)
+		if perr != nil {
+			return nil, perr
+		}
+		minutes, hours := c.stats.Get(strings.ToLower(p.MAC), time.Now())
+		return map[string][]stats.Sample{"minutes": minutes, "hours": hours}, nil
+
+	case "stats.top":
+		p, perr := decode[struct {
+			Hours int `json:"hours"`
+		}](req)
+		if perr != nil {
+			return nil, perr
+		}
+		if p.Hours == 0 {
+			p.Hours = 24
+		}
+		return c.stats.TopDevices(p.Hours, time.Now()), nil
+
+	case "flows.list":
+		p, perr := decode[struct {
+			MAC string `json:"mac"`
+		}](req)
+		if perr != nil {
+			return nil, perr
+		}
+		list := c.flows.List(strings.ToLower(p.MAC))
+		if list == nil {
+			list = []flows.Flow{}
+		}
+		return list, nil
+
+	case "speedtest.run":
+		p, perr := decode[struct {
+			Via string `json:"via"`
+		}](req)
+		if perr != nil {
+			return nil, perr
+		}
+		if p.Via == "" {
+			p.Via = config.ActDirect
+		}
+		var cfg config.SpeedTest
+		var mark uint32
+		var out *proto.Error
+		c.do(func() {
+			cfg = c.cfg.SpeedTest
+			id, isVPN := config.VPNOf(p.Via)
+			switch {
+			case p.Via == config.ActDirect:
+			case isVPN:
+				if st, ok := c.vpn.Statuses()[id]; !ok || st.State != "up" {
+					out = proto.Errf(proto.ErrInvalid, "that VPN is not connected")
+					return
+				}
+				mark = fw.MarkFor(c.cfg, p.Via)
+			default:
+				out = proto.Errf(proto.ErrInvalid, "a speed test runs directly or through a VPN")
+			}
+		})
+		if out != nil {
+			return nil, out
+		}
+		if !c.speedMu.TryLock() {
+			return nil, proto.Errf("busy", "a speed test is already running")
+		}
+		defer c.speedMu.Unlock()
+		type progress struct {
+			Phase string  `json:"phase"`
+			Mbps  float64 `json:"mbps"`
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		// The phase length can be shortened for tests.
+		phase, _ := time.ParseDuration(os.Getenv("PORTER_SPEEDTEST_DURATION"))
+		res := speedtest.Run(ctx, cfg, p.Via, speedtest.Options{Mark: mark, Duration: phase, Progress: func(phase string, mbps float64) {
+			c.broadcast("speedtest", progress{phase, mbps})
+		}})
+		c.broadcast("speedtest", progress{"done", 0})
+		c.speedHistMu.Lock()
+		c.speedHistory = append([]speedtest.Result{res}, c.speedHistory...)
+		if len(c.speedHistory) > 20 {
+			c.speedHistory = c.speedHistory[:20]
+		}
+		c.speedHistMu.Unlock()
+		return res, nil
+
+	case "speedtest.history":
+		c.speedHistMu.Lock()
+		out := append([]speedtest.Result{}, c.speedHistory...)
+		c.speedHistMu.Unlock()
+		return out, nil
 
 	case "vpn.parse":
 		// Turns a WireGuard configuration file into a profile for the

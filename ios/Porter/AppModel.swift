@@ -24,6 +24,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var radios: [RadioInfo] = []
     @Published private(set) var activity: [ActivityEvent] = []
     @Published private(set) var knownRouters: [KnownRouter] = []
+    /// Progress of the speed test currently running, if any.
+    @Published private(set) var speedTestProgress: SpeedTestProgress?
     /// A message for the user; views present it as an alert and clear it.
     @Published var errorMessage: String?
 
@@ -132,6 +134,8 @@ final class AppModel: ObservableObject {
                 case .activity(let entry):
                     self.activity.append(entry)
                     if entry.kind == "device" { try? await self.refreshDevices() }
+                case .speedTest(let progress):
+                    self.speedTestProgress = progress.phase == "done" ? nil : progress
                 }
             }
             // The stream ends when the link is lost.
@@ -151,6 +155,7 @@ final class AppModel: ObservableObject {
         config = nil
         devices = []
         radios = []
+        speedTestProgress = nil
         phase = .searching
         central.startScanning()
     }
@@ -264,6 +269,15 @@ final class AppModel: ObservableObject {
         if let error = error as? LocalizedError, let text = error.errorDescription { return text }
         if error is NoiseError || error is SessionError { return "The secure connection to the router failed." }
         return error.localizedDescription
+    }
+
+    /// Runs a speed test through the given path ("direct" or "vpn:<id>").
+    /// `speedTestProgress` updates while it runs.
+    func runSpeedTest(via: String) async -> SpeedTestResult? {
+        speedTestProgress = SpeedTestProgress(phase: "latency", mbps: 0)
+        let result = await fetch { try await $0.runSpeedTest(via: via) }
+        speedTestProgress = nil
+        return result
     }
 
     // MARK: - Lookups for views

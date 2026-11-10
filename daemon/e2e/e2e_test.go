@@ -245,8 +245,8 @@ func TestRouter(t *testing.T) {
 		if t.Failed() {
 			if b, err := os.ReadFile(filepath.Join(dir, "porterd.log")); err == nil {
 				lines := strings.Split(string(b), "\n")
-				if len(lines) > 80 {
-					lines = lines[len(lines)-80:]
+				if len(lines) > 120 {
+					lines = lines[len(lines)-120:]
 				}
 				t.Logf("porterd log (tail):\n%s", strings.Join(lines, "\n"))
 			}
@@ -300,6 +300,17 @@ func TestRouter(t *testing.T) {
 		switch r.URL.Path {
 		case "/ok":
 			fmt.Fprint(w, "<HTML><BODY>Success</BODY></HTML>")
+		case "/big":
+			w.Write(make([]byte, 300_000))
+		case "/down": // speed test download: as much as the client will take
+			chunk := make([]byte, 32*1024)
+			for i := 0; i < 8192; i++ {
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+			}
+		case "/up": // speed test upload
+			io.Copy(io.Discard, r.Body)
 		default:
 			fmt.Fprint(w, host)
 		}
@@ -359,7 +370,13 @@ func TestRouter(t *testing.T) {
 	}
 
 	// --- router ---------------------------------------------------------------
-	args := []string{"netns", "exec", nsRtr, bin, "-data", filepath.Join(dir, "data"), "-run", run, "-no-ble", "-debug"}
+	// A miniature country database: the two sites are in different
+	// "countries".
+	geoFile := filepath.Join(dir, "geoip.csv")
+	os.WriteFile(geoFile, []byte("198.51.100.0,198.51.100.15,AU\n198.51.100.16,198.51.100.31,JP\n2001:db8:200::,2001:db8:200:ffff:ffff:ffff:ffff:ffff,NZ\n"), 0o644)
+	os.WriteFile(geoFile+".date", []byte("2026-11\n"), 0o644)
+	os.Setenv("PORTER_SPEEDTEST_DURATION", "1500ms")
+	args := []string{"netns", "exec", nsRtr, bin, "-data", filepath.Join(dir, "data"), "-run", run, "-no-ble", "-debug", "-geoip", geoFile}
 	if !kernelWG && wgUser != "" {
 		args = append(args, "-wg-userspace", wgUser)
 	}
@@ -398,6 +415,7 @@ func TestRouter(t *testing.T) {
 			}
 		}
 		cfg.WAN.Probe = config.Probe{Enabled: true, URL: "http://probe.test/ok", Expect: "Success"}
+		cfg.SpeedTest = config.SpeedTest{DownloadURL: "http://" + siteA + "/down", UploadURL: "http://" + siteA + "/up"}
 	})
 
 	// --- uplink ---------------------------------------------------------------
@@ -480,6 +498,114 @@ func TestRouter(t *testing.T) {
 		ula, _ := cfg.ULA()
 		if a, _, err := lookup(nsC1, ula.String(), "direct.test"); err != nil || a != siteA {
 			t.Errorf("DNS over IPv6: %q %v", a, err)
+		}
+	})
+
+	type flow struct {
+		MAC     string `json:"mac"`
+		Proto   string `json:"proto"`
+		Dst     string `json:"dst"`
+		Port    int    `json:"port"`
+		Name    string `json:"name"`
+		Country string `json:"country"`
+		Path    string `json:"path"`
+		Up      uint64 `json:"up"`
+		Down    uint64 `json:"down"`
+		Active  bool   `json:"active"`
+	}
+	findFlow := func(mac, dst string, match func(flow) bool) (flow, bool) {
+		var list []flow
+		if err := c.Call("flows.list", map[string]string{"mac": mac}, &list); err != nil {
+			t.Fatalf("flows.list: %v", err)
+		}
+		for _, f := range list {
+			if f.MAC == mac && f.Dst == dst && (match == nil || match(f)) {
+				return f, true
+			}
+		}
+		return flow{}, false
+	}
+
+	t.Run("TrafficAndFlows", func(t *testing.T) {
+		// Look the site up by name, then fetch something sizeable from it.
+		if a, _, err := lookup(nsC1, router, "direct.test"); err != nil || a != siteA {
+			t.Fatalf("lookup: %q %v", a, err)
+		}
+		if _, err := httpGet(nsC1, "http://"+siteA+"/big"); err != nil {
+			t.Fatal(err)
+		}
+		// The connection shows up by name, with country, path and byte counts.
+		var f flow
+		eventually(t, "the download in the flow list", 20*time.Second, func() bool {
+			var ok bool
+			f, ok = findFlow(mac1, siteA, func(f flow) bool { return f.Down >= 300_000 })
+			return ok
+		})
+		if f.Proto != "tcp" || f.Port != 80 || f.Name != "direct.test" || f.Country != "AU" || f.Path != "direct" || f.Up == 0 {
+			t.Errorf("flow: %+v", f)
+		}
+		// Queries the router answered itself are not listed as flows.
+		if dns, ok := findFlow(mac1, "198.51.100.53", nil); ok {
+			t.Errorf("intercepted DNS query listed as a flow: %+v", dns)
+		}
+		// Traffic history, per device and for the network.
+		type sample struct {
+			T    int64  `json:"t"`
+			Up   uint64 `json:"up"`
+			Down uint64 `json:"down"`
+		}
+		type history struct {
+			Minutes []sample `json:"minutes"`
+			Hours   []sample `json:"hours"`
+		}
+		sum := func(list []sample) (up, down uint64) {
+			for _, s := range list {
+				up, down = up+s.Up, down+s.Down
+			}
+			return
+		}
+		eventually(t, "the download in the traffic history", 20*time.Second, func() bool {
+			var dev, all history
+			c.Call("stats.get", map[string]string{"mac": mac1}, &dev)
+			c.Call("stats.get", map[string]string{"mac": ""}, &all)
+			if len(dev.Minutes) != 60 || len(dev.Hours) != 72 {
+				return false
+			}
+			_, devDown := sum(dev.Minutes)
+			_, hourDown := sum(dev.Hours)
+			_, allDown := sum(all.Minutes)
+			return devDown >= 300_000 && hourDown >= 300_000 && allDown >= devDown
+		})
+		var top []struct {
+			MAC  string `json:"mac"`
+			Down uint64 `json:"down"`
+		}
+		if err := c.Call("stats.top", map[string]int{"hours": 24}, &top); err != nil || len(top) == 0 || top[0].MAC != mac1 || top[0].Down < 300_000 {
+			t.Errorf("top talkers: %+v %v", top, err)
+		}
+	})
+
+	type speedResult struct {
+		Via       string  `json:"via"`
+		LatencyMs float64 `json:"latency_ms"`
+		DownMbps  float64 `json:"down_mbps"`
+		UpMbps    float64 `json:"up_mbps"`
+		Error     string  `json:"error"`
+	}
+	t.Run("SpeedTest", func(t *testing.T) {
+		var res speedResult
+		if err := c.Call("speedtest.run", map[string]string{"via": "direct"}, &res); err != nil {
+			t.Fatal(err)
+		}
+		if res.Error != "" || res.DownMbps <= 1 || res.UpMbps <= 1 || res.LatencyMs <= 0 {
+			t.Errorf("speed test: %+v", res)
+		}
+		var hist []speedResult
+		if err := c.Call("speedtest.history", nil, &hist); err != nil || len(hist) != 1 || hist[0].DownMbps != res.DownMbps {
+			t.Errorf("history: %+v %v", hist, err)
+		}
+		if err := c.Call("speedtest.run", map[string]string{"via": "vpn:nope"}, &res); err == nil {
+			t.Error("speed test through an unknown VPN accepted")
 		}
 	})
 
@@ -578,6 +704,53 @@ func TestRouter(t *testing.T) {
 		})
 		if got, err := httpGet(nsC1, "http://"+siteA+"/ip"); err != nil || got != wanIP {
 			t.Errorf("device one to other sites should stay direct: %q %v", got, err)
+		}
+		// Destination split by country: the site "in Japan" goes through
+		// the tunnel, the one "in Australia" does not.
+		var st0 struct {
+			GeoIP struct {
+				Available bool   `json:"available"`
+				Date      string `json:"date"`
+			} `json:"geoip"`
+		}
+		if err := c.Call("status.get", nil, &st0); err != nil || !st0.GeoIP.Available || st0.GeoIP.Date != "2026-11" {
+			t.Errorf("country database status: %+v %v", st0, err)
+		}
+		editConfig(func(cfg *config.Config) {
+			cfg.Policy.Rules = []config.Rule{{ID: "geo", Name: "Japan via VPN", Enabled: true, Dst: config.Dst{Countries: []string{"jp"}}, Action: "vpn:v1"}}
+		})
+		eventually(t, "country rule steering device one", 10*time.Second, func() bool {
+			got, err := httpGet(nsC1, "http://"+siteB+"/ip")
+			return err == nil && got == vpnCliIP
+		})
+		if got, err := httpGet(nsC1, "http://"+siteA+"/ip"); err != nil || got != wanIP {
+			t.Errorf("device one to the other country should stay direct: %q %v", got, err)
+		}
+		// The flow list shows which path each connection took.
+		eventually(t, "tunnelled flow listed with its path and country", 30*time.Second, func() bool {
+			// Keep the connection table populated: applying a rule change
+			// clears it, and that may still be in progress.
+			httpGet(nsC1, "http://"+siteB+"/ip")
+			f, ok := findFlow(mac1, siteB, func(f flow) bool { return f.Path == "vpn:v1" })
+			return ok && f.Country == "JP"
+		})
+		// A speed test through the tunnel measures the tunnel.
+		var viaVPN speedResult
+		if err := c.Call("speedtest.run", map[string]string{"via": "vpn:v1"}, &viaVPN); err != nil {
+			t.Fatal(err)
+		}
+		if viaVPN.Error != "" || viaVPN.DownMbps <= 1 || viaVPN.UpMbps <= 1 {
+			t.Errorf("speed test through the VPN: %+v", viaVPN)
+		}
+		if _, ok := findFlow("", siteA, nil); ok {
+			// The router's own test traffic is not a LAN device's flow.
+			var all []flow
+			c.Call("flows.list", map[string]string{"mac": ""}, &all)
+			for _, f := range all {
+				if f.MAC == "" {
+					t.Errorf("router's own connection listed as a flow: %+v", f)
+				}
+			}
 		}
 		// Destination split by port, overriding device two's VPN route.
 		editConfig(func(cfg *config.Config) {

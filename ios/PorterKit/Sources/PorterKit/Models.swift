@@ -20,6 +20,14 @@ public struct RouterConfig: Codable, Equatable {
     public var vpns: [VPNProfile]
     public var policy: PolicyConfig
     public var devices: [DeviceSettings]
+    public var speedtest: SpeedTestConfig
+}
+
+public struct SpeedTestConfig: Codable, Equatable {
+    /// Fetched repeatedly to measure download speed.
+    public var downloadUrl: String
+    /// Receives POSTed data to measure upload speed.
+    public var uploadUrl: String
 }
 
 public struct SystemConfig: Codable, Equatable {
@@ -220,11 +228,14 @@ public struct RuleSource: Codable, Equatable {
 public struct RuleDestination: Codable, Equatable {
     public var domains: [String]
     public var cidrs: [String]
+    /// ISO 3166-1 alpha-2 codes of destination countries.
+    public var countries: [String]
     public var proto: String
     public var ports: [String]
-    public init(domains: [String] = [], cidrs: [String] = [], proto: String = "", ports: [String] = []) {
+    public init(domains: [String] = [], cidrs: [String] = [], countries: [String] = [], proto: String = "", ports: [String] = []) {
         self.domains = domains
         self.cidrs = cidrs
+        self.countries = countries
         self.proto = proto
         self.ports = ports
     }
@@ -267,6 +278,14 @@ public struct RouterStatus: Codable, Equatable {
     public var stas: [StationStatus]
     public var lan: LANStatus
     public var vpns: [VPNStatus]
+    public var geoip: GeoIPStatus
+}
+
+/// The country database country rules and flow listings rely on.
+public struct GeoIPStatus: Codable, Equatable {
+    public var available: Bool
+    /// Month the database was published, e.g. "2026-11".
+    public var date: String?
 }
 
 public struct UplinkStatus: Codable, Equatable, Identifiable {
@@ -478,6 +497,73 @@ public struct KeyPair: Codable, Equatable {
     public var publicKey: String
 }
 
+// MARK: - Traffic
+
+/// Bytes moved during one time bucket starting at `t` (unix seconds).
+public struct TrafficSample: Codable, Equatable, Identifiable {
+    public var t: Int64
+    public var up: UInt64
+    public var down: UInt64
+    public var id: Int64 { t }
+}
+
+public struct TrafficStats: Codable, Equatable {
+    /// The last 60 minutes, one sample per minute, oldest first.
+    public var minutes: [TrafficSample]
+    /// The last 72 hours, one sample per hour, oldest first.
+    public var hours: [TrafficSample]
+}
+
+public struct TopTalker: Codable, Equatable, Identifiable {
+    public var mac: String
+    public var up: UInt64
+    public var down: UInt64
+    public var id: String { mac }
+}
+
+/// One connection from a LAN device, current or recently ended.
+public struct Flow: Codable, Equatable, Identifiable {
+    public var mac: String
+    public var proto: String
+    public var dst: String
+    public var port: Int
+    /// The host name the device looked up for this address, if known.
+    public var name: String?
+    /// ISO country code of the destination, if known.
+    public var country: String?
+    /// "direct", "vpn:<id>" or "block".
+    public var path: String
+    public var up: UInt64
+    public var down: UInt64
+    public var started: Int64
+    public var last: Int64
+    public var active: Bool
+    public var id: String { "\(mac)-\(proto)-\(dst)-\(port)-\(started)" }
+}
+
+public struct SpeedTestResult: Codable, Equatable, Identifiable {
+    public var t: Int64
+    /// "direct" or "vpn:<id>".
+    public var via: String
+    public var latencyMs: Double
+    public var downMbps: Double
+    public var upMbps: Double
+    public var error: String?
+    public var id: Int64 { t }
+}
+
+/// Live progress of a running speed test.
+public struct SpeedTestProgress: Codable, Equatable {
+    /// "latency", "download", "upload" or "done".
+    public var phase: String
+    public var mbps: Double
+
+    public init(phase: String, mbps: Double) {
+        self.phase = phase
+        self.mbps = mbps
+    }
+}
+
 // MARK: - Typed calls
 
 public extension RouterConnection {
@@ -515,6 +601,16 @@ public extension RouterConnection {
     func openPairing() async throws { try await run("pairing.open") }
     func pairedPhones() async throws -> [PairedPhone] { try await call("pairing.list") }
     func revokePhone(key: String) async throws { try await run("pairing.revoke", ["key": key]) }
+
+    /// Traffic history for one device, or the whole network when `mac` is empty.
+    func trafficStats(mac: String = "") async throws -> TrafficStats { try await call("stats.get", ["mac": mac]) }
+    /// Devices ordered by traffic over the last `hours` hours.
+    func topTalkers(hours: Int = 24) async throws -> [TopTalker] { try await call("stats.top", ["hours": hours]) }
+    /// Connections of one device, or of every device when `mac` is empty.
+    func flows(mac: String = "") async throws -> [Flow] { try await call("flows.list", ["mac": mac]) }
+    /// Runs a speed test from the router; takes about 20 seconds.
+    func runSpeedTest(via: String = "direct") async throws -> SpeedTestResult { try await call("speedtest.run", ["via": via]) }
+    func speedTestHistory() async throws -> [SpeedTestResult] { try await call("speedtest.history") }
 
     func activity() async throws -> [ActivityEvent] { try await call("events.list") }
     func logs() async throws -> [String] { try await call("system.logs") }

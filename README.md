@@ -47,16 +47,23 @@ whole product.
   traffic: a query leaves by the same path the connection will, so
   tunnelled devices use the tunnel's resolver. An IPv4-only tunnel never
   lets IPv6 slip around it.
+- **Country rules.** A rule's destination can also be a set of
+  countries, matched against a country database built into the image.
 - **Device management**: names, pause, per-device route, address
-  reservations, traffic totals, recent DNS lookups, new-device log.
+  reservations, recent DNS lookups, new-device log.
+- **Traffic and flows.** Per-device and whole-network history (per minute
+  for the last hour, per hour for three days), top devices, and a live
+  list of each device's connections with host name, country, the path it
+  took (direct or which VPN) and byte counts.
+- **Speed test** from the router, directly or through a chosen VPN.
 - **DNS**: forwarding to the upstream network's resolvers or your own
   over plain DNS, DNS-over-TLS or DNS-over-HTTPS; interception of
   hard-coded resolvers; a block list.
 
 Not included (compared with Firewalla's feature set): intrusion
 detection, curated ad/content block lists (they need an online feed),
-GeoIP rules, OpenVPN/AnyConnect clients, a VPN server, multi-WAN load
-balancing, and WPA-Enterprise upstream networks.
+OpenVPN/AnyConnect clients, a VPN server, multi-WAN load balancing, and
+WPA-Enterprise upstream networks.
 
 ## Install
 
@@ -180,6 +187,22 @@ place if the daemon restarts.
   uplink the router fetches one small page (by default Apple's
   `captive.apple.com`, the same one an iPhone asks). The URL can be
   changed or the check switched off under *Internet*.
+- **Country database.** The image build downloads DB-IP's free "IP to
+  Country Lite" database (CC BY 4.0, attribution in the app's About
+  page) and bakes it in; the router never fetches it. It is as old as
+  the image: rebuild to refresh it, or build with `PORTER_NO_GEOIP=1` to
+  leave it out (country rules then match nothing and the app says so).
+  Country data is approximate, and anycast services such as public DNS
+  resolvers are attributed to a single country.
+- **Speed test.** A speed test has to exchange data with a server on the
+  internet. It runs only when started from the app, against the URLs
+  under *Settings → Speed test server* (Cloudflare's by default). It
+  measures the router's uplink, not the Wi-Fi between a device and the
+  router.
+- **Flows are sampled.** The connection list is read from the kernel
+  every five seconds, so very short connections can be missed, and
+  connections refused by a block rule are not listed. Changing rules
+  resets connection tracking, which also clears the active list.
 - **NAT66 and address selection.** Clients hold only ULA addresses, so
   for destinations that have both address families most systems prefer
   IPv4. IPv6-only destinations work.

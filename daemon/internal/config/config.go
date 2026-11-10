@@ -19,18 +19,36 @@ const SchemaVersion = 1
 // Config is the whole user-controllable state of the router. It is sent to
 // the app as JSON and written back section by section.
 type Config struct {
-	Version  int       `json:"version"`
-	Rev      uint64    `json:"rev"`
-	System   System    `json:"system"`
-	Radios   []Radio   `json:"radios"`
-	Ethernet []EthPort `json:"ethernet"`
-	AP       AP        `json:"ap"`
-	WAN      WAN       `json:"wan"`
-	LAN      LAN       `json:"lan"`
-	DNS      DNS       `json:"dns"`
-	VPNs     []VPN     `json:"vpns"`
-	Policy   Policy    `json:"policy"`
-	Devices  []Device  `json:"devices"`
+	Version   int       `json:"version"`
+	Rev       uint64    `json:"rev"`
+	System    System    `json:"system"`
+	Radios    []Radio   `json:"radios"`
+	Ethernet  []EthPort `json:"ethernet"`
+	AP        AP        `json:"ap"`
+	WAN       WAN       `json:"wan"`
+	LAN       LAN       `json:"lan"`
+	DNS       DNS       `json:"dns"`
+	VPNs      []VPN     `json:"vpns"`
+	Policy    Policy    `json:"policy"`
+	Devices   []Device  `json:"devices"`
+	SpeedTest SpeedTest `json:"speedtest"`
+}
+
+// SpeedTest names the server a speed test exchanges data with. It is
+// contacted only when a test is run from the app.
+type SpeedTest struct {
+	// DownloadURL must serve a large body; it is fetched repeatedly.
+	DownloadURL string `json:"download_url"`
+	// UploadURL must accept POSTed data of any size.
+	UploadURL string `json:"upload_url"`
+}
+
+// DefaultSpeedTest uses Cloudflare's public speed test endpoints.
+func DefaultSpeedTest() SpeedTest {
+	return SpeedTest{
+		DownloadURL: "https://speed.cloudflare.com/__down?bytes=50000000",
+		UploadURL:   "https://speed.cloudflare.com/__up",
+	}
 }
 
 type System struct {
@@ -236,18 +254,21 @@ type Src struct {
 	CIDRs   []string `json:"cidrs"`
 }
 
-// Dst matches where traffic is going. Domains and CIDRs are alternatives
-// (either may match); Proto and Ports narrow the match further.
+// Dst matches where traffic is going. Domains, CIDRs and Countries are
+// alternatives (any may match); Proto and Ports narrow the match further.
 type Dst struct {
 	Domains []string `json:"domains"`
 	CIDRs   []string `json:"cidrs"`
-	Proto   string   `json:"proto"`
-	Ports   []string `json:"ports"`
+	// Countries are ISO 3166-1 alpha-2 codes, matched against the
+	// country database shipped in the image.
+	Countries []string `json:"countries"`
+	Proto     string   `json:"proto"`
+	Ports     []string `json:"ports"`
 }
 
 func (s Src) Any() bool { return len(s.Devices) == 0 && len(s.CIDRs) == 0 }
 func (d Dst) Any() bool {
-	return len(d.Domains) == 0 && len(d.CIDRs) == 0 && d.Proto == "" && len(d.Ports) == 0
+	return len(d.Domains) == 0 && len(d.CIDRs) == 0 && len(d.Countries) == 0 && d.Proto == "" && len(d.Ports) == 0
 }
 
 // Device holds per-client settings, keyed by MAC address.
@@ -292,8 +313,9 @@ func Default() *Config {
 			IPv6:         true,
 			ULAPrefix:    randomULA(),
 		},
-		DNS:    DNS{Intercept: true},
-		Policy: Policy{Default: ActDirect},
+		DNS:       DNS{Intercept: true},
+		Policy:    Policy{Default: ActDirect},
+		SpeedTest: DefaultSpeedTest(),
 	}
 }
 

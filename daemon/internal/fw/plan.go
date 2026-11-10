@@ -57,6 +57,8 @@ type Plan struct {
 	DefaultMark uint32
 	// Learned holds addresses resolved for domain rules, per set name.
 	Learned map[string][]Elem
+	// Geo returns a country's address ranges in nftables notation.
+	Geo func(country string) (v4, v6 []string)
 }
 
 type PlanVPN struct {
@@ -74,6 +76,7 @@ type PlanRule struct {
 	SrcMACs    []string
 	Src4, Src6 []netip.Prefix
 	Dst4, Dst6 []netip.Prefix
+	Countries  []string
 	Domains    bool
 	Proto      string
 	Ports      []config.PortRange
@@ -89,6 +92,7 @@ type Elem struct {
 // Set names for the addresses a rule matches.
 func SetCIDR(ruleID string, v6 bool) string { return "r_" + ruleID + "_c" + fam(v6) }
 func SetName(ruleID string, v6 bool) string { return "r_" + ruleID + "_n" + fam(v6) }
+func SetGeo(ruleID string, v6 bool) string  { return "r_" + ruleID + "_g" + fam(v6) }
 
 func fam(v6 bool) string {
 	if v6 {
@@ -121,6 +125,7 @@ type Runtime struct {
 	WANIfs     []string
 	PortalDevs []string
 	Learned    map[string][]Elem
+	Geo        func(country string) (v4, v6 []string)
 }
 
 // BuildPlan compiles the configuration into a Plan.
@@ -133,6 +138,7 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 		DeviceMarks: map[string]uint32{},
 		DefaultMark: MarkFor(c, c.Policy.Default),
 		Learned:     rt.Learned,
+		Geo:         rt.Geo,
 	}
 	sort.Strings(p.WANIfs)
 	sort.Strings(p.PortalDevs)
@@ -161,11 +167,12 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 			continue
 		}
 		pr := PlanRule{
-			ID:      r.ID,
-			SrcMACs: append([]string(nil), r.Src.Devices...),
-			Domains: len(r.Dst.Domains) > 0,
-			Proto:   r.Dst.Proto,
-			Mark:    MarkFor(c, r.Action),
+			ID:        r.ID,
+			SrcMACs:   append([]string(nil), r.Src.Devices...),
+			Domains:   len(r.Dst.Domains) > 0,
+			Countries: append([]string(nil), r.Dst.Countries...),
+			Proto:     r.Dst.Proto,
+			Mark:      MarkFor(c, r.Action),
 		}
 		for _, s := range r.Src.CIDRs {
 			pf, _ := config.ParsePrefixLoose(s)

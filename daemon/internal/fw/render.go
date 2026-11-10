@@ -9,7 +9,14 @@ import (
 
 // Render produces a complete nftables script that atomically replaces the
 // router's table.
-func Render(p *Plan) string {
+func Render(p *Plan) string { return render(p, true) }
+
+// Fingerprint is Render without the bulk of country address ranges (which
+// are a pure function of the country codes): cheap to compute and compare
+// to decide whether the ruleset needs replacing.
+func Fingerprint(p *Plan) string { return render(p, false) }
+
+func render(p *Plan, full bool) string {
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
 
@@ -39,6 +46,20 @@ func Render(p *Plan) string {
 		}
 		if len(r.Dst6) > 0 {
 			w("\tset %s { type ipv6_addr; flags interval; auto-merge; %s}", SetCIDR(r.ID, true), elems(prefixes(r.Dst6)))
+		}
+		if len(r.Countries) > 0 {
+			var g4, g6 []string
+			if full && p.Geo != nil {
+				for _, cc := range r.Countries {
+					a, b := p.Geo(cc)
+					g4, g6 = append(g4, a...), append(g6, b...)
+				}
+			}
+			// The sets always exist so the rules can refer to them; without
+			// a country database they are simply empty and match nothing.
+			w("\t# countries: %s", strings.Join(r.Countries, " "))
+			w("\tset %s { type ipv4_addr; flags interval; auto-merge; %s}", SetGeo(r.ID, false), elems(g4))
+			w("\tset %s { type ipv6_addr; flags interval; auto-merge; %s}", SetGeo(r.ID, true), elems(g6))
 		}
 		if r.Domains {
 			for _, v6 := range []bool{false, true} {
@@ -101,7 +122,7 @@ func Render(p *Plan) string {
 		w("\tchain r_%s {", r.ID)
 		l4 := l4match(r)
 		verdict := set(r.Mark)
-		anyAddr := len(r.Dst4) == 0 && len(r.Dst6) == 0 && !r.Domains
+		anyAddr := len(r.Dst4) == 0 && len(r.Dst6) == 0 && !r.Domains && len(r.Countries) == 0
 		if anyAddr {
 			w("\t\t%s%s", l4, verdict)
 		}
@@ -110,6 +131,10 @@ func Render(p *Plan) string {
 		}
 		if len(r.Dst6) > 0 {
 			w("\t\t%sip6 daddr @%s %s", l4, SetCIDR(r.ID, true), verdict)
+		}
+		if len(r.Countries) > 0 {
+			w("\t\t%sip daddr @%s %s", l4, SetGeo(r.ID, false), verdict)
+			w("\t\t%sip6 daddr @%s %s", l4, SetGeo(r.ID, true), verdict)
 		}
 		if r.Domains {
 			w("\t\t%sip daddr @%s %s", l4, SetName(r.ID, false), verdict)

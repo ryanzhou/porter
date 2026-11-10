@@ -462,7 +462,7 @@ private struct RuleRow: View {
     }
 
     private var destinationSummary: String {
-        let count = rule.dst.domains.count + rule.dst.cidrs.count + rule.dst.ports.count
+        let count = rule.dst.domains.count + rule.dst.cidrs.count + rule.dst.countries.count + rule.dst.ports.count
         if count == 0 {
             return rule.dst.proto.isEmpty ? "anywhere" : "any " + rule.dst.proto.uppercased()
         }
@@ -541,8 +541,9 @@ struct RuleEditorView: View {
                 items: $draft.dst.cidrs,
                 placeholder: "203.0.113.0/24",
                 keyboard: .numbersAndPunctuation,
-                footer: "Traffic matches if it goes to any listed domain or address."
+                footer: "Single addresses or ranges."
             )
+            countriesSection
             protocolSection
             StringListEditor(
                 title: "Destination ports",
@@ -606,6 +607,33 @@ struct RuleEditorView: View {
         }
     }
 
+    private var countriesMissing: Bool {
+        model.status?.geoip.available == false
+    }
+
+    private var countriesSection: some View {
+        Section {
+            if countriesMissing {
+                Label("Country rules need the country database, which this router image does not have, so they will not match anything.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+            ForEach(Array(draft.dst.countries.enumerated()), id: \.offset) { item in
+                CountryRow(code: item.element)
+            }
+            .onDelete { offsets in
+                draft.dst.countries.remove(atOffsets: offsets)
+            }
+            NavigationLink("Add country") {
+                CountrySelectionList(selection: $draft.dst.countries)
+            }
+        } header: {
+            Text("Destination countries")
+        } footer: {
+            Text("A destination matches if it is in any listed domain, address range or country. The country is the one the router's country database gives for the destination address. Up to 64 countries.")
+        }
+    }
+
     private var protocolSection: some View {
         Section("Protocol") {
             Picker("Protocol", selection: $draft.dst.proto) {
@@ -636,6 +664,15 @@ struct RuleEditorView: View {
     private func save() {
         var cleaned = draft
         cleaned.name = cleaned.name.trimmingCharacters(in: .whitespaces)
+        // Country codes are stored in upper case, each one once.
+        var codes: [String] = []
+        for code in cleaned.dst.countries {
+            let upper = code.uppercased()
+            if !codes.contains(upper) {
+                codes.append(upper)
+            }
+        }
+        cleaned.dst.countries = codes
         let rule = cleaned
         Task {
             let ok = await model.update { cfg in
@@ -646,6 +683,73 @@ struct RuleEditorView: View {
             if ok {
                 dismiss()
             }
+        }
+    }
+}
+
+/// A country as a row: flag, name in the phone's language, and code.
+private struct CountryRow: View {
+    let code: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(countryFlag(code))
+            Text(countryName(code.uppercased()))
+            Spacer()
+            Text(code.uppercased())
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Every country, to tick the ones a rule should match.
+private struct CountrySelectionList: View {
+    @Binding var selection: [String]
+    @State private var search: String = ""
+
+    private var matches: [CountryChoice] {
+        let text = search.trimmingCharacters(in: .whitespaces)
+        if text.isEmpty { return CountryChoice.all }
+        return CountryChoice.all.filter { choice in
+            choice.name.localizedCaseInsensitiveContains(text) || choice.code.localizedCaseInsensitiveContains(text)
+        }
+    }
+
+    var body: some View {
+        List {
+            if matches.isEmpty {
+                Text("No country matches the search.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(matches) { choice in
+                Button {
+                    toggle(choice.code)
+                } label: {
+                    HStack(spacing: 8) {
+                        CountryRow(code: choice.code)
+                        if isSelected(choice.code) {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.tint)
+                        }
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+        }
+        .navigationTitle("Countries")
+        .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $search, prompt: "Country")
+    }
+
+    private func isSelected(_ code: String) -> Bool {
+        selection.contains(where: { $0.uppercased() == code })
+    }
+
+    private func toggle(_ code: String) {
+        if isSelected(code) {
+            selection.removeAll(where: { $0.uppercased() == code })
+        } else {
+            selection.append(code)
         }
     }
 }

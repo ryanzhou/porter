@@ -86,6 +86,31 @@ func formatDuration(_ seconds: Int64) -> String {
     return "\(total) s"
 }
 
+/// The flag emoji for a two-letter country code. Empty when there is no
+/// code or it is not two ASCII letters.
+func countryFlag(_ code: String?) -> String {
+    guard let code else { return "" }
+    let scalars = Array(code.unicodeScalars)
+    guard scalars.count == 2 else { return "" }
+    var flag = ""
+    for scalar in scalars {
+        var value: UInt32 = scalar.value
+        if value >= 97 && value <= 122 {
+            value -= 32
+        }
+        // A flag is the two letters as regional indicator symbols.
+        guard value >= 65, value <= 90, let indicator = Unicode.Scalar(0x1F1E6 + value - 65) else { return "" }
+        flag.unicodeScalars.append(indicator)
+    }
+    return flag
+}
+
+/// The name of a country in the phone's language; the code itself when
+/// the phone does not know it.
+func countryName(_ code: String) -> String {
+    Locale.current.localizedString(forRegionCode: code) ?? code
+}
+
 // MARK: - Status wording
 
 func internetLabel(_ state: String) -> String {

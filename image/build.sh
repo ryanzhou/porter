@@ -86,6 +86,32 @@ install -m 755 "$WORK/bin/porterctl" "$ROOT/usr/sbin/porterctl"
 mkdir -p "$ROOT/data" "$ROOT/boot/firmware"
 printf 'PORTER_VERSION=%s\nPORTER_BUILD_TIME=%s\n' "$VERSION" "$BUILD_TIME" > "$ROOT/etc/porter-release"
 
+# Country database for country rules and the flow list. It is baked in
+# here because the router itself never downloads anything. DB-IP publishes
+# a new file each month; early in a month the previous one may be all
+# there is.
+if [ "${PORTER_NO_GEOIP:-0}" != 1 ]; then
+    echo "==> country database"
+    GEO_DATE=
+    for month in "$(date -u +%Y-%m)" "$(date -u -d "$(date -u +%Y-%m-15) -1 month" +%Y-%m)"; do
+        if curl -fsS -o "$WORK/geoip.csv.gz" "https://download.db-ip.com/free/dbip-country-lite-$month.csv.gz"; then
+            GEO_DATE=$month
+            break
+        fi
+    done
+    if [ -z "$GEO_DATE" ] || ! gzip -dc "$WORK/geoip.csv.gz" | head -n 1 | grep -Eq '^[0-9a-fA-F.:]+,[0-9a-fA-F.:]+,[A-Z]{2}$'; then
+        echo "could not fetch the country database from db-ip.com (set PORTER_NO_GEOIP=1 to build without country rules)" >&2
+        exit 1
+    fi
+    install -D -m 644 "$WORK/geoip.csv.gz" "$ROOT/usr/share/porter/geoip.csv.gz"
+    echo "$GEO_DATE" > "$ROOT/usr/share/porter/geoip.csv.gz.date"
+    cat > "$ROOT/usr/share/porter/geoip.LICENSE" <<LICENSE
+IP to Country Lite database ($GEO_DATE) by DB-IP, https://db-ip.com
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0).
+LICENSE
+    echo "    DB-IP country lite $GEO_DATE"
+fi
+
 # The router's own lookups go through its own forwarder.
 ln -sfn /run/porter/resolv.conf "$ROOT/etc/resolv.conf"
 # No machine identity or host keys baked into an image that many cards

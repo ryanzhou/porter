@@ -49,6 +49,11 @@ type Server struct {
 	recent []Query
 	next   int
 
+	// names remembers which name each resolved address was looked up as,
+	// so that connections can be shown by name.
+	nameMu sync.Mutex
+	names  map[netip.Addr]string
+
 	// loopbackClients makes loopback sources subject to policy (tests).
 	loopbackClients bool
 }
@@ -64,7 +69,7 @@ const (
 )
 
 func New(hooks Hooks, log *slog.Logger) *Server {
-	s := &Server{hooks: hooks, cache: newCache(4096), up: newUpstreams(), log: log}
+	s := &Server{hooks: hooks, cache: newCache(4096), up: newUpstreams(), log: log, names: map[netip.Addr]string{}}
 	s.policy.Store(&Policy{})
 	return s
 }
@@ -141,6 +146,35 @@ func (s *Server) Close() {
 		srv.Shutdown()
 	}
 	s.servers = nil
+}
+
+const maxNames = 8192
+
+func (s *Server) remember(name string, addrs []netip.Addr) {
+	if len(addrs) == 0 {
+		return
+	}
+	s.nameMu.Lock()
+	defer s.nameMu.Unlock()
+	for _, a := range addrs {
+		if _, ok := s.names[a]; !ok && len(s.names) >= maxNames {
+			n := 64
+			for k := range s.names {
+				delete(s.names, k)
+				if n--; n == 0 {
+					break
+				}
+			}
+		}
+		s.names[a] = name
+	}
+}
+
+// NameFor returns the name an address was most recently resolved as.
+func (s *Server) NameFor(a netip.Addr) string {
+	s.nameMu.Lock()
+	defer s.nameMu.Unlock()
+	return s.names[a.Unmap()]
 }
 
 // Recent returns the query log, oldest first, optionally for one device.
@@ -244,9 +278,10 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
+	addrs, ttl := answers(resp)
+	s.remember(name, addrs)
 	// Teach the classifier before the client can act on the answer.
 	if ids := p.matchingRules(name); len(ids) > 0 && s.hooks.Learn != nil {
-		addrs, ttl := answers(resp)
 		if len(addrs) > 0 {
 			for _, id := range ids {
 				if err := s.hooks.Learn(id, addrs, ttl); err != nil {

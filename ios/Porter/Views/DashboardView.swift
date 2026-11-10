@@ -13,6 +13,7 @@ struct DashboardView: View {
                 if status.portal.captive {
                     PortalSection(portal: status.portal)
                 }
+                TrafficLinksSection()
                 AccessPointSection(aps: status.aps)
                 if !status.stas.isEmpty {
                     UpstreamWifiSection(stas: status.stas)
@@ -124,6 +125,23 @@ private struct PortalSection: View {
         }
         if let url = URL(string: text) {
             UIApplication.shared.open(url)
+        }
+    }
+}
+
+private struct TrafficLinksSection: View {
+    var body: some View {
+        Section("Traffic") {
+            NavigationLink {
+                TrafficView()
+            } label: {
+                Label("Traffic", systemImage: "chart.bar.xaxis")
+            }
+            NavigationLink {
+                SpeedTestView()
+            } label: {
+                Label("Speed test", systemImage: "speedometer")
+            }
         }
     }
 }

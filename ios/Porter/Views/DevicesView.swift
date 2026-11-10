@@ -141,6 +141,8 @@ struct DeviceDetailView: View {
     @State private var original: DeviceSettings? = nil
     @State private var queries: [DNSQuery] = []
     @State private var loadingQueries = false
+    @State private var usage: [TrafficSample] = []
+    @State private var usageLoaded = false
 
     private var device: DeviceInfo? { model.device(mac) }
 
@@ -161,6 +163,7 @@ struct DeviceDetailView: View {
             if let device {
                 settingsSection(device)
                 DeviceFactsSection(device: device)
+                usageSection
                 lookupsSection
                 if !device.online {
                     Section {
@@ -189,6 +192,7 @@ struct DeviceDetailView: View {
         .onAppear { sync() }
         .onChange(of: device?.settings) { _, _ in sync() }
         .task { await loadQueries() }
+        .task { await loadUsage() }
     }
 
     private func settingsSection(_ device: DeviceInfo) -> some View {
@@ -208,6 +212,23 @@ struct DeviceDetailView: View {
             Text("Settings")
         } footer: {
             Text("The route overrides the default for this device; rules on the VPN tab still come first. A reserved address has to be inside the router's local network.")
+        }
+    }
+
+    private var usageSection: some View {
+        Section {
+            if usageLoaded {
+                TrafficChart(samples: usage, unit: Calendar.Component.minute, height: 140)
+            } else {
+                ProgressView()
+            }
+            NavigationLink("Connections") {
+                FlowsView(mac: mac)
+            }
+        } header: {
+            Text("Usage")
+        } footer: {
+            Text("This device's traffic over the last hour, minute by minute.")
         }
     }
 
@@ -287,6 +308,15 @@ struct DeviceDetailView: View {
         loadingQueries = false
         if let found {
             queries = Array(found.suffix(100).reversed())
+        }
+    }
+
+    private func loadUsage() async {
+        let target = mac
+        let found: TrafficStats? = await model.fetch { try await $0.trafficStats(mac: target) }
+        usageLoaded = true
+        if let found {
+            usage = found.minutes
         }
     }
 

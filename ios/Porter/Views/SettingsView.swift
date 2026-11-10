@@ -64,6 +64,7 @@ private struct RouterSettingsSection: View {
             } label: {
                 LabeledContent("SSH", value: model.config?.system.ssh.enabled == true ? "On" : "Off")
             }
+            NavigationLink("Speed test server") { SpeedTestServerPage() }
         }
     }
 }
@@ -441,6 +442,56 @@ private struct SSHFields: View {
     }
 }
 
+// MARK: - Speed test server
+
+/// What the router accepts: an http or https address with a host, up to
+/// 512 characters.
+private func validWebURL(_ text: String) -> Bool {
+    guard !text.isEmpty, text.utf8.count <= 512, !text.contains(" ") else { return false }
+    guard let url = URL(string: text), let scheme = url.scheme?.lowercased() else { return false }
+    guard scheme == "http" || scheme == "https" else { return false }
+    return !(url.host ?? "").isEmpty
+}
+
+private struct SpeedTestServerPage: View {
+    var body: some View {
+        ConfigEditor(
+            "Speed test server",
+            \RouterConfig.speedtest,
+            valid: { (speedtest: SpeedTestConfig) -> Bool in validWebURL(speedtest.downloadUrl) && validWebURL(speedtest.uploadUrl) }
+        ) { (speedtest: Binding<SpeedTestConfig>) in
+            SpeedTestServerFields(speedtest: speedtest)
+        }
+    }
+}
+
+private struct SpeedTestServerFields: View {
+    @Binding var speedtest: SpeedTestConfig
+
+    var body: some View {
+        Section {
+            TextField("https://example.com/large-file", text: $speedtest.downloadUrl)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        } header: {
+            Text("Download URL")
+        } footer: {
+            Text("Has to return a large file. The router fetches it several times over to measure download speed.")
+        }
+        Section {
+            TextField("https://example.com/upload", text: $speedtest.uploadUrl)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        } header: {
+            Text("Upload URL")
+        } footer: {
+            Text("Has to accept data sent to it with POST. Both addresses start with http:// or https://, and the router contacts them only when a speed test is run from this app.")
+        }
+    }
+}
+
 // MARK: - Paired phones
 
 private struct PairedPhonesPage: View {
@@ -635,11 +686,25 @@ private struct SystemSection: View {
 private struct AboutSection: View {
     @EnvironmentObject private var model: AppModel
 
+    /// The month the database was published, such as "2026-11". The
+    /// router may have a database without knowing its date.
+    private var countryDatabase: String {
+        guard let status = model.status else { return "" }
+        if !status.geoip.available { return "Not installed" }
+        if let date = status.geoip.date, !date.isEmpty { return date }
+        return "Installed"
+    }
+
     var body: some View {
-        Section("About") {
+        Section {
             LabeledContent("Name", value: model.status?.name ?? "")
             LabeledContent("Identifier", value: model.status?.id ?? "")
             LabeledContent("Version", value: model.status?.version ?? "")
+            LabeledContent("Country database", value: countryDatabase)
+        } header: {
+            Text("About")
+        } footer: {
+            Text(verbatim: "IP geolocation by DB-IP (https://db-ip.com)")
         }
     }
 }

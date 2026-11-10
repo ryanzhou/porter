@@ -90,6 +90,12 @@ final class InteropTests: XCTestCase {
         _ = try await router.activity()
         _ = try await router.logs()
         _ = try await router.pairedPhones()
+        let history = try await router.trafficStats()
+        XCTAssertEqual(history.minutes.count, 60)
+        XCTAssertEqual(history.hours.count, 72)
+        _ = try await router.topTalkers()
+        _ = try await router.flows()
+        _ = try await router.speedTestHistory()
 
         // Round-trip the configuration through the Swift models: the
         // router validates the whole document on the way back in.
@@ -119,9 +125,10 @@ final class InteropTests: XCTestCase {
         config.policy.rules = [PolicyRule(
             id: "r1", name: "Streaming direct",
             src: RuleSource(devices: ["02:aa:00:00:00:01"]),
-            dst: RuleDestination(domains: ["*.video.example"], proto: "tcp", ports: ["443", "8000-8100"]),
+            dst: RuleDestination(domains: ["*.video.example"], countries: ["jp"], proto: "tcp", ports: ["443", "8000-8100"]),
             action: RouteAction.direct.raw)]
         config.wan.wifiMac = MACPolicy(mode: .random, address: nil)
+        config.speedtest.uploadUrl = "https://speed.example.net/upload"
         let rev = try await router.setConfig(config)
         XCTAssertGreaterThan(rev, config.rev)
 
@@ -131,6 +138,8 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(stored.dns.blocked, ["ads.example.com"]) // normalised by the router
         XCTAssertEqual(stored.devices.first?.mac, "02:aa:00:00:00:01")
         XCTAssertEqual(stored.policy.rules.first?.dst.domains, ["video.example"])
+        XCTAssertEqual(stored.policy.rules.first?.dst.countries, ["JP"])
+        XCTAssertTrue(stored.speedtest.downloadUrl.hasPrefix("https://"))
         XCTAssertEqual(stored.vpns.first?.wireguard, wg)
         XCTAssertEqual(stored.wan.wifiMac.mode, .random)
         XCTAssertNotNil(stored.wan.wifiMac.address) // the router picked one

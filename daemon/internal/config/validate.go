@@ -39,6 +39,9 @@ func (c *Config) Normalize() {
 		for j := range r.Dst.Domains {
 			r.Dst.Domains[j] = NormalizeDomain(r.Dst.Domains[j])
 		}
+		for j := range r.Dst.Countries {
+			r.Dst.Countries[j] = strings.ToUpper(strings.TrimSpace(r.Dst.Countries[j]))
+		}
 		r.Dst.Proto = strings.ToLower(r.Dst.Proto)
 	}
 	for i := range c.DNS.Blocked {
@@ -49,6 +52,10 @@ func (c *Config) Normalize() {
 	}
 	if c.WAN.EthMAC.Mode == MACRandom && c.WAN.EthMAC.Address == "" {
 		c.WAN.EthMAC.Address = RandomMAC()
+	}
+	// Configurations saved before speed tests existed have no server set.
+	if c.SpeedTest.DownloadURL == "" && c.SpeedTest.UploadURL == "" {
+		c.SpeedTest = DefaultSpeedTest()
 	}
 	// The app decodes this document strictly: a list is always a list,
 	// never null.
@@ -129,7 +136,20 @@ func (c *Config) Validate() error {
 	if err := c.validateDevices(); err != nil {
 		return err
 	}
+	if err := c.validateSpeedTest(); err != nil {
+		return err
+	}
 	return c.validatePolicy()
+}
+
+func (c *Config) validateSpeedTest() error {
+	for what, raw := range map[string]string{"download": c.SpeedTest.DownloadURL, "upload": c.SpeedTest.UploadURL} {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || len(raw) > 512 || !printable(raw) {
+			return fmt.Errorf("speed test %s URL must be an http:// or https:// URL", what)
+		}
+	}
+	return nil
 }
 
 func printable(s string) bool {
@@ -590,7 +610,7 @@ func (c *Config) validatePolicy() error {
 		if err := c.validAction(r.Action, false); err != nil {
 			return fmt.Errorf("rule %q: %w", r.Name, err)
 		}
-		if len(r.Src.Devices) > 64 || len(r.Src.CIDRs) > 64 || len(r.Dst.Domains) > 256 || len(r.Dst.CIDRs) > 256 || len(r.Dst.Ports) > 32 {
+		if len(r.Src.Devices) > 64 || len(r.Src.CIDRs) > 64 || len(r.Dst.Domains) > 256 || len(r.Dst.CIDRs) > 256 || len(r.Dst.Ports) > 32 || len(r.Dst.Countries) > 64 {
 			return fmt.Errorf("rule %q: too many entries", r.Name)
 		}
 		for _, m := range r.Src.Devices {
@@ -611,6 +631,11 @@ func (c *Config) validatePolicy() error {
 		for _, p := range r.Dst.CIDRs {
 			if _, err := ParsePrefixLoose(p); err != nil {
 				return fmt.Errorf("rule %q: invalid destination %q", r.Name, p)
+			}
+		}
+		for _, cc := range r.Dst.Countries {
+			if !reCountry.MatchString(cc) {
+				return fmt.Errorf("rule %q: %q is not a two-letter country code", r.Name, cc)
 			}
 		}
 		switch r.Dst.Proto {

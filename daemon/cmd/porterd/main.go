@@ -23,6 +23,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"github.com/ryanzhou/porter/daemon/internal/core"
+	"github.com/ryanzhou/porter/daemon/internal/geoip"
 )
 
 // Set at build time.
@@ -49,6 +50,7 @@ func main() {
 	dataDir := flag.String("data", "/data/porter", "persistent state directory")
 	runDir := flag.String("run", "/run/porter", "runtime directory")
 	noBLE := flag.Bool("no-ble", false, "do not start the Bluetooth control service")
+	geoPath := flag.String("geoip", geoip.DefaultPath, "country database (DB-IP country lite CSV, optionally gzipped)")
 	wgImpl := flag.String("wg-userspace", "", "wireguard-go binary to use instead of the kernel module")
 	debug := flag.Bool("debug", false, "verbose logging")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -91,7 +93,7 @@ func main() {
 	c, err := core.New(core.Options{
 		DataDir: *dataDir, RunDir: *runDir,
 		DHCPHook: hooks[dhcpHook], LeaseHook: hooks[leaseHook],
-		WGUserspace: *wgImpl, Version: version, BuildTime: time.Unix(bt, 0),
+		WGUserspace: *wgImpl, GeoIPPath: *geoPath, Version: version, BuildTime: time.Unix(bt, 0),
 		Log: log, Logs: ring,
 	})
 	if err != nil {
