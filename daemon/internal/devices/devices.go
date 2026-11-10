@@ -26,10 +26,12 @@ type Entry struct {
 	// OnlineSince is when the device last appeared (unix time).
 	OnlineSince int64 `json:"online_since,omitempty"`
 	// Link is the access point interface, or "wired".
-	Link   string `json:"link,omitempty"`
-	Signal int    `json:"signal,omitempty"`
-	Up     uint64 `json:"up"`   // bytes sent by the device
-	Down   uint64 `json:"down"` // bytes sent to the device
+	Link string `json:"link,omitempty"`
+	// Network is the id of the network the device is on.
+	Network string `json:"network,omitempty"`
+	Signal  int    `json:"signal,omitempty"`
+	Up      uint64 `json:"up"`   // bytes sent by the device
+	Down    uint64 `json:"down"` // bytes sent to the device
 }
 
 type Table struct {
@@ -137,9 +139,10 @@ type Station struct {
 	Signal int
 }
 
-// Observe updates presence from the neighbour table and the access
-// points' station lists.
-func (t *Table) Observe(neigh map[netip.Addr]string, stations []Station) {
+// Observe updates presence from the neighbour tables and the access
+// points' station lists. home says which network each device was seen
+// on.
+func (t *Table) Observe(neigh map[netip.Addr]string, stations []Station, home map[string]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now().Unix()
@@ -175,8 +178,11 @@ func (t *Table) Observe(neigh map[netip.Addr]string, stations []Station) {
 			}
 			sort.Strings(v6[mac])
 			e.IPv6 = v6[mac]
+			if n := home[mac]; n != "" {
+				e.Network = n
+			}
 		} else {
-			e.Link, e.Signal, e.IPv6 = "", 0, nil
+			e.Link, e.Signal, e.IPv6, e.Network = "", 0, nil, ""
 		}
 		if was != e.Online {
 			t.dirty = true

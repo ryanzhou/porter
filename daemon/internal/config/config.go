@@ -15,19 +15,24 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // Config is the whole user-controllable state of the router. It is sent to
 // the app as JSON and written back section by section.
 type Config struct {
-	Version   int       `json:"version"`
-	Rev       uint64    `json:"rev"`
-	System    System    `json:"system"`
-	Radios    []Radio   `json:"radios"`
-	Ethernet  []EthPort `json:"ethernet"`
-	AP        AP        `json:"ap"`
-	WAN       WAN       `json:"wan"`
+	Version  int       `json:"version"`
+	Rev      uint64    `json:"rev"`
+	System   System    `json:"system"`
+	Radios   []Radio   `json:"radios"`
+	Ethernet []EthPort `json:"ethernet"`
+	// Wifi lists the Wi-Fi networks the router broadcasts. The first is
+	// the main one and always exists.
+	Wifi []SSID `json:"wifi"`
+	WAN  WAN    `json:"wan"`
+	// LAN holds what all of the router's own networks have in common;
+	// Networks lists them. The first is the main one and always exists.
 	LAN       LAN       `json:"lan"`
+	Networks  []Network `json:"networks"`
 	DNS       DNS       `json:"dns"`
 	VPNs      []VPN     `json:"vpns"`
 	Policy    Policy    `json:"policy"`
@@ -103,6 +108,8 @@ type EthPort struct {
 	Role string `json:"role"`
 	// IP is how the port gets its addresses when it is an uplink.
 	IP IPSetup `json:"ip"`
+	// Network is the network a LAN port belongs to.
+	Network string `json:"network"`
 }
 
 // IPSetup is how an uplink gets its addresses, per address family. The
@@ -140,14 +147,71 @@ const (
 	SecWPA3     = "wpa3"
 )
 
-// AP is the network the router broadcasts. All AP radios share it.
-type AP struct {
+// SSID is one Wi-Fi network the router broadcasts. Every radio that is an
+// access point carries all of them, as far as it is able to.
+type SSID struct {
+	ID         string `json:"id"`
 	SSID       string `json:"ssid"`
 	Passphrase string `json:"passphrase"`
 	Security   string `json:"security"`
 	Hidden     bool   `json:"hidden"`
 	// Isolate stops wireless clients from talking to each other.
 	Isolate bool `json:"isolate"`
+	// Network is the network its clients join.
+	Network string `json:"network"`
+	Enabled bool   `json:"enabled"`
+}
+
+// Identifiers of the two things that always exist.
+const (
+	MainSSID    = "main"
+	MainNetwork = "lan"
+)
+
+// Limits on how much can be configured.
+const (
+	MaxSSIDs    = 4
+	MaxNetworks = 4
+)
+
+// Network is one of the router's own networks: a subnet with its own
+// address range, reached through the Wi-Fi networks and wired ports
+// assigned to it.
+type Network struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Address is the router's address with prefix, e.g. 10.83.0.1/24.
+	Address string `json:"address"`
+	// ULAPrefix is the IPv6 /64 announced; traffic is NAT66'd upstream.
+	ULAPrefix string `json:"ula_prefix"`
+	// Isolated keeps the devices here from opening connections to the
+	// router's other networks. They can still be reached from those.
+	Isolated bool `json:"isolated"`
+	// Route overrides Policy.Default for this network: "", "direct",
+	// "vpn:<id>" or "block". A device's own route wins over it.
+	Route string `json:"route"`
+}
+
+// Prefix returns the router's address on the network and its subnet.
+func (n Network) Prefix() (netip.Addr, netip.Prefix) {
+	p := netip.MustParsePrefix(n.Address)
+	return p.Addr(), p.Masked()
+}
+
+// ULA returns the router's IPv6 address on the network (::1 in the /64)
+// and the prefix.
+func (n Network) ULA() (netip.Addr, netip.Prefix) {
+	p := netip.MustParsePrefix(n.ULAPrefix).Masked()
+	a := p.Addr().As16()
+	a[15] = 1
+	return netip.AddrFrom16(a), p
+}
+
+// Contains reports whether an address belongs to the network.
+func (n Network) Contains(a netip.Addr) bool {
+	_, v4 := n.Prefix()
+	_, v6 := n.ULA()
+	return v4.Contains(a) || v6.Contains(a)
 }
 
 const (
@@ -178,10 +242,31 @@ type WAN struct {
 	// WifiMAC and EthMAC control the address presented upstream.
 	WifiMAC MACPolicy `json:"wifi_mac"`
 	EthMAC  MACPolicy `json:"eth_mac"`
-	// PreferWifi puts wireless uplinks ahead of wired ones when both are up.
-	PreferWifi bool `json:"prefer_wifi"`
+	// Order ranks the uplinks, best first. The entries are uplink keys:
+	// UplinkEth of a wired port, UplinkWifi for an upstream Wi-Fi network,
+	// UplinkPhone for a phone sharing its connection over USB. The router
+	// uses the first one that works.
+	Order []string `json:"order"`
 	// Probe controls connectivity / captive portal detection.
 	Probe Probe `json:"probe"`
+}
+
+// Uplink keys, as used in WAN.Order.
+const (
+	UplinkWifi  = "wifi"
+	UplinkPhone = "phone"
+	uplinkEth   = "eth:"
+)
+
+// UplinkEth is the key of a wired port.
+func UplinkEth(name string) string { return uplinkEth + name }
+
+// EthOfUplink returns the port an uplink key names.
+func EthOfUplink(key string) (string, bool) {
+	if strings.HasPrefix(key, uplinkEth) {
+		return key[len(uplinkEth):], true
+	}
+	return "", false
 }
 
 type Probe struct {
@@ -192,16 +277,12 @@ type Probe struct {
 }
 
 type LAN struct {
-	// Address is the router's LAN address with prefix, e.g. 10.83.0.1/24.
-	Address string `json:"address"`
-	// AutoRenumber moves the LAN to another subnet when it collides with
-	// the upstream network.
+	// AutoRenumber moves a network to another subnet when it collides
+	// with the upstream network.
 	AutoRenumber bool   `json:"auto_renumber"`
 	LeaseMinutes int    `json:"lease_minutes"`
 	Domain       string `json:"domain"`
 	IPv6         bool   `json:"ipv6"`
-	// ULAPrefix is the /64 announced on the LAN; traffic is NAT66'd upstream.
-	ULAPrefix string `json:"ula_prefix"`
 }
 
 type DNS struct {
@@ -327,10 +408,12 @@ type Rule struct {
 }
 
 // Src matches where traffic comes from. Empty matches every LAN client;
-// otherwise a packet matches if it comes from any listed device or prefix.
+// otherwise a packet matches if it comes from any listed device, prefix
+// or network (by id).
 type Src struct {
-	Devices []string `json:"devices"`
-	CIDRs   []string `json:"cidrs"`
+	Devices  []string `json:"devices"`
+	CIDRs    []string `json:"cidrs"`
+	Networks []string `json:"networks"`
 }
 
 // Dst matches where traffic is going. Domains, CIDRs and Countries are
@@ -345,7 +428,7 @@ type Dst struct {
 	Ports     []string `json:"ports"`
 }
 
-func (s Src) Any() bool { return len(s.Devices) == 0 && len(s.CIDRs) == 0 }
+func (s Src) Any() bool { return len(s.Devices) == 0 && len(s.CIDRs) == 0 && len(s.Networks) == 0 }
 func (d Dst) Any() bool {
 	return len(d.Domains) == 0 && len(d.CIDRs) == 0 && len(d.Countries) == 0 && d.Proto == "" && len(d.Ports) == 0
 }
@@ -354,12 +437,12 @@ func (d Dst) Any() bool {
 type Device struct {
 	MAC  string `json:"mac"`
 	Name string `json:"name"`
-	// Route overrides Policy.Default for this device: "", "direct",
-	// "vpn:<id>" or "block".
+	// Route overrides Policy.Default (and its network's route) for this
+	// device: "", "direct", "vpn:<id>" or "block".
 	Route string `json:"route"`
 	// Paused cuts the device off without forgetting its settings.
 	Paused bool `json:"paused"`
-	// IP reserves a fixed IPv4 address inside the LAN subnet.
+	// IP reserves a fixed IPv4 address inside one of the networks.
 	IP string `json:"ip,omitempty"`
 	// NoAdblock exempts the device from ad blocking.
 	NoAdblock bool `json:"no_adblock"`
@@ -374,25 +457,20 @@ func Default() *Config {
 		System:  System{Name: "Porter"},
 		Radios:  []Radio{{ID: "builtin", Role: RoleAP, Band: "5"}},
 		Ethernet: []EthPort{
-			{Name: "eth0", Role: EthWAN},
+			{Name: "eth0", Role: EthWAN, Network: MainNetwork},
 		},
-		AP: AP{Security: SecWPA2},
+		Wifi: []SSID{{ID: MainSSID, Security: SecWPA2, Network: MainNetwork, Enabled: true}},
 		WAN: WAN{
 			WifiMAC: MACPolicy{Mode: MACHardware},
 			EthMAC:  MACPolicy{Mode: MACHardware},
+			Order:   []string{UplinkEth("eth0"), UplinkWifi, UplinkPhone},
 			Probe: Probe{
 				URL:    "http://captive.apple.com/hotspot-detect.html",
 				Expect: "Success",
 			},
 		},
-		LAN: LAN{
-			Address:      "10.83.0.1/24",
-			AutoRenumber: true,
-			LeaseMinutes: 720,
-			Domain:       "lan",
-			IPv6:         true,
-			ULAPrefix:    randomULA(),
-		},
+		LAN:       LAN{AutoRenumber: true, LeaseMinutes: 720, Domain: "lan", IPv6: true},
+		Networks:  []Network{{ID: MainNetwork, Name: "Main", Address: "10.83.0.1/24", ULAPrefix: randomULA()}},
 		DNS:       DNS{Intercept: true, Adblock: Adblock{Lists: []string{DefaultBlockList}}},
 		Policy:    Policy{Default: ActDirect},
 		SpeedTest: DefaultSpeedTest(),
@@ -442,7 +520,77 @@ func (c *Config) Clone() *Config {
 
 // Ready reports whether the minimum needed to start radios has been set.
 func (c *Config) Ready() bool {
-	return c.System.Country != "" && c.AP.SSID != "" && c.AP.Passphrase != ""
+	return c.System.Country != "" && len(c.Wifi) > 0 && c.Wifi[0].SSID != "" && c.Wifi[0].Passphrase != ""
+}
+
+// SetWifiUplink makes one radio the one that joins upstream Wi-Fi
+// networks, or none of them (id ""), and leaves the router's own network
+// on the air: the radio shares itself between both jobs when no other
+// radio is broadcasting, and a radio that was the uplink goes back to
+// broadcasting. present says which radios are plugged in, and canBoth
+// which can do both jobs at once.
+func (c *Config) SetWifiUplink(id string, present, canBoth func(id string) bool) error {
+	if id != "" && (c.Radio(id) == nil || !present(id)) {
+		return fmt.Errorf("that radio is not there")
+	}
+	others := 0
+	for i := range c.Radios {
+		r := &c.Radios[i]
+		if r.ID == id {
+			continue
+		}
+		if r.Role == RoleWAN || r.Role == RoleAPWAN {
+			r.Role = RoleAP
+		}
+		if r.Role == RoleAP && present(r.ID) {
+			others++
+		}
+	}
+	if id == "" {
+		return nil
+	}
+	switch r := c.Radio(id); {
+	case others > 0:
+		r.Role = RoleWAN
+	case canBoth(id):
+		r.Role = RoleAPWAN
+	default:
+		return fmt.Errorf("This adapter cannot broadcast your network and join another at the same time, and there is no other radio for your network.")
+	}
+	return nil
+}
+
+// Main returns the main network.
+func (c *Config) Main() *Network { return &c.Networks[0] }
+
+// Network returns the network with the given id.
+func (c *Config) Network(id string) *Network {
+	for i := range c.Networks {
+		if c.Networks[i].ID == id {
+			return &c.Networks[i]
+		}
+	}
+	return nil
+}
+
+// NetworkOf returns the network an address belongs to.
+func (c *Config) NetworkOf(a netip.Addr) *Network {
+	for i := range c.Networks {
+		if c.Networks[i].Contains(a) {
+			return &c.Networks[i]
+		}
+	}
+	return nil
+}
+
+// SSID returns the Wi-Fi network with the given id.
+func (c *Config) SSID(id string) *SSID {
+	for i := range c.Wifi {
+		if c.Wifi[i].ID == id {
+			return &c.Wifi[i]
+		}
+	}
+	return nil
 }
 
 // Radio returns the configured radio with the given id.
@@ -471,20 +619,6 @@ func (c *Config) Device(mac string) *Device {
 		}
 	}
 	return nil
-}
-
-// LANPrefix returns the router address and the subnet it sits in.
-func (c *Config) LANPrefix() (netip.Addr, netip.Prefix) {
-	p := netip.MustParsePrefix(c.LAN.Address)
-	return p.Addr(), p.Masked()
-}
-
-// ULA returns the router's IPv6 LAN address (::1 in the ULA /64) and prefix.
-func (c *Config) ULA() (netip.Addr, netip.Prefix) {
-	p := netip.MustParsePrefix(c.LAN.ULAPrefix).Masked()
-	a := p.Addr().As16()
-	a[15] = 1
-	return netip.AddrFrom16(a), p
 }
 
 // Store reads and writes the configuration file atomically.
@@ -529,7 +663,62 @@ func (s *Store) Load() (*Config, error) {
 //
 // When SchemaVersion is raised, the step from the previous version goes
 // here. Without it a router that updates itself would lose its settings.
-var migrations = map[int]func(doc map[string]any) error{}
+var migrations = map[int]func(doc map[string]any) error{
+	1: networksAndOrder,
+}
+
+// networksAndOrder is the step from format 1, which had one Wi-Fi network
+// ("ap"), one LAN ("lan.address") and a single switch for preferring Wi-Fi
+// over wired uplinks, to format 2 with its lists of Wi-Fi networks and
+// networks and its ranking of uplinks.
+func networksAndOrder(doc map[string]any) error {
+	section := func(name string) map[string]any {
+		m, _ := doc[name].(map[string]any)
+		if m == nil {
+			m = map[string]any{}
+		}
+		return m
+	}
+	ap := section("ap")
+	ssid := map[string]any{"id": MainSSID, "network": MainNetwork, "enabled": true}
+	for _, k := range []string{"ssid", "passphrase", "security", "hidden", "isolate"} {
+		if v, ok := ap[k]; ok {
+			ssid[k] = v
+		}
+	}
+	doc["wifi"] = []any{ssid}
+	delete(doc, "ap")
+
+	lan := section("lan")
+	network := map[string]any{"id": MainNetwork, "name": "Main"}
+	for _, k := range []string{"address", "ula_prefix"} {
+		if v, ok := lan[k]; ok {
+			network[k] = v
+		}
+		delete(lan, k)
+	}
+	doc["lan"] = lan
+	doc["networks"] = []any{network}
+
+	wan := section("wan")
+	var wired []any
+	ports, _ := doc["ethernet"].([]any)
+	for _, p := range ports {
+		if m, _ := p.(map[string]any); m != nil {
+			if name, _ := m["name"].(string); name != "" {
+				wired = append(wired, UplinkEth(name))
+			}
+		}
+	}
+	order := append(append([]any{}, wired...), UplinkWifi)
+	if prefer, _ := wan["prefer_wifi"].(bool); prefer {
+		order = append([]any{UplinkWifi}, wired...)
+	}
+	wan["order"] = append(order, UplinkPhone)
+	delete(wan, "prefer_wifi")
+	doc["wan"] = wan
+	return nil
+}
 
 // migrate brings a stored document up to schema version to.
 func migrate(raw []byte, to int, steps map[int]func(doc map[string]any) error) ([]byte, error) {

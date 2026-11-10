@@ -90,9 +90,14 @@ func (c *Config) Normalize() {
 		}
 		m.Up, m.Down = strings.ToLower(strings.TrimSpace(m.Up)), strings.ToLower(strings.TrimSpace(m.Down))
 	}
+	c.normalizeNetworks()
 	for i := range c.Ethernet {
 		c.Ethernet[i].IP.normalize()
+		if c.Ethernet[i].Network == "" || c.Ethernet[i].Role != EthLAN {
+			c.Ethernet[i].Network = MainNetwork
+		}
 	}
+	c.normalizeOrder()
 	for i := range c.WAN.Networks {
 		c.WAN.Networks[i].IP.normalize()
 	}
@@ -103,6 +108,141 @@ func (c *Config) Normalize() {
 	// The app decodes this document strictly: a list is always a list,
 	// never null.
 	fillNilSlices(reflect.ValueOf(c).Elem())
+}
+
+// Subnets are the address ranges the router gives its networks when left
+// to choose: for a new network, and for one that has to move out of the
+// way of the upstream network.
+var Subnets = []string{
+	"10.83.0.1/24", "10.84.0.1/24", "172.23.83.1/24", "192.168.83.1/24",
+	"10.85.0.1/24", "10.86.0.1/24", "172.23.84.1/24", "192.168.84.1/24",
+}
+
+// FreeSubnet returns the first of Subnets that overlaps none of the
+// prefixes in use.
+func FreeSubnet(taken []netip.Prefix) (netip.Prefix, bool) {
+	for _, s := range Subnets {
+		p := netip.MustParsePrefix(s)
+		free := true
+		for _, t := range taken {
+			if t.Masked().Overlaps(p.Masked()) {
+				free = false
+			}
+		}
+		if free {
+			return p, true
+		}
+	}
+	return netip.Prefix{}, false
+}
+
+// normalizeNetworks makes sure the two things that always exist do, and
+// fills in what a new Wi-Fi network or network was created without: an id,
+// an address range, an IPv6 prefix.
+func (c *Config) normalizeNetworks() {
+	if len(c.Networks) == 0 {
+		c.Networks = []Network{{Name: "Main"}}
+	}
+	c.Networks[0].ID = MainNetwork
+	var taken []netip.Prefix
+	for _, n := range c.Networks {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(n.Address)); err == nil {
+			taken = append(taken, p)
+		}
+	}
+	for i := range c.Networks {
+		n := &c.Networks[i]
+		n.ID, n.Name, n.Address, n.ULAPrefix = strings.TrimSpace(n.ID), strings.TrimSpace(n.Name), strings.TrimSpace(n.Address), strings.TrimSpace(n.ULAPrefix)
+		if n.ID == "" {
+			n.ID = NewID()
+		}
+		if n.Address == "" {
+			if p, ok := FreeSubnet(taken); ok {
+				n.Address = p.String()
+				taken = append(taken, p)
+			}
+		}
+		if n.ULAPrefix == "" {
+			n.ULAPrefix = randomULA()
+		}
+	}
+	if len(c.Wifi) == 0 {
+		c.Wifi = []SSID{{Security: SecWPA2, Enabled: true}}
+	}
+	c.Wifi[0].ID = MainSSID
+	for i := range c.Wifi {
+		w := &c.Wifi[i]
+		if w.ID = strings.TrimSpace(w.ID); w.ID == "" {
+			w.ID = NewID()
+		}
+		if w.Security == "" {
+			w.Security = SecWPA2
+		}
+		if w.Network == "" {
+			w.Network = MainNetwork
+		}
+	}
+	for i := range c.Policy.Rules {
+		for j := range c.Policy.Rules[i].Src.Networks {
+			c.Policy.Rules[i].Src.Networks[j] = strings.TrimSpace(c.Policy.Rules[i].Src.Networks[j])
+		}
+	}
+}
+
+// normalizeOrder makes the ranking of uplinks complete: every wired port
+// has a place in it, as do Wi-Fi and a tethered phone, and nothing is in
+// it twice. What is missing goes where it would be by default: wired
+// ports ahead of Wi-Fi, a phone last.
+func (c *Config) normalizeOrder() {
+	port := map[string]bool{}
+	for _, e := range c.Ethernet {
+		port[e.Name] = true
+	}
+	seen := map[string]bool{}
+	order := []string{}
+	for _, k := range c.WAN.Order {
+		name, wired := EthOfUplink(k)
+		if seen[k] || (wired && !port[name]) || (!wired && k != UplinkWifi && k != UplinkPhone) {
+			continue
+		}
+		seen[k] = true
+		order = append(order, k)
+	}
+	insert := func(at int, k string) {
+		order = append(order, "")
+		copy(order[at+1:], order[at:])
+		order[at] = k
+		seen[k] = true
+	}
+	if !seen[UplinkWifi] {
+		insert(len(order), UplinkWifi)
+	}
+	if !seen[UplinkPhone] {
+		insert(len(order), UplinkPhone)
+	}
+	for _, e := range c.Ethernet {
+		k := UplinkEth(e.Name)
+		if seen[k] {
+			continue
+		}
+		// After the last wired port already ranked, or else just ahead of
+		// Wi-Fi.
+		at := -1
+		for i, o := range order {
+			if _, wired := EthOfUplink(o); wired {
+				at = i + 1
+			}
+		}
+		if at < 0 {
+			for i, o := range order {
+				if o == UplinkWifi {
+					at = i
+				}
+			}
+		}
+		insert(at, k)
+	}
+	c.WAN.Order = order
 }
 
 // fillNilSlices replaces every nil slice reachable from v with an empty
@@ -158,16 +298,16 @@ func (c *Config) Validate() error {
 	if err := c.validateSystem(); err != nil {
 		return err
 	}
-	if err := c.validateRadios(); err != nil {
+	if err := c.validateLAN(); err != nil {
 		return err
 	}
-	if err := c.validateAP(); err != nil {
+	if err := c.validateWifi(); err != nil {
 		return err
 	}
 	if err := c.validateWAN(); err != nil {
 		return err
 	}
-	if err := c.validateLAN(); err != nil {
+	if err := c.validateRadios(); err != nil {
 		return err
 	}
 	if err := c.validateDNS(); err != nil {
@@ -272,26 +412,57 @@ func (c *Config) validateRadios() error {
 		if err := e.IP.validate(e.Name, len(c.DNS.Upstreams) > 0); err != nil {
 			return err
 		}
+		if c.Network(e.Network) == nil {
+			return fmt.Errorf("%s: belongs to a network that does not exist", e.Name)
+		}
 	}
 	return nil
 }
 
-func (c *Config) validateAP() error {
-	a := c.AP
-	if a.SSID != "" {
+func (c *Config) validateWifi() error {
+	if len(c.Wifi) == 0 || c.Wifi[0].ID != MainSSID {
+		return fmt.Errorf("the main Wi-Fi network is missing")
+	}
+	if len(c.Wifi) > MaxSSIDs {
+		return fmt.Errorf("at most %d Wi-Fi networks", MaxSSIDs)
+	}
+	ids, names := map[string]bool{}, map[string]bool{}
+	for i, a := range c.Wifi {
+		if a.ID != MainSSID && !reID.MatchString(a.ID) {
+			return fmt.Errorf("invalid Wi-Fi network id %q", a.ID)
+		}
+		if ids[a.ID] {
+			return fmt.Errorf("duplicate Wi-Fi network id %q", a.ID)
+		}
+		ids[a.ID] = true
+		// Only the main one may be unnamed: that is a router that has not
+		// been set up yet.
+		if a.SSID == "" && i > 0 {
+			return fmt.Errorf("a Wi-Fi network needs a name")
+		}
 		if len(a.SSID) > 32 || !printable(a.SSID) {
 			return fmt.Errorf("network name must be 1-32 printable bytes")
 		}
-	}
-	if a.Passphrase != "" {
-		if len(a.Passphrase) < 8 || len(a.Passphrase) > 63 || !asciiPrintable(a.Passphrase) {
-			return fmt.Errorf("Wi-Fi password must be 8-63 ASCII characters")
+		if a.Passphrase == "" && i > 0 {
+			return fmt.Errorf("%q needs a password", a.SSID)
 		}
-	}
-	switch a.Security {
-	case SecWPA2, SecWPA2WPA3, SecWPA3:
-	default:
-		return fmt.Errorf("invalid Wi-Fi security %q", a.Security)
+		if a.Passphrase != "" {
+			if len(a.Passphrase) < 8 || len(a.Passphrase) > 63 || !asciiPrintable(a.Passphrase) {
+				return fmt.Errorf("Wi-Fi password must be 8-63 ASCII characters")
+			}
+		}
+		switch a.Security {
+		case SecWPA2, SecWPA2WPA3, SecWPA3:
+		default:
+			return fmt.Errorf("invalid Wi-Fi security %q", a.Security)
+		}
+		if c.Network(a.Network) == nil {
+			return fmt.Errorf("%q belongs to a network that does not exist", a.SSID)
+		}
+		if a.SSID != "" && names[a.SSID] {
+			return fmt.Errorf("two Wi-Fi networks are both named %q", a.SSID)
+		}
+		names[a.SSID] = true
 	}
 	return nil
 }
@@ -461,6 +632,14 @@ func (c *Config) validateWAN() error {
 	if err := validMACPolicy(w.EthMAC, "wan.eth_mac"); err != nil {
 		return err
 	}
+	seenKey := map[string]bool{}
+	for _, k := range w.Order {
+		name, wired := EthOfUplink(k)
+		if seenKey[k] || (wired && !reIface.MatchString(name)) || (!wired && k != UplinkWifi && k != UplinkPhone) {
+			return fmt.Errorf("the order of uplinks is not valid")
+		}
+		seenKey[k] = true
+	}
 	u, err := url.Parse(w.Probe.URL)
 	if err != nil || u.Scheme != "http" || u.Hostname() == "" {
 		return fmt.Errorf("probe URL must be a plain http:// URL")
@@ -473,31 +652,111 @@ func (c *Config) validateWAN() error {
 
 func (c *Config) validateLAN() error {
 	l := c.LAN
-	p, err := netip.ParsePrefix(l.Address)
-	if err != nil || !p.Addr().Is4() {
-		return fmt.Errorf("lan.address must be an IPv4 address with prefix")
-	}
-	if p.Bits() < 16 || p.Bits() > 28 {
-		return fmt.Errorf("lan.address prefix must be between /16 and /28")
-	}
-	if !p.Addr().IsPrivate() {
-		return fmt.Errorf("lan.address must be a private address")
-	}
-	if p.Addr() == p.Masked().Addr() {
-		return fmt.Errorf("lan.address must be a host address, not the network address")
-	}
 	if l.LeaseMinutes < 2 || l.LeaseMinutes > 7*24*60 {
 		return fmt.Errorf("lan.lease_minutes out of range")
 	}
 	if !validDomain(l.Domain) {
 		return fmt.Errorf("lan.domain is not a valid domain")
 	}
-	u, err := netip.ParsePrefix(l.ULAPrefix)
-	if err != nil || !u.Addr().Is6() || u.Bits() != 64 {
-		return fmt.Errorf("lan.ula_prefix must be an IPv6 /64")
+	if len(c.Networks) == 0 || c.Networks[0].ID != MainNetwork {
+		return fmt.Errorf("the main network is missing")
 	}
-	if !netip.MustParsePrefix("fc00::/7").Contains(u.Addr()) {
-		return fmt.Errorf("lan.ula_prefix must be inside fc00::/7")
+	if len(c.Networks) > MaxNetworks {
+		return fmt.Errorf("at most %d networks", MaxNetworks)
+	}
+	ids := map[string]bool{}
+	var v4, v6 []netip.Prefix
+	for _, n := range c.Networks {
+		if !reID.MatchString(n.ID) {
+			return fmt.Errorf("invalid network id %q", n.ID)
+		}
+		if ids[n.ID] {
+			return fmt.Errorf("duplicate network id %q", n.ID)
+		}
+		ids[n.ID] = true
+		if n.Name == "" || len(n.Name) > 20 || !printable(n.Name) {
+			return fmt.Errorf("a network's name must be 1-20 characters")
+		}
+		p, err := netip.ParsePrefix(n.Address)
+		if err != nil || !p.Addr().Is4() {
+			return fmt.Errorf("%s: the address must be an IPv4 address with prefix, like 10.83.0.1/24", n.Name)
+		}
+		if p.Bits() < 16 || p.Bits() > 28 {
+			return fmt.Errorf("%s: the prefix must be between /16 and /28", n.Name)
+		}
+		if !p.Addr().IsPrivate() {
+			return fmt.Errorf("%s: the address must be a private address", n.Name)
+		}
+		if p.Addr() == p.Masked().Addr() {
+			return fmt.Errorf("%s: the address must be a host address, not the network address", n.Name)
+		}
+		u, err := netip.ParsePrefix(n.ULAPrefix)
+		if err != nil || !u.Addr().Is6() || u.Bits() != 64 {
+			return fmt.Errorf("%s: the IPv6 prefix must be a /64", n.Name)
+		}
+		if !netip.MustParsePrefix("fc00::/7").Contains(u.Addr()) {
+			return fmt.Errorf("%s: the IPv6 prefix must be inside fc00::/7", n.Name)
+		}
+		for _, o := range v4 {
+			if o.Overlaps(p.Masked()) {
+				return fmt.Errorf("%s: %s overlaps another network's addresses (%s)", n.Name, p.Masked(), o)
+			}
+		}
+		for _, o := range v6 {
+			if o.Overlaps(u.Masked()) {
+				return fmt.Errorf("%s: its IPv6 prefix is also another network's", n.Name)
+			}
+		}
+		v4, v6 = append(v4, p.Masked()), append(v6, u.Masked())
+		if err := c.validAction(n.Route, true); err != nil {
+			return fmt.Errorf("%s: %w", n.Name, err)
+		}
+	}
+	return nil
+}
+
+// Consistent checks that the configuration describes a router that can
+// work as a whole, beyond every field being well formed. It is applied to
+// changes, not to what is already stored: a stored configuration is never
+// thrown away for being impractical.
+func (c *Config) Consistent() error {
+	uplinks, broadcasting := 0, 0
+	for _, r := range c.Radios {
+		switch r.Role {
+		case RoleWAN:
+			uplinks++
+		case RoleAPWAN:
+			uplinks++
+			broadcasting++
+		case RoleAP:
+			broadcasting++
+		}
+	}
+	if uplinks > 1 {
+		return fmt.Errorf("Only one radio can connect to an upstream Wi-Fi network. Use the other for your own network, or turn it off.")
+	}
+	if !c.Ready() {
+		return nil
+	}
+	enabled := 0
+	for _, w := range c.Wifi {
+		if w.Enabled {
+			enabled++
+		}
+	}
+	wired := 0
+	for _, e := range c.Ethernet {
+		if e.Role == EthLAN {
+			wired++
+		}
+	}
+	if wired == 0 && len(c.Radios) > 0 {
+		if broadcasting == 0 {
+			return fmt.Errorf("No radio would be left for your own Wi-Fi. Keep one for it, or let the uplink radio do both.")
+		}
+		if enabled == 0 {
+			return fmt.Errorf("Every Wi-Fi network is switched off, and there is no wired port to reach the router by.")
+		}
 	}
 	return nil
 }
@@ -774,8 +1033,6 @@ func (c *Config) validateDevices() error {
 	if len(c.Devices) > 512 {
 		return fmt.Errorf("too many devices")
 	}
-	_, subnet := c.LANPrefix()
-	router, _ := c.LANPrefix()
 	seen := map[string]bool{}
 	ips := map[string]bool{}
 	for _, d := range c.Devices {
@@ -794,8 +1051,15 @@ func (c *Config) validateDevices() error {
 		}
 		if d.IP != "" {
 			a, err := netip.ParseAddr(d.IP)
-			if err != nil || !subnet.Contains(a) || a == router {
-				return fmt.Errorf("device %s: reserved address must be inside %s", d.MAC, subnet)
+			var home *Network
+			if err == nil && a.Is4() {
+				home = c.NetworkOf(a)
+			}
+			if home == nil {
+				return fmt.Errorf("device %s: the reserved address %s is not inside any of the router's networks", d.MAC, d.IP)
+			}
+			if router, _ := home.Prefix(); a == router {
+				return fmt.Errorf("device %s: %s is the router's own address", d.MAC, d.IP)
 			}
 			if ips[d.IP] {
 				return fmt.Errorf("address %s reserved twice", d.IP)
@@ -847,7 +1111,12 @@ func (c *Config) validatePolicy() error {
 		if err := c.validAction(r.Action, false); err != nil {
 			return fmt.Errorf("rule %q: %w", r.Name, err)
 		}
-		if len(r.Src.Devices) > 64 || len(r.Src.CIDRs) > 64 || len(r.Dst.Domains) > 256 || len(r.Dst.CIDRs) > 256 || len(r.Dst.Ports) > 32 || len(r.Dst.Countries) > 64 {
+		for _, id := range r.Src.Networks {
+			if c.Network(id) == nil {
+				return fmt.Errorf("rule %q applies to a network that no longer exists", r.Name)
+			}
+		}
+		if len(r.Src.Networks) > MaxNetworks || len(r.Src.Devices) > 64 || len(r.Src.CIDRs) > 64 || len(r.Dst.Domains) > 256 || len(r.Dst.CIDRs) > 256 || len(r.Dst.Ports) > 32 || len(r.Dst.Countries) > 64 {
 			return fmt.Errorf("rule %q: too many entries", r.Name)
 		}
 		for _, m := range r.Src.Devices {

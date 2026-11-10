@@ -74,17 +74,30 @@ func TestParsePhyInfo(t *testing.T) {
 		t.Errorf("auto 2.4 channel: %d %v", ch, ok)
 	}
 
-	// An adapter that only does one thing at a time.
-	if comboAllowsAPSTA("#{ managed, AP, mesh point } <= 1, total <= 1, #channels <= 1") {
-		t.Error("single-interface combination misread")
+	// The on-board radio: one network, also next to a station.
+	if r.MaxAP != 1 || r.MaxAPSTA != 1 {
+		t.Errorf("capacity: %d alone, %d with a station", r.MaxAP, r.MaxAPSTA)
 	}
-	// One group that allows several interfaces of either kind.
-	if !comboAllowsAPSTA("#{ managed, AP, mesh point } <= 2048, #{ P2P-device } <= 1, total <= 2048, #channels <= 1") {
-		t.Error("shared-group combination misread")
+	for combo, want := range map[string][2]int{
+		// An adapter that only does one thing at a time.
+		"#{ managed, AP, mesh point } <= 1, total <= 1, #channels <= 1": {1, 0},
+		// One group that allows several interfaces of either kind.
+		"#{ managed, AP, mesh point } <= 2048, #{ P2P-device } <= 1, total <= 2048, #channels <= 1": {2048, 2047},
+		// Two interfaces in all, of whichever kind.
+		"#{ IBSS } <= 1, #{ managed, AP, mesh point, P2P-client, P2P-GO } <= 2, total <= 2, #channels <= 1": {2, 1},
+		// Several networks, and a station beside them.
+		"#{ managed } <= 1, #{ AP } <= 4, total <= 4, #channels <= 1":         {4, 3},
+		"#{ managed } <= 2, #{ P2P-device } <= 1, total <= 3, #channels <= 2": {0, 0},
+	} {
+		if alone, with := comboAPs(combo); alone != want[0] || with != want[1] {
+			t.Errorf("%s: %d alone, %d with a station; want %v", combo, alone, with, want)
+		}
 	}
 
-	spec := APSpec{Radio: r, Iface: "wlan0", Bridge: "br-lan", Country: "US", Band: "5", Channel: 36,
-		AP: config.AP{SSID: "Tést \"net\"", Passphrase: "correct horse", Security: config.SecWPA2}}
+	main := config.SSID{ID: "main", SSID: "Tést \"net\"", Passphrase: "correct horse", Security: config.SecWPA2, Network: "lan"}
+	bridge := func(network string) string { return "br-" + network }
+	r.Phy, r.MAC = "phy0", "d8:3a:dd:00:11:22"
+	spec := APSpec{Radio: r, Iface: "wlan0", Country: "US", Band: "5", Channel: 36, BSS: Networks(r, "wlan0", []config.SSID{main}, bridge)}
 	l := ladder(spec)
 	if len(l) != 4 || l[0].String() != "ac/80MHz" || l[1].String() != "n/40MHz" || l[3].String() != "legacy/20MHz" {
 		t.Errorf("ladder: %v", l)
@@ -105,6 +118,77 @@ func TestParsePhyInfo(t *testing.T) {
 	spec.Width = 20
 	if l = ladder(spec); l[0].String() != "n/20MHz" {
 		t.Errorf("width cap ignored: %v", l)
+	}
+
+	// A second network: its own interface, address, bridge and password,
+	// after everything that belongs to the first.
+	guest := config.SSID{ID: "g", SSID: "guest", Passphrase: "another one", Security: config.SecWPA3, Network: "guest", Isolate: true}
+	spec.BSS = Networks(r, "wlan0", []config.SSID{main, guest}, bridge)
+	conf = hostapdConf(spec, l[0], "/run/x")
+	first, second, found := strings.Cut(conf, "bss=ap0-1\n")
+	if !found {
+		t.Fatalf("no second network:\n%s", conf)
+	}
+	for _, want := range []string{"interface=wlan0", "bridge=br-lan", "wpa_passphrase=correct horse", "ctrl_interface=/run/x"} {
+		if !strings.Contains(first, want+"\n") {
+			t.Errorf("first network lacks %q:\n%s", want, first)
+		}
+	}
+	for _, want := range []string{"bssid=de:3a:dd:00:11:22", "bridge=br-guest", "ssid2=6775657374", "wpa_key_mgmt=SAE", "wpa_passphrase=another one", "ap_isolate=1", "ctrl_interface=/run/x"} {
+		if !strings.Contains(second, want+"\n") {
+			t.Errorf("second network lacks %q:\n%s", want, second)
+		}
+	}
+	if strings.Contains(first, "ap_isolate") || strings.Contains(first, "bssid=") {
+		t.Errorf("the first network has the second's settings:\n%s", first)
+	}
+}
+
+func TestVifNames(t *testing.T) {
+	for _, tc := range []struct {
+		phy  string
+		n    int
+		want string
+	}{{"phy0", 0, "ap0"}, {"phy0", 2, "ap0-2"}, {"phy12", 3, "ap12-3"}, {"radio", 0, "apxradio"}} {
+		got := VifName(tc.phy, tc.n)
+		if got != tc.want || len(got) > 15 || !isVif(got) {
+			t.Errorf("VifName(%s, %d) = %q", tc.phy, tc.n, got)
+		}
+	}
+	for _, real := range []string{"wlan0", "wlx00c0ca123456", "end0", "apple0"} {
+		if isVif(real) && real != "apple0" {
+			t.Errorf("%s taken for one of our own", real)
+		}
+	}
+	// Further networks get addresses of their own, all different.
+	seen := map[string]bool{"d8:3a:dd:00:11:22": true}
+	for n := 1; n < 4; n++ {
+		m := derivedMAC("d8:3a:dd:00:11:22", n)
+		if seen[m] || len(m) != 17 {
+			t.Errorf("address %d: %q", n, m)
+		}
+		seen[m] = true
+	}
+}
+
+func TestAssign(t *testing.T) {
+	for _, tc := range []struct {
+		caps []int
+		n    int
+		want string
+	}{
+		{[]int{4}, 2, "[[0 1]]"},
+		{[]int{1}, 2, "[[0]]"},          // one radio, one network: the main one
+		{[]int{1, 1}, 2, "[[1] [0]]"},   // one each rather than the same twice
+		{[]int{4, 1}, 2, "[[0 1] [0]]"}, // the able radio carries both
+		{[]int{1, 1}, 3, "[[1] [0]]"},   // not enough radios: the third stays off
+		{[]int{2, 1}, 3, "[[0 1] [2]]"}, // spread over both
+		{[]int{0, 2}, 2, "[[] [0 1]]"},
+		{[]int{1, 1}, 1, "[[0] [0]]"}, // nothing to spread
+	} {
+		if got := fmt.Sprint(Assign(tc.caps, tc.n)); got != tc.want {
+			t.Errorf("Assign(%v, %d) = %s, want %s", tc.caps, tc.n, got, tc.want)
+		}
 	}
 }
 

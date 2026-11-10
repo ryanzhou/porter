@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -104,6 +105,28 @@ func EnsureBridge(name, mac string) error {
 		}
 	}
 	return netlink.LinkSetUp(l)
+}
+
+// Bridges lists the bridge interfaces whose names start with prefix.
+func Bridges(prefix string) []string {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, l := range links {
+		if l.Type() == "bridge" && strings.HasPrefix(l.Attrs().Name, prefix) {
+			out = append(out, l.Attrs().Name)
+		}
+	}
+	return out
+}
+
+// DeleteLink removes a virtual interface.
+func DeleteLink(name string) {
+	if l, err := netlink.LinkByName(name); err == nil {
+		_ = netlink.LinkDel(l)
+	}
 }
 
 // SetBridgePorts makes exactly the given interfaces (plus any whose name

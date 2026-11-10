@@ -60,7 +60,7 @@ func TestSyncRouting(t *testing.T) {
 	v4only := []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}
 
 	// Tunnel up, IPv4 only, no kill switch: IPv6 must still be backstopped.
-	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: true, Allowed: v4only}}); err != nil {
+	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: true, Allowed: v4only}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := ipOut(t, "route", "show", "table", "110"); !strings.Contains(got, "default dev wg-home") || strings.Contains(got, "unreachable") {
@@ -82,7 +82,7 @@ func TestSyncRouting(t *testing.T) {
 	}
 
 	// Tunnel down, no kill switch: table empty so traffic falls back.
-	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: false, Allowed: v4only}}); err != nil {
+	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: false, Allowed: v4only}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := ipOut(t, "route", "show", "table", "110") + ip6(); strings.TrimSpace(got) != "" {
@@ -91,7 +91,7 @@ func TestSyncRouting(t *testing.T) {
 
 	// Kill switch: backstop present up or down, in both families.
 	for _, up := range []bool{false, true} {
-		if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: up, KillSwitch: true, Allowed: v4only}}); err != nil {
+		if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: up, KillSwitch: true, Allowed: v4only}}, nil); err != nil {
 			t.Fatal(err)
 		}
 		v4 := ipOut(t, "route", "show", "table", "110")
@@ -105,11 +105,49 @@ func TestSyncRouting(t *testing.T) {
 
 	// Removing the profile removes its rule; idempotent on repeat.
 	for i := 0; i < 2; i++ {
-		if err := SyncRouting(nil); err != nil {
+		if err := SyncRouting(nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if rules := ipOut(t, "rule", "show"); strings.Contains(rules, "fwmark") {
 		t.Errorf("stale rule: %q", rules)
+	}
+
+	// The uplink override: a table of its own, consulted after the
+	// tunnels' and before the main table's default route.
+	ipOut(t, "addr", "add", "192.0.2.2/24", "dev", "peer0")
+	over := &UplinkOverride{If: "peer0", Gw4: netip.MustParseAddr("192.0.2.1")}
+	for i := 0; i < 2; i++ {
+		if err := SyncRouting(nil, over); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rules := ipOut(t, "rule", "show"); !strings.Contains(rules, "140:\tfrom all lookup 105") {
+		t.Errorf("no rule for the override table: %q", rules)
+	}
+	if v4 := ipOut(t, "route", "show", "table", "105"); !strings.Contains(v4, "default via 192.0.2.1 dev peer0") {
+		t.Errorf("override route: %q", v4)
+	}
+	if HaveIPv6() {
+		// That uplink has no IPv6: IPv6 is refused rather than left to
+		// the uplink being stepped past.
+		if v6 := ipOut(t, "-6", "route", "show", "table", "105"); !strings.Contains(v6, "unreachable default") {
+			t.Errorf("IPv6 with a v4-only override: %q", v6)
+		}
+	}
+	// Another gateway replaces the first; no override empties the table.
+	over.Gw4 = netip.MustParseAddr("192.0.2.9")
+	if err := SyncRouting(nil, over); err != nil {
+		t.Fatal(err)
+	}
+	if v4 := ipOut(t, "route", "show", "table", "105"); !strings.Contains(v4, "via 192.0.2.9") || strings.Contains(v4, "192.0.2.1 ") {
+		t.Errorf("override route after change: %q", v4)
+	}
+	if err := SyncRouting(nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := exec.Command("ip", "route", "show", "table", "105").CombinedOutput()
+	if strings.Contains(string(out), "default") {
+		t.Errorf("override left behind: %q", out)
 	}
 }

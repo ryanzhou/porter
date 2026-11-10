@@ -163,9 +163,12 @@ type status struct {
 	Internet string `json:"internet"`
 	Active   string `json:"active"`
 	WAN      []struct {
-		If    string `json:"if"`
-		IPv4  string `json:"ipv4"`
-		HasV6 bool   `json:"has_v6"`
+		If       string `json:"if"`
+		Kind     string `json:"kind"`
+		Key      string `json:"key"`
+		Internet string `json:"internet"`
+		IPv4     string `json:"ipv4"`
+		HasV6    bool   `json:"has_v6"`
 	} `json:"wan"`
 	Portal struct {
 		Captive bool   `json:"captive"`
@@ -186,6 +189,7 @@ type status struct {
 
 type device struct {
 	MAC      string `json:"mac"`
+	Network  string `json:"network"`
 	IPv4     string `json:"ipv4"`
 	Online   bool   `json:"online"`
 	Hostname string `json:"hostname"`
@@ -247,12 +251,16 @@ func TestRouter(t *testing.T) {
 		if t.Failed() {
 			if b, err := os.ReadFile(filepath.Join(dir, "porterd.log")); err == nil {
 				lines := strings.Split(string(b), "\n")
-				if len(lines) > 120 {
-					lines = lines[len(lines)-120:]
+				if len(lines) > 400 {
+					lines = lines[len(lines)-400:]
 				}
 				t.Logf("porterd log (tail):\n%s", strings.Join(lines, "\n"))
 			}
-			for _, name := range []string{"isp-dnsmasq.log", "vpn-dnsmasq.log", "wg-server.log"} {
+			for _, cmd := range []string{"ip -n " + nsC2 + " -4 addr", "ip -n " + nsRtr + " -br link", "ip -n " + nsRtr + " -4 addr", "ip -n " + nsRtr + " -4 neigh"} {
+				out, _ := exec.Command("sh", "-c", cmd).CombinedOutput()
+				t.Logf("%s:\n%s", cmd, out)
+			}
+			for _, name := range []string{"isp-dnsmasq.log", "vpn-dnsmasq.log", "wg-server.log", "c2-dhcpcd.log"} {
 				if b, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
 					t.Logf("%s:\n%s", name, b)
 				}
@@ -450,7 +458,9 @@ func TestRouter(t *testing.T) {
 		c.Call("devices.list", nil, &devs)
 		n := 0
 		for _, d := range devs {
-			if strings.HasPrefix(d.IPv4, "10.83.0.") {
+			// The name comes with the lease, and only with it: it shows
+			// that the router hears about leases at all.
+			if strings.HasPrefix(d.IPv4, "10.83.0.") && d.Hostname != "" {
 				n++
 			}
 		}
@@ -508,7 +518,7 @@ func TestRouter(t *testing.T) {
 		if err := c.Call("config.get", nil, &cfg); err != nil {
 			t.Fatal(err)
 		}
-		ula, _ := cfg.ULA()
+		ula, _ := cfg.Main().ULA()
 		if a, _, err := lookup(nsC1, ula.String(), "direct.test"); err != nil || a != siteA {
 			t.Errorf("DNS over IPv6: %q %v", a, err)
 		}
@@ -1084,6 +1094,221 @@ func TestRouter(t *testing.T) {
 				return err == nil && strings.HasPrefix(got, ispNet6) && got != fixed6
 			})
 		}
+	})
+
+	// A second network: its own addresses, kept apart from the main one,
+	// with a route and rules of its own.
+	t.Run("Networks", func(t *testing.T) {
+		const guestRouter = "10.84.0.1"
+		rejoin := func() {
+			// The client finds its port in another network the way a
+			// device does that has been unplugged and plugged in again.
+			sh(t, "ip -n %s link set pt-c2if down && sleep 1 && ip -n %s link set pt-c2if up", nsC2, nsC2)
+		}
+		addrOf := func(mac string) (ip, network string) {
+			var devs []device
+			c.Call("devices.list", nil, &devs)
+			for _, d := range devs {
+				if d.MAC == mac {
+					return d.IPv4, d.Network
+				}
+			}
+			return "", ""
+		}
+		var check struct {
+			Error   string   `json:"error"`
+			Effects []string `json:"effects"`
+		}
+		var draft config.Config
+		if err := c.Call("config.get", nil, &draft); err != nil {
+			t.Fatal(err)
+		}
+		// Looking at what a change would do changes nothing.
+		draft.Networks = append(draft.Networks, config.Network{ID: "guest", Name: "Guest", Address: "10.83.0.129/25"})
+		if err := c.Call("config.check", map[string]any{"config": &draft}, &check); err != nil || !strings.Contains(check.Error, "overlaps") {
+			t.Errorf("config.check on overlapping networks: %+v %v", check, err)
+		}
+		editConfig(func(cfg *config.Config) {
+			// Whatever the tests before this one set up for the two
+			// clients is out of the way.
+			cfg.Devices, cfg.Policy.Rules, cfg.Policy.Default = nil, nil, config.ActDirect
+			cfg.Networks = append(cfg.Networks, config.Network{ID: "guest", Name: "Guest", Isolated: true})
+			for i := range cfg.Ethernet {
+				if cfg.Ethernet[i].Name == "eth2" {
+					cfg.Ethernet[i].Network = "guest"
+				}
+			}
+		})
+		rejoin()
+		var ip1, ip2 string
+		eventually(t, "second client in the guest network", 60*time.Second, func() bool {
+			var n1, n2 string
+			ip1, n1 = addrOf(mac1)
+			ip2, n2 = addrOf(mac2)
+			return strings.HasPrefix(ip2, "10.84.0.") && n2 == "guest" && strings.HasPrefix(ip1, "10.83.0.") && n1 == "lan"
+		})
+		eventually(t, "guest reaching the internet", 20*time.Second, func() bool {
+			got, err := httpGet(nsC2, "http://"+siteA+"/ip")
+			return err == nil && got == wanIP
+		})
+		if a, _, err := lookup(nsC2, guestRouter, "direct.test"); err != nil || a != siteA {
+			t.Errorf("DNS in the guest network: %q %v", a, err)
+		}
+		// An isolated network cannot open connections into the others,
+		// but can be reached from them.
+		hello := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "hello") })
+		l1, l2 := listen(t, nsC1, ip1+":8088"), listen(t, nsC2, ip2+":8088")
+		defer l1.Close()
+		defer l2.Close()
+		go http.Serve(l1, hello)
+		go http.Serve(l2, hello)
+		eventually(t, "main network reaching a device in the guest network", 15*time.Second, func() bool {
+			got, err := httpGet(nsC1, "http://"+ip2+":8088/")
+			return err == nil && got == "hello"
+		})
+		if got, err := httpGet(nsC2, "http://"+ip1+":8088/"); err == nil {
+			t.Errorf("an isolated network reached into the main one: %q", got)
+		}
+		editConfig(func(cfg *config.Config) { cfg.Network("guest").Isolated = false })
+		eventually(t, "guest network, no longer isolated, reaching the main one", 15*time.Second, func() bool {
+			got, err := httpGet(nsC2, "http://"+ip1+":8088/")
+			return err == nil && got == "hello"
+		})
+
+		// A route for the whole network, which a device's own overrides.
+		editConfig(func(cfg *config.Config) { cfg.Network("guest").Route = config.ActBlock })
+		eventually(t, "guest network blocked", 15*time.Second, func() bool {
+			_, err := httpGet(nsC2, "http://"+siteA+"/ip")
+			return err != nil
+		})
+		if got, err := httpGet(nsC1, "http://"+siteA+"/ip"); err != nil || got != wanIP {
+			t.Errorf("main network while the guest network is blocked: %q %v", got, err)
+		}
+		editConfig(func(cfg *config.Config) {
+			cfg.Devices = append(cfg.Devices, config.Device{MAC: mac2, Route: config.ActDirect})
+		})
+		eventually(t, "device's own route over its network's", 15*time.Second, func() bool {
+			got, err := httpGet(nsC2, "http://"+siteA+"/ip")
+			return err == nil && got == wanIP
+		})
+		// A rule for one network.
+		editConfig(func(cfg *config.Config) {
+			cfg.Network("guest").Route = ""
+			for i := range cfg.Devices {
+				if cfg.Devices[i].MAC == mac2 {
+					cfg.Devices[i].Route = ""
+				}
+			}
+			cfg.Policy.Rules = append(cfg.Policy.Rules, config.Rule{ID: "gst", Name: "Guests", Enabled: true,
+				Src: config.Src{Networks: []string{"guest"}}, Dst: config.Dst{CIDRs: []string{siteA}}, Action: config.ActBlock})
+		})
+		eventually(t, "rule for the guest network", 15*time.Second, func() bool {
+			_, errA := httpGet(nsC2, "http://"+siteA+"/ip")
+			gotB, errB := httpGet(nsC2, "http://"+siteB+"/ip")
+			return errA != nil && errB == nil && gotB == wanIP
+		})
+		if got, err := httpGet(nsC1, "http://"+siteA+"/ip"); err != nil || got != wanIP {
+			t.Errorf("main network under a rule for the guest network: %q %v", got, err)
+		}
+
+		// A network that still has a rule cannot be removed; without it,
+		// it can, and its bridge goes with it.
+		var cfg config.Config
+		if err := c.Call("config.get", nil, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Networks = cfg.Networks[:1]
+		if err := c.Call("config.set", map[string]any{"config": &cfg}, nil); err == nil {
+			t.Error("removed a network that a port and a rule still refer to")
+		}
+		editConfig(func(cfg *config.Config) {
+			cfg.Networks = cfg.Networks[:1]
+			cfg.Policy.Rules = cfg.Policy.Rules[:len(cfg.Policy.Rules)-1]
+			for i := range cfg.Ethernet {
+				cfg.Ethernet[i].Network = config.MainNetwork
+			}
+		})
+		rejoin()
+		eventually(t, "second client back in the main network", 60*time.Second, func() bool {
+			ip, n := addrOf(mac2)
+			return strings.HasPrefix(ip, "10.83.0.") && n == "lan"
+		})
+		eventually(t, "guest bridge removed", 10*time.Second, func() bool {
+			return exec.Command("ip", "-n", nsRtr, "link", "show", "br-guest").Run() != nil
+		})
+	})
+
+	// A phone sharing its connection over USB: an uplink like any other,
+	// ranked last unless told otherwise, and the one the router falls back
+	// on when the uplink ahead of it stops reaching the internet.
+	t.Run("UplinkOrder", func(t *testing.T) {
+		const phoneGW = "100.65.0.1"
+		sh(t, "ip -n %s link add usb0 type veth peer name isp1 netns %s", nsRtr, nsISP)
+		defer try("ip -n %s link del usb0", nsRtr)
+		sh(t, "ip -n %s addr add %s/24 dev isp1 && ip -n %s link set isp1 up", nsISP, phoneGW, nsISP)
+		phoneConf := filepath.Join(dir, "phone-dnsmasq.conf")
+		os.WriteFile(phoneConf, []byte(strings.Join([]string{
+			"interface=isp1", "except-interface=lo", "bind-interfaces", "port=0", "user=root", "keep-in-foreground",
+			"pid-file=" + filepath.Join(dir, "phone-dnsmasq.pid"),
+			"dhcp-range=100.65.0.50,100.65.0.99,255.255.255.0,10m", "dhcp-option=option:router," + phoneGW,
+			"dhcp-option=option:dns-server," + ispIP, "dhcp-leasefile=" + filepath.Join(dir, "phone.leases"),
+		}, "\n")+"\n"), 0o644)
+		start("phone dnsmasq", "phone-dnsmasq.log", "ip", "netns", "exec", nsISP, "dnsmasq", "--conf-file="+phoneConf)
+
+		phoneIP := ""
+		eventually(t, "phone listed as an uplink, online, behind the wired one", 60*time.Second, func() bool {
+			s := getStatus()
+			for _, w := range s.WAN {
+				if w.If == "usb0" {
+					phoneIP = strings.Split(w.IPv4, "/")[0]
+					return w.Kind == "phone" && w.Key == "phone" && w.Internet == "online" && s.Active == "eth0"
+				}
+			}
+			return false
+		})
+		wired := func() string {
+			got, _ := httpGet(nsC1, "http://"+siteA+"/ip")
+			return got
+		}
+		if got := wired(); got == phoneIP || got == "" {
+			t.Fatalf("traffic with the wired uplink ranked first left from %q", got)
+		}
+		wiredIP := wired()
+
+		// Ranked first, the phone is used.
+		setOrder := func(first string) {
+			editConfig(func(cfg *config.Config) {
+				order := []string{first}
+				for _, k := range cfg.WAN.Order {
+					if k != first {
+						order = append(order, k)
+					}
+				}
+				cfg.WAN.Order = order
+			})
+		}
+		setOrder("phone")
+		eventually(t, "phone in use once ranked first", 30*time.Second, func() bool {
+			return getStatus().Active == "usb0" && wired() == phoneIP
+		})
+		setOrder("eth:eth0")
+		eventually(t, "wired uplink in use again", 30*time.Second, func() bool {
+			return getStatus().Active == "eth0" && wired() == wiredIP
+		})
+
+		// The wired uplink keeps its address but stops leading anywhere:
+		// the router steps past it, and comes back when it works again.
+		sh(t, "ip netns exec %s nft -f - <<'EOF'\ntable inet dead {\n chain in {\n  type filter hook input priority -10;\n  iifname \"isp0\" udp dport 67 accept\n  iifname \"isp0\" drop\n }\n}\nEOF", nsISP)
+		defer try("ip netns exec %s nft delete table inet dead", nsISP)
+		eventually(t, "router falling back on the phone", 150*time.Second, func() bool {
+			s := getStatus()
+			return s.Active == "usb0" && s.Internet == "online" && wired() == phoneIP
+		})
+		sh(t, "ip netns exec %s nft delete table inet dead", nsISP)
+		eventually(t, "router back on the wired uplink", 60*time.Second, func() bool {
+			s := getStatus()
+			return s.Active == "eth0" && s.Internet == "online" && wired() == wiredIP
+		})
 	})
 
 	t.Run("Events", func(t *testing.T) {

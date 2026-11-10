@@ -26,7 +26,12 @@ func TestTable(t *testing.T) {
 
 	tb.Lease("add", a, ip4.String(), "laptop")
 	tb.Observe(map[netip.Addr]string{ip4: a, ip6: a, netip.MustParseAddr("fe80::1"): a},
-		[]Station{{MAC: b, Iface: "wlan0", Signal: -48}})
+		[]Station{{MAC: b, Iface: "wlan0", Signal: -48}}, map[string]string{a: "lan", b: "guest"})
+	for _, e := range tb.List() {
+		if want := map[string]string{a: "lan", b: "guest"}[e.MAC]; e.Network != want {
+			t.Errorf("%s is on %q, want %q", e.MAC, e.Network, want)
+		}
+	}
 
 	if tb.LookupMAC(ip4) != a || tb.LookupMAC(ip6) != a {
 		t.Error("address lookup failed")
@@ -60,7 +65,7 @@ func TestTable(t *testing.T) {
 	}
 
 	// Gone from the network: offline, but remembered across restarts.
-	tb.Observe(map[netip.Addr]string{}, nil)
+	tb.Observe(map[netip.Addr]string{}, nil, nil)
 	for _, e := range tb.List() {
 		if e.Online {
 			t.Errorf("%s still online", e.MAC)

@@ -25,6 +25,26 @@ func render(p *Plan, full bool) string {
 	w("table inet %s {", Table)
 
 	w("\tset wan_ifs { type ifname; %s}", elems(quoteAll(p.WANIfs)))
+	var lanIfs, open, isolated []string
+	var nets4, nets6 []netip.Prefix
+	for _, l := range p.LANs {
+		lanIfs = append(lanIfs, l.If)
+		if l.Isolated {
+			isolated = append(isolated, l.If)
+		} else {
+			open = append(open, l.If)
+		}
+		nets4 = append(nets4, l.Net4)
+		if l.Net6.IsValid() {
+			nets6 = append(nets6, l.Net6)
+		}
+	}
+	several := len(p.LANs) > 1
+	w("\tset lan_ifs { type ifname; %s}", elems(quoteAll(sorted(lanIfs))))
+	if several {
+		w("\tset lan_nets4 { type ipv4_addr; flags interval; %s}", elems(prefixes(nets4)))
+		w("\tset lan_nets6 { type ipv6_addr; flags interval; %s}", elems(prefixes(nets6)))
+	}
 	var vpnIfs []string
 	for _, v := range p.VPNs {
 		if v.Active {
@@ -76,10 +96,16 @@ func render(p *Plan, full bool) string {
 	// --- classification -------------------------------------------------
 	w("\tchain prerouting {")
 	w("\t\ttype filter hook prerouting priority mangle; policy accept;")
-	w("\t\tiifname != %q return", LANBridge)
+	w("\t\tiifname != @lan_ifs return")
 	// Traffic to the router itself (DNS, DHCP) and to the LAN is not routed
 	// by policy.
 	w("\t\tfib daddr type { local, broadcast, multicast } return")
+	if several {
+		// Nor is traffic between the router's own networks; the forward
+		// hook decides about that.
+		w("\t\tip daddr @lan_nets4 return")
+		w("\t\tip6 daddr @lan_nets6 return")
+	}
 	w("\t\tct mark != 0 meta mark set ct mark return")
 	w("\t\tjump classify")
 	w("\t}")
@@ -94,9 +120,12 @@ func render(p *Plan, full bool) string {
 	w("\t\tether saddr @paused %s", set(MarkBlock))
 	for _, r := range p.Rules {
 		chain := "r_" + r.ID
-		if len(r.SrcMACs) == 0 && len(r.Src4) == 0 && len(r.Src6) == 0 {
+		if len(r.SrcMACs) == 0 && len(r.Src4) == 0 && len(r.Src6) == 0 && len(r.SrcIfs) == 0 {
 			w("\t\tjump %s", chain)
 			continue
+		}
+		if len(r.SrcIfs) > 0 {
+			w("\t\tiifname { %s } jump %s", strings.Join(quoteAll(sorted(r.SrcIfs)), ", "), chain)
 		}
 		if len(r.SrcMACs) > 0 {
 			w("\t\tether saddr { %s } jump %s", strings.Join(sorted(r.SrcMACs), ", "), chain)
@@ -114,6 +143,17 @@ func render(p *Plan, full bool) string {
 			kv = append(kv, fmt.Sprintf("%s : 0x%x", mac, p.DeviceMarks[mac]))
 		}
 		w("\t\tmeta mark set ether saddr map { %s } ct mark set meta mark accept", strings.Join(kv, ", "))
+	}
+	// A network's own route, for devices that have none of their own.
+	var byNet []string
+	for _, l := range p.LANs {
+		if l.Mark != 0 {
+			byNet = append(byNet, fmt.Sprintf("%q : 0x%x", l.If, l.Mark))
+		}
+	}
+	if len(byNet) > 0 {
+		sort.Strings(byNet)
+		w("\t\tmeta mark set iifname map { %s } ct mark set meta mark accept", strings.Join(byNet, ", "))
 	}
 	w("\t\t%s", set(p.DefaultMark))
 	w("\t}")
@@ -149,7 +189,7 @@ func render(p *Plan, full bool) string {
 	if p.Intercept {
 		// Every DNS query from the LAN goes through the router's resolver,
 		// whichever server the client asked.
-		w("\t\tiifname %q meta l4proto { tcp, udp } th dport 53 redirect to :53", LANBridge)
+		w("\t\tiifname @lan_ifs meta l4proto { tcp, udp } th dport 53 redirect to :53")
 	}
 	w("\t}")
 	w("\tchain srcnat {")
@@ -170,10 +210,11 @@ func render(p *Plan, full bool) string {
 	// is looked up in /etc/protocols, which the router image does not have.
 	w("\t\tmeta l4proto icmpv6 accept")
 	w("\t\ticmp type echo-request limit rate 20/second accept")
-	w("\t\tiifname %q meta l4proto { tcp, udp } th dport 53 accept", LANBridge)
-	w("\t\tiifname %q udp dport { 67, 547 } accept", LANBridge)
-	if p.SSH {
-		w("\t\tiifname %q tcp dport 22 accept", LANBridge)
+	w("\t\tiifname @lan_ifs meta l4proto { tcp, udp } th dport 53 accept")
+	w("\t\tiifname @lan_ifs udp dport { 67, 547 } accept")
+	if p.SSH && len(open) > 0 {
+		// Not from an isolated network: that is where guests are.
+		w("\t\tiifname { %s } tcp dport 22 accept", strings.Join(quoteAll(sorted(open)), ", "))
 	}
 	w("\t\tiifname @wan_ifs udp dport { 68, 546 } accept")
 	w("\t}")
@@ -190,12 +231,27 @@ func render(p *Plan, full bool) string {
 		w("\t\tiifname %q meta nfproto ipv6 tcp flags syn / syn,rst tcp option maxseg size > %d tcp option maxseg size set %d", v.If, v.MTU-60, v.MTU-60)
 	}
 	w("\t\toifname @wan_ifs tcp flags syn / syn,rst tcp option maxseg size set rt mtu")
-	w("\t\tiifname %q update @acct_up { ether saddr }", LANBridge)
-	w("\t\toifname %q meta nfproto ipv4 update @acct_down4 { ip daddr }", LANBridge)
-	w("\t\toifname %q meta nfproto ipv6 update @acct_down6 { ip6 daddr }", LANBridge)
-	w("\t\tiifname %q jump lan_out", LANBridge)
+	w("\t\tiifname @lan_ifs update @acct_up { ether saddr }")
+	w("\t\toifname @lan_ifs meta nfproto ipv4 update @acct_down4 { ip daddr }")
+	w("\t\toifname @lan_ifs meta nfproto ipv6 update @acct_down6 { ip6 daddr }")
+	if several {
+		w("\t\tiifname @lan_ifs oifname @lan_ifs jump lan_lan")
+	}
+	w("\t\tiifname @lan_ifs jump lan_out")
 	w("\t\tct state established,related accept")
 	w("\t}")
+
+	if several {
+		// Between the router's own networks: anything already under way,
+		// and anything new unless it comes from an isolated network.
+		w("\tchain lan_lan {")
+		w("\t\tct state established,related accept")
+		if len(isolated) > 0 {
+			w("\t\tiifname { %s } jump refuse", strings.Join(quoteAll(sorted(isolated)), ", "))
+		}
+		w("\t\taccept")
+		w("\t}")
+	}
 
 	// lan_out decides for every packet leaving the LAN, new or established,
 	// so that a flow can never continue on a path its mark does not allow.

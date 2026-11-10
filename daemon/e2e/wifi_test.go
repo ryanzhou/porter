@@ -198,14 +198,16 @@ func TestWifi(t *testing.T) {
 			IPv4 string `json:"ipv4"`
 		} `json:"wan"`
 		APs []struct {
-			Radio   string `json:"radio"`
-			Iface   string `json:"iface"`
-			State   string `json:"state"`
-			Channel int    `json:"channel"`
-			Mode    string `json:"mode"`
-			Error   string `json:"error"`
+			Radio   string   `json:"radio"`
+			Iface   string   `json:"iface"`
+			State   string   `json:"state"`
+			Channel int      `json:"channel"`
+			Mode    string   `json:"mode"`
+			Error   string   `json:"error"`
+			SSIDs   []string `json:"ssids"`
 		} `json:"aps"`
-		STAs []struct {
+		OffAir []string `json:"off_air"`
+		STAs   []struct {
 			Radio      string `json:"radio"`
 			State      string `json:"state"`
 			SSID       string `json:"ssid"`
@@ -263,7 +265,7 @@ func TestWifi(t *testing.T) {
 	const ssid, pass = "PorterTest", "portertest123"
 	editConfig(func(cfg *config.Config) {
 		cfg.System.Country = "US"
-		cfg.AP.SSID, cfg.AP.Passphrase = ssid, pass
+		cfg.Wifi[0].SSID, cfg.Wifi[0].Passphrase = ssid, pass
 		cfg.WAN.Probe = config.Probe{URL: "http://probe.test/ok", Expect: "Success"}
 		for i := range cfg.Radios {
 			switch cfg.Radios[i].ID {
@@ -305,6 +307,12 @@ func TestWifi(t *testing.T) {
 			}
 			return false
 		})
+		// What the last scan found is there without waiting for another.
+		var cached []scanned
+		began := time.Now()
+		if err := c.Call("wifi.scan", map[string]any{"quick": true}, &cached); err != nil || len(cached) == 0 || time.Since(began) > 3*time.Second {
+			t.Errorf("quick scan: %d networks after %v, %v", len(cached), time.Since(began), err)
+		}
 		// A wrong password is reported as such.
 		if err := c.Call("wifi.connect", config.WifiNetwork{SSID: hotelSSID, PSK: "not-the-password"}, nil); err != nil {
 			t.Fatal(err)
@@ -363,6 +371,64 @@ func TestWifi(t *testing.T) {
 		})
 	})
 
+	// A second Wi-Fi network on the same radio, for a network of its own
+	// that is kept apart from the main one.
+	t.Run("GuestNetwork", func(t *testing.T) {
+		const guestSSID, guestPass = "PorterGuest", "guestpass123"
+		editConfig(func(cfg *config.Config) {
+			cfg.Networks = append(cfg.Networks, config.Network{ID: "guest", Name: "Guest", Isolated: true})
+			cfg.Wifi = append(cfg.Wifi, config.SSID{ID: "guest", SSID: guestSSID, Passphrase: guestPass, Network: "guest", Enabled: true})
+		})
+		eventually(t, "both Wi-Fi networks on air", 90*time.Second, func() bool {
+			s := getStatus()
+			return len(s.APs) == 1 && s.APs[0].State == "up" && len(s.APs[0].SSIDs) == 2 && len(s.OffAir) == 0
+		})
+		cli := func(args string) string {
+			return sh(t, "ip netns exec %s wpa_cli -p %s -i %s %s", nsClient, filepath.Join(dir, "client-wpa"), clientIf, args)
+		}
+		id := strings.TrimSpace(cli("add_network"))
+		cli(fmt.Sprintf(`set_network %s ssid '"%s"'`, id, guestSSID))
+		cli(fmt.Sprintf(`set_network %s psk '"%s"'`, id, guestPass))
+		cli("select_network " + id)
+		clientAddr := func() string {
+			out, _ := exec.Command("ip", "-n", nsClient, "-4", "-o", "addr", "show", "dev", clientIf).Output()
+			return string(out)
+		}
+		eventually(t, "client on the guest network, with an address from it", 120*time.Second, func() bool {
+			return strings.Contains(clientAddr(), " 10.84.0.")
+		})
+		eventually(t, "guest reaching the internet", 60*time.Second, func() bool {
+			got, err := httpGet(nsClient, "http://"+siteA+"/ip")
+			return err == nil && got != "" && got == wanIP()
+		})
+		clientMAC := strings.TrimSpace(sh(t, "ip netns exec %s cat /sys/class/net/%s/address", nsClient, clientIf))
+		eventually(t, "client listed on the guest network", 30*time.Second, func() bool {
+			var devs []struct {
+				MAC     string `json:"mac"`
+				Network string `json:"network"`
+			}
+			c.Call("devices.list", nil, &devs)
+			for _, d := range devs {
+				if d.MAC == clientMAC {
+					return d.Network == "guest"
+				}
+			}
+			return false
+		})
+		// Back to the main network, and the guest network goes.
+		cli("select_network 0")
+		editConfig(func(cfg *config.Config) {
+			cfg.Networks, cfg.Wifi = cfg.Networks[:1], cfg.Wifi[:1]
+		})
+		eventually(t, "client back on the main network", 120*time.Second, func() bool {
+			return strings.Contains(clientAddr(), " 10.83.0.")
+		})
+		eventually(t, "one Wi-Fi network on air again", 60*time.Second, func() bool {
+			s := getStatus()
+			return len(s.APs) == 1 && s.APs[0].State == "up" && len(s.APs[0].SSIDs) == 1
+		})
+	})
+
 	t.Run("PrefersFiveGHz", func(t *testing.T) {
 		if s := getStatus(); len(s.STAs) != 1 || s.STAs[0].Freq != 2412 {
 			t.Fatalf("expected the uplink on the hotel's 2.4 GHz channel: %+v", s.STAs)
@@ -395,6 +461,46 @@ func TestWifi(t *testing.T) {
 		})
 	})
 
+	// The two radios trade jobs in one step: the one that was the access
+	// point becomes the uplink, and the other takes over the network.
+	t.Run("SwapRadios", func(t *testing.T) {
+		if err := c.Call("wifi.uplink", map[string]any{"radio": apRadio.ID}, nil); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "radios swapped: uplink and access point both up", 120*time.Second, func() bool {
+			s := getStatus()
+			return len(s.STAs) == 1 && s.STAs[0].Radio == apRadio.ID && s.STAs[0].State == "connected" &&
+				len(s.APs) == 1 && s.APs[0].Radio == wanRadio.ID && s.APs[0].Iface == wanRadio.Iface && s.APs[0].State == "up" &&
+				s.Internet == "online" && s.Active == apRadio.Iface
+		})
+		// Not degraded by the change of jobs: the access point came up in
+		// the best mode the radio has, not a fallback.
+		if s := getStatus(); strings.HasPrefix(s.APs[0].Mode, "legacy") {
+			t.Errorf("access point came up degraded after the swap: %+v", s.APs[0])
+		}
+		eventually(t, "client back online after the swap", 120*time.Second, func() bool {
+			got, err := httpGet(nsClient, "http://"+siteA+"/ip")
+			return err == nil && got != "" && got == wanIP()
+		})
+		// Two radios joining networks at once is not something to apply.
+		var cfg config.Config
+		if err := c.Call("config.get", nil, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		for i := range cfg.Radios {
+			cfg.Radios[i].Role = config.RoleWAN
+		}
+		var check struct {
+			Error string `json:"error"`
+		}
+		if err := c.Call("config.check", map[string]any{"config": &cfg}, &check); err != nil || check.Error == "" {
+			t.Errorf("config.check let two uplink radios pass: %+v %v", check, err)
+		}
+		if err := c.Call("config.set", map[string]any{"config": &cfg}, nil); err == nil {
+			t.Error("config.set accepted two uplink radios")
+		}
+	})
+
 	t.Run("OneRadioForBoth", func(t *testing.T) {
 		if !apRadio.APSTA {
 			t.Skip("the simulated radio does not report simultaneous AP and station support")
@@ -418,7 +524,7 @@ func TestWifi(t *testing.T) {
 			// The uplink goes to the hotel's 5 GHz access point, and the
 			// router's own access point has to follow it there.
 			return s.STAs[0].Freq == 5180 &&
-				len(s.APs) == 1 && s.APs[0].Iface == "ap-"+apRadio.Iface && s.APs[0].State == "up" && s.APs[0].Channel == 36 &&
+				len(s.APs) == 1 && s.APs[0].Radio == apRadio.ID && strings.HasPrefix(s.APs[0].Iface, "ap") && s.APs[0].State == "up" && s.APs[0].Channel == 36 &&
 				s.Internet == "online" && s.Active == apRadio.Iface
 		})
 		eventually(t, "client back online through the shared radio", 120*time.Second, func() bool {

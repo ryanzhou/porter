@@ -34,8 +34,14 @@ const (
 	// Rule priorities and routing tables.
 	PrefMain     = 100
 	PrefVPNBase  = 110
+	PrefUplink   = 140
 	TableVPNBase = 110
+	TableUplink  = 105
 )
+
+// Bridge is the bridge interface of one of the router's networks. The
+// main network's is LANBridge.
+func Bridge(networkID string) string { return "br-" + networkID }
 
 func MarkVPN(index int) uint32 { return 0x10 + uint32(index) }
 func TableVPN(index int) int   { return TableVPNBase + index }
@@ -45,7 +51,9 @@ func VPNIfName(id string) string { return "wg-" + id }
 
 // Plan is everything the ruleset depends on.
 type Plan struct {
-	WANIfs     []string
+	WANIfs []string
+	// LANs are the router's own networks, the main one first.
+	LANs       []PlanLAN
 	VPNs       []PlanVPN
 	SSH        bool
 	Intercept  bool
@@ -63,6 +71,16 @@ type Plan struct {
 	GeoVersion string
 }
 
+// PlanLAN is one of the router's networks as the ruleset sees it.
+type PlanLAN struct {
+	If         string
+	Net4, Net6 netip.Prefix // Net6 is the zero value without IPv6
+	// Isolated networks cannot open connections to the others.
+	Isolated bool
+	// Mark is the network's own route, 0 for none.
+	Mark uint32
+}
+
 type PlanVPN struct {
 	ID         string
 	If         string
@@ -74,8 +92,10 @@ type PlanVPN struct {
 }
 
 type PlanRule struct {
-	ID         string
-	SrcMACs    []string
+	ID      string
+	SrcMACs []string
+	// SrcIfs are the bridges of the networks the rule applies to.
+	SrcIfs     []string
 	Src4, Src6 []netip.Prefix
 	Dst4, Dst6 []netip.Prefix
 	Countries  []string
@@ -146,6 +166,17 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 	}
 	sort.Strings(p.WANIfs)
 	sort.Strings(p.PortalDevs)
+	for _, n := range c.Networks {
+		l := PlanLAN{If: Bridge(n.ID), Isolated: n.Isolated}
+		_, l.Net4 = n.Prefix()
+		if c.LAN.IPv6 {
+			_, l.Net6 = n.ULA()
+		}
+		if n.Route != "" {
+			l.Mark = MarkFor(c, n.Route)
+		}
+		p.LANs = append(p.LANs, l)
+	}
 	for i, v := range c.VPNs {
 		mtu := v.WireGuard.MTU
 		if mtu == 0 {
@@ -177,6 +208,9 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 			Countries: append([]string(nil), r.Dst.Countries...),
 			Proto:     r.Dst.Proto,
 			Mark:      MarkFor(c, r.Action),
+		}
+		for _, id := range r.Src.Networks {
+			pr.SrcIfs = append(pr.SrcIfs, Bridge(id))
 		}
 		for _, s := range r.Src.CIDRs {
 			pf, _ := config.ParsePrefixLoose(s)

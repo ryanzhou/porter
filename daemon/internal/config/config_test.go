@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,11 +33,11 @@ func TestNoNullLists(t *testing.T) {
 
 func TestValidationRejects(t *testing.T) {
 	cases := map[string]func(c *Config){
-		"newline in SSID":       func(c *Config) { c.AP.SSID = "a\nb" },
-		"short passphrase":      func(c *Config) { c.AP.Passphrase = "short" },
-		"public LAN":            func(c *Config) { c.LAN.Address = "8.8.8.1/24" },
-		"LAN network address":   func(c *Config) { c.LAN.Address = "10.0.0.0/24" },
-		"non-ULA prefix":        func(c *Config) { c.LAN.ULAPrefix = "2001:db8::/64" },
+		"newline in SSID":       func(c *Config) { c.Wifi[0].SSID = "a\nb" },
+		"short passphrase":      func(c *Config) { c.Wifi[0].Passphrase = "short" },
+		"public LAN":            func(c *Config) { c.Networks[0].Address = "8.8.8.1/24" },
+		"LAN network address":   func(c *Config) { c.Networks[0].Address = "10.0.0.0/24" },
+		"non-ULA prefix":        func(c *Config) { c.Networks[0].ULAPrefix = "2001:db8::/64" },
 		"unknown VPN in policy": func(c *Config) { c.Policy.Default = "vpn:nope" },
 		"unknown VPN on device": func(c *Config) { c.Devices = []Device{{MAC: "02:00:00:00:00:01", Route: "vpn:nope"}} },
 		"bad rule port":         func(c *Config) { c.Policy.Rules = []Rule{{ID: "r", Action: ActBlock, Dst: Dst{Ports: []string{"0"}}}} },
@@ -69,13 +70,13 @@ func TestStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.AP.SSID, c.AP.Passphrase, c.System.Country = "Travel", "correct horse", "AU"
+	c.Wifi[0].SSID, c.Wifi[0].Passphrase, c.System.Country = "Travel", "correct horse", "AU"
 	c.Normalize()
 	if err := s.Save(c); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.Load()
-	if err != nil || got.AP.SSID != "Travel" || !got.Ready() {
+	if err != nil || got.Wifi[0].SSID != "Travel" || !got.Ready() {
 		t.Fatalf("reload: %+v %v", got, err)
 	}
 	// A corrupt file must not take the router down, nor be trusted.
@@ -83,7 +84,7 @@ func TestStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err = s.Load()
-	if err == nil || got == nil || got.AP.SSID != "" {
+	if err == nil || got == nil || got.Wifi[0].SSID != "" {
 		t.Fatalf("corrupt config: %+v %v", got, err)
 	}
 }
@@ -171,7 +172,7 @@ func TestMigrate(t *testing.T) {
 func TestIPSetup(t *testing.T) {
 	base := func() *Config {
 		c := Default()
-		c.System.Country, c.AP.SSID, c.AP.Passphrase = "AU", "net", "password1"
+		c.System.Country, c.Wifi[0].SSID, c.Wifi[0].Passphrase = "AU", "net", "password1"
 		c.Ethernet = []EthPort{{Name: "eth0", Role: EthWAN}}
 		return c
 	}
@@ -261,7 +262,7 @@ func TestIPSetup(t *testing.T) {
 func TestMPQUICProfile(t *testing.T) {
 	base := func(m MPQUIC) *Config {
 		c := Default()
-		c.System.Country, c.AP.SSID, c.AP.Passphrase = "AU", "net", "password1"
+		c.System.Country, c.Wifi[0].SSID, c.Wifi[0].Passphrase = "AU", "net", "password1"
 		c.VPNs = []VPN{{ID: "mq", Name: "Multi", Enabled: true, Type: "MPQUIC", MPQUIC: m}}
 		c.Normalize()
 		return c
@@ -302,5 +303,244 @@ func TestMPQUICProfile(t *testing.T) {
 	c.VPNs[0].Type = "openvpn"
 	if err := c.Validate(); err == nil {
 		t.Error("an unknown type was accepted")
+	}
+}
+
+// A router that updates itself from the version before networks, several
+// Wi-Fi networks and the ranking of uplinks keeps everything it was set up
+// with.
+func TestFormat1Carries(t *testing.T) {
+	ip := `{"v4":{"mode":"auto","address":"","gateway":"","dns":[]},"v6":{"mode":"auto","address":"","gateway":"","dns":[]}}`
+	old := `{"version":1,"rev":7,
+ "system":{"name":"Porter","country":"AU","ssh":{"enabled":false,"authorized_keys":[]}},
+ "radios":[{"id":"builtin","role":"ap+wan","band":"5","channel":0,"width":0}],
+ "ethernet":[{"name":"eth0","role":"wan","ip":` + ip + `},{"name":"end0","role":"lan","ip":` + ip + `}],
+ "ap":{"ssid":"Travel","passphrase":"correct horse","security":"wpa2+wpa3","hidden":false,"isolate":true},
+ "wan":{"networks":[{"ssid":"Hotel","psk":"","hidden":false,"priority":1,"ip":` + ip + `}],
+  "wifi_mac":{"mode":"hardware"},"eth_mac":{"mode":"hardware"},"prefer_wifi":true,
+  "probe":{"url":"http://captive.apple.com/hotspot-detect.html","expect":"Success"}},
+ "lan":{"address":"10.84.0.1/24","auto_renumber":true,"lease_minutes":720,"domain":"lan","ipv6":true,"ula_prefix":"fd12:3456:789a:1::/64"},
+ "dns":{"upstreams":[],"intercept":true,"blocked":[],"adblock":{"enabled":false,"lists":[],"allow":[]}},
+ "vpns":[],"policy":{"default":"direct","rules":[]},
+ "devices":[{"mac":"02:00:00:00:00:01","name":"TV","route":"","paused":false,"ip":"10.84.0.20","no_adblock":false}],
+ "speedtest":{"download_url":"https://speed.cloudflare.com/__down?bytes=50000000","upload_url":"https://speed.cloudflare.com/__up"}}`
+	dir := t.TempDir()
+	if err := WriteFileAtomic(filepath.Join(dir, "config.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewStore(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := c.Wifi[0]
+	if len(c.Wifi) != 1 || w.ID != MainSSID || w.SSID != "Travel" || w.Passphrase != "correct horse" || w.Security != SecWPA2WPA3 || !w.Isolate || !w.Enabled || w.Network != MainNetwork {
+		t.Errorf("Wi-Fi network: %+v", c.Wifi)
+	}
+	n := c.Networks[0]
+	if len(c.Networks) != 1 || n.ID != MainNetwork || n.Address != "10.84.0.1/24" || n.ULAPrefix != "fd12:3456:789a:1::/64" || n.Name == "" {
+		t.Errorf("network: %+v", c.Networks)
+	}
+	if !c.LAN.AutoRenumber || c.LAN.LeaseMinutes != 720 || c.LAN.Domain != "lan" || !c.LAN.IPv6 {
+		t.Errorf("LAN settings: %+v", c.LAN)
+	}
+	// Wi-Fi was preferred over the wired ports.
+	if got := strings.Join(c.WAN.Order, " "); got != "wifi eth:eth0 eth:end0 phone" {
+		t.Errorf("order of uplinks: %s", got)
+	}
+	if c.Ethernet[1].Role != EthLAN || c.Ethernet[1].Network != MainNetwork {
+		t.Errorf("LAN port: %+v", c.Ethernet[1])
+	}
+	if !c.Ready() || c.Version != SchemaVersion || len(c.Devices) != 1 || c.Devices[0].IP != "10.84.0.20" || len(c.WAN.Networks) != 1 {
+		t.Errorf("the rest: %+v", c)
+	}
+}
+
+func ready() *Config {
+	c := Default()
+	c.System.Country, c.Wifi[0].SSID, c.Wifi[0].Passphrase = "AU", "net", "password1"
+	c.Normalize()
+	return c
+}
+
+func TestNetworks(t *testing.T) {
+	c := ready()
+	// A network and a Wi-Fi network added with nothing but a name get
+	// what they need.
+	c.Networks = append(c.Networks, Network{ID: "guest", Name: "Guest", Isolated: true})
+	c.Wifi = append(c.Wifi, SSID{SSID: "net-guest", Passphrase: "password2", Network: "guest", Enabled: true})
+	c.Normalize()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	g := c.Network("guest")
+	if g.Address != "10.84.0.1/24" || g.ULAPrefix == "" || g.ULAPrefix == c.Main().ULAPrefix || c.Wifi[1].ID == "" || c.Wifi[1].Security != SecWPA2 {
+		t.Errorf("defaults: %+v %+v", g, c.Wifi[1])
+	}
+	if n := c.NetworkOf(netip.MustParseAddr("10.84.0.77")); n == nil || n.ID != "guest" {
+		t.Errorf("NetworkOf: %+v", n)
+	}
+	// A device may be given an address in any of them, but not the
+	// router's own.
+	c.Devices = []Device{{MAC: "02:00:00:00:00:01", IP: "10.84.0.20"}}
+	if err := c.Validate(); err != nil {
+		t.Errorf("reservation in the second network: %v", err)
+	}
+	c.Devices[0].IP = "10.84.0.1"
+	if err := c.Validate(); err == nil {
+		t.Error("the router's own address was reserved for a device")
+	}
+	c.Devices = nil
+
+	bad := map[string]func(c *Config){
+		"overlapping subnets":     func(c *Config) { c.Networks[1].Address = "10.83.0.129/25" },
+		"shared IPv6 prefix":      func(c *Config) { c.Networks[1].ULAPrefix = c.Networks[0].ULAPrefix },
+		"two networks, one id":    func(c *Config) { c.Networks = append(c.Networks, Network{ID: "guest", Name: "Again"}) },
+		"Wi-Fi on no network":     func(c *Config) { c.Wifi[1].Network = "gone" },
+		"two Wi-Fi with one name": func(c *Config) { c.Wifi[1].SSID = "net" },
+		"second Wi-Fi unnamed":    func(c *Config) { c.Wifi[1].SSID = "" },
+		"second Wi-Fi open":       func(c *Config) { c.Wifi[1].Passphrase = "" },
+		"port on no network":      func(c *Config) { c.Ethernet[0].Role, c.Ethernet[0].Network = EthLAN, "gone" },
+		"rule for no network": func(c *Config) {
+			c.Policy.Rules = []Rule{{ID: "r", Action: ActBlock, Src: Src{Networks: []string{"gone"}}}}
+		},
+		"route through no VPN": func(c *Config) { c.Networks[1].Route = "vpn:nope" },
+		"unnamed network":      func(c *Config) { c.Networks[1].Name = " " },
+		"too many networks": func(c *Config) {
+			for i := 0; i < MaxNetworks; i++ {
+				c.Networks = append(c.Networks, Network{Name: "More"})
+			}
+		},
+		"main network removed": func(c *Config) { c.Networks = c.Networks[1:]; c.Networks[0].ID = "guest" },
+	}
+	for name, mutate := range bad {
+		next := c.Clone()
+		mutate(next)
+		if name != "main network removed" {
+			next.Normalize()
+		}
+		if err := next.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// A rule may name a network, and a network may have a route.
+	c.Policy.Rules = []Rule{{ID: "r", Enabled: true, Action: ActBlock, Src: Src{Networks: []string{"guest"}}}}
+	c.Networks[1].Route = ActBlock
+	if err := c.Validate(); err != nil {
+		t.Error(err)
+	}
+	if c.Policy.Rules[0].Src.Any() {
+		t.Error("a rule for one network matches everything")
+	}
+}
+
+func TestConsistent(t *testing.T) {
+	c := ready()
+	if err := c.Consistent(); err != nil {
+		t.Fatal(err)
+	}
+	usb := Radio{ID: "usb:00:11:22:33:44:55", Role: RoleWAN}
+	cases := map[string]struct {
+		mutate func(c *Config)
+		ok     bool
+	}{
+		"one radio for both":         {func(c *Config) { c.Radios[0].Role = RoleAPWAN }, true},
+		"a second radio as uplink":   {func(c *Config) { c.Radios = append(c.Radios, usb) }, true},
+		"both radios broadcasting":   {func(c *Config) { u := usb; u.Role = RoleAP; c.Radios = append(c.Radios, u) }, true},
+		"two radios as uplink":       {func(c *Config) { c.Radios[0].Role = RoleAPWAN; c.Radios = append(c.Radios, usb) }, false},
+		"no radio for the network":   {func(c *Config) { c.Radios[0].Role = RoleWAN }, false},
+		"radios off":                 {func(c *Config) { c.Radios[0].Role = RoleOff }, false},
+		"radios off, a wired port":   {func(c *Config) { c.Radios[0].Role = RoleOff; c.Ethernet[0].Role = EthLAN }, true},
+		"every Wi-Fi network off":    {func(c *Config) { c.Wifi[0].Enabled = false }, false},
+		"Wi-Fi off, but a LAN port":  {func(c *Config) { c.Wifi[0].Enabled = false; c.Ethernet[0].Role = EthLAN }, true},
+		"not set up yet: no opinion": {func(c *Config) { c.Radios[0].Role = RoleWAN; c.System.Country = "" }, true},
+	}
+	for name, tc := range cases {
+		next := c.Clone()
+		tc.mutate(next)
+		next.Normalize()
+		if err := next.Validate(); err != nil {
+			t.Errorf("%s: not even valid: %v", name, err)
+		}
+		if err := next.Consistent(); (err == nil) != tc.ok {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestUplinkOrder(t *testing.T) {
+	c := ready()
+	if got := strings.Join(c.WAN.Order, " "); got != "eth:eth0 wifi phone" {
+		t.Fatalf("default order: %s", got)
+	}
+	// A port that turns up is ranked with the other wired ports; one that
+	// is ranked twice, or is not a port, goes.
+	c.Ethernet = append(c.Ethernet, EthPort{Name: "end0", Role: EthWAN})
+	c.WAN.Order = []string{"phone", "wifi", "eth:eth0", "wifi", "eth:gone"}
+	c.Normalize()
+	if got := strings.Join(c.WAN.Order, " "); got != "phone wifi eth:eth0 eth:end0" {
+		t.Errorf("order: %s", got)
+	}
+	// With no wired port ranked yet, a new one goes ahead of Wi-Fi.
+	c.WAN.Order = []string{"phone", "wifi"}
+	c.Normalize()
+	if got := strings.Join(c.WAN.Order, " "); got != "phone eth:eth0 eth:end0 wifi" {
+		t.Errorf("order: %s", got)
+	}
+	c.WAN.Order = []string{"wifi", "satellite"}
+	if err := c.Validate(); err == nil {
+		t.Error("an unknown kind of uplink was accepted")
+	}
+}
+
+func TestSetWifiUplink(t *testing.T) {
+	const usb = "usb:00:11:22:33:44:55"
+	roles := func(c *Config) string {
+		var out []string
+		for _, r := range c.Radios {
+			out = append(out, r.Role)
+		}
+		return strings.Join(out, " ")
+	}
+	all := func(string) bool { return true }
+	none := func(string) bool { return false }
+	onlyBuiltin := func(id string) bool { return id == "builtin" }
+
+	// One radio: it does both jobs, and stops when the uplink is turned
+	// off.
+	c := ready()
+	if err := c.SetWifiUplink("builtin", all, all); err != nil || roles(c) != RoleAPWAN {
+		t.Errorf("one radio: %s %v", roles(c), err)
+	}
+	if err := c.SetWifiUplink("", all, all); err != nil || roles(c) != RoleAP {
+		t.Errorf("uplink off: %s %v", roles(c), err)
+	}
+	// One radio that cannot do both: refused, and nothing is changed.
+	if err := c.SetWifiUplink("builtin", all, none); err == nil || roles(c) != RoleAP {
+		t.Errorf("a radio that cannot do both: %s %v", roles(c), err)
+	}
+
+	// Two radios: the one chosen only joins, the other carries the
+	// network; choosing the other swaps them in one step.
+	c.Radios = append(c.Radios, Radio{ID: usb, Role: RoleOff})
+	if err := c.SetWifiUplink(usb, all, all); err != nil || roles(c) != RoleAP+" "+RoleWAN {
+		t.Errorf("adapter as uplink: %s %v", roles(c), err)
+	}
+	if err := c.SetWifiUplink("builtin", all, all); err != nil || roles(c) != RoleWAN+" "+RoleAP {
+		t.Errorf("swapped: %s %v", roles(c), err)
+	}
+	if err := c.Consistent(); err != nil {
+		t.Errorf("after the swap: %v", err)
+	}
+	// Uplink off: both carry the network.
+	if err := c.SetWifiUplink("", all, all); err != nil || roles(c) != RoleAP+" "+RoleAP {
+		t.Errorf("uplink off with two radios: %s %v", roles(c), err)
+	}
+	// The other radio is remembered but unplugged: it does not count as
+	// carrying the network, so the one present does both.
+	if err := c.SetWifiUplink("builtin", onlyBuiltin, all); err != nil || c.Radios[0].Role != RoleAPWAN {
+		t.Errorf("with the adapter unplugged: %s %v", roles(c), err)
+	}
+	if err := c.SetWifiUplink(usb, onlyBuiltin, all); err == nil {
+		t.Error("a radio that is not there was made the uplink")
 	}
 }

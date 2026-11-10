@@ -47,6 +47,10 @@ type Radio struct {
 	// APSTA: the radio can run an access point and a station at once
 	// (on one shared channel).
 	APSTA bool `json:"ap_sta"`
+	// MaxAP is how many Wi-Fi networks the radio can broadcast at once,
+	// and MaxAPSTA how many while it is also a station.
+	MaxAP    int `json:"max_ap"`
+	MaxAPSTA int `json:"max_ap_sta"`
 }
 
 func (r *Radio) Band(name string) *Band {
@@ -132,7 +136,7 @@ func baseIface(phyDir string) string {
 	entries, _ := os.ReadDir(filepath.Join(phyDir, "device", "net"))
 	var names []string
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), VifPrefix) {
+		if !isVif(e.Name()) {
 			names = append(names, e.Name())
 		}
 	}
@@ -229,20 +233,27 @@ func parsePhyInfo(text string, r *Radio) {
 	}
 	flush()
 	for _, c := range combos {
-		if comboAllowsAPSTA(c) {
-			r.APSTA = true
-		}
+		alone, withSTA := comboAPs(c)
+		r.MaxAP, r.MaxAPSTA = max(r.MaxAP, alone), max(r.MaxAPSTA, withSTA)
 	}
+	if r.AP && r.MaxAP == 0 {
+		// A driver that lists no combinations still does the one thing.
+		r.MaxAP = 1
+	}
+	// More networks than this is more than anyone's radio does well.
+	r.MaxAP, r.MaxAPSTA = min(r.MaxAP, 4), min(r.MaxAPSTA, 4)
+	r.APSTA = r.MaxAPSTA > 0
 }
 
 var reGroup = regexp.MustCompile(`#\{([^}]*)\}\s*<=\s*(\d+)`)
 var reTotal = regexp.MustCompile(`total\s*<=\s*(\d+)`)
 
-// comboAllowsAPSTA checks one "valid interface combinations" entry for
-// simultaneous AP and managed interfaces. Each "#{ types } <= n" group
-// limits how many interfaces of those types may exist together, so the
-// two may sit in different groups, or share a group that allows two.
-func comboAllowsAPSTA(combo string) bool {
+// comboAPs reads one "valid interface combinations" entry: how many
+// access point interfaces it allows by themselves, and how many next to
+// one managed (station) interface. Each "#{ types } <= n" group limits how
+// many interfaces of those types may exist together, and "total" limits
+// them all.
+func comboAPs(combo string) (alone, withSTA int) {
 	apGroup, staGroup := -1, -1
 	limits := map[int]int{}
 	for i, g := range reGroup.FindAllStringSubmatch(combo, -1) {
@@ -260,18 +271,23 @@ func comboAllowsAPSTA(combo string) bool {
 			}
 		}
 	}
-	if apGroup < 0 || staGroup < 0 {
-		return false
+	if apGroup < 0 {
+		return 0, 0
 	}
-	if apGroup == staGroup && limits[apGroup] < 2 {
-		return false
-	}
+	total := 1 << 30
 	if m := reTotal.FindStringSubmatch(combo); m != nil {
-		if n, _ := strconv.Atoi(m[1]); n < 2 {
-			return false
-		}
+		total, _ = strconv.Atoi(m[1])
 	}
-	return true
+	alone = min(limits[apGroup], total)
+	if staGroup < 0 {
+		return alone, 0
+	}
+	withSTA = limits[apGroup]
+	if staGroup == apGroup {
+		withSTA--
+	}
+	withSTA = max(min(withSTA, total-1), 0)
+	return alone, withSTA
 }
 
 // FreqToChannel converts a centre frequency in MHz to a channel number.

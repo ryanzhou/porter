@@ -30,6 +30,13 @@ func testConfig() *config.Config {
 		{ID: "r5", Enabled: true, Dst: config.Dst{CIDRs: []string{"203.0.113.9"}}, Action: "vpn:off"},
 		{ID: "r6", Enabled: true, Dst: config.Dst{Countries: []string{"JP", "NZ"}, Proto: "tcp"}, Action: "vpn:home"},
 	}
+	c.Networks = append(c.Networks,
+		config.Network{ID: "guest", Name: "Guest", Address: "10.84.0.1/24", ULAPrefix: "fd00:0:0:84::/64", Isolated: true, Route: "vpn:work"},
+		config.Network{ID: "iot", Name: "Things", Address: "10.85.0.1/24", ULAPrefix: "fd00:0:0:85::/64", Route: "block"},
+	)
+	c.Policy.Rules = append(c.Policy.Rules,
+		config.Rule{ID: "r7", Enabled: true, Src: config.Src{Networks: []string{"guest", "iot"}}, Dst: config.Dst{Ports: []string{"9000"}}, Action: "block"})
+	c.System.SSH = config.SSH{Enabled: true, AuthorizedKeys: []string{"ssh-ed25519 AAAA test"}}
 	return c
 }
 
@@ -73,6 +80,15 @@ func TestRender(t *testing.T) {
 		`set r_r6_g4 { type ipv4_addr; flags interval; auto-merge; elements = { 198.51.100.0-198.51.100.255, 192.0.2.0-192.0.2.127, 203.0.113.7, 192.0.2.128-192.0.2.255 } }`,
 		`meta l4proto tcp ip daddr @r_r6_g4 meta mark set 0x10`,
 		`meta l4proto tcp ip6 daddr @r_r6_g6 meta mark set 0x10`,
+		// Several networks.
+		`set lan_ifs { type ifname; elements = { "br-guest", "br-iot", "br-lan" } }`,
+		`set lan_nets4 { type ipv4_addr; flags interval; elements = { 10.83.0.0/24, 10.84.0.0/24, 10.85.0.0/24 } }`,
+		`ip daddr @lan_nets4 return`,
+		`iifname { "br-guest", "br-iot" } jump r_r7`,
+		`meta mark set iifname map { "br-guest" : 0x11, "br-iot" : 0x2 } ct mark set meta mark accept`,
+		`iifname @lan_ifs oifname @lan_ifs jump lan_lan`,
+		`iifname { "br-guest" } jump refuse`,
+		`iifname { "br-iot", "br-lan" } tcp dport 22 accept`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("ruleset lacks %q", want)
@@ -95,6 +111,20 @@ func TestRender(t *testing.T) {
 		t.Error("work VPN has no kill switch")
 	}
 
+	// One network: nothing about the others' is there.
+	single := testConfig()
+	single.Networks = single.Networks[:1]
+	single.Policy.Rules = single.Policy.Rules[:6]
+	one := Render(BuildPlan(single, Runtime{WANIfs: []string{"eth0"}}))
+	for _, absent := range []string{"lan_lan", "lan_nets4", "iifname map"} {
+		if strings.Contains(one, absent) {
+			t.Errorf("a router with one network has %q in its ruleset", absent)
+		}
+	}
+	if !strings.Contains(one, `set lan_ifs { type ifname; elements = { "br-lan" } }`) {
+		t.Errorf("one network:\n%s", one)
+	}
+
 	// If nft is usable (root, netfilter available), let the kernel judge.
 	if os.Getuid() != 0 {
 		t.Skip("not root: skipping kernel check")
@@ -102,9 +132,11 @@ func TestRender(t *testing.T) {
 	if _, err := exec.LookPath("nft"); err != nil {
 		t.Skip("nft not installed")
 	}
-	cmd := exec.Command("unshare", "-n", "nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(out)
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("kernel rejected ruleset: %v\n%s\n%s", err, b, out)
+	for _, ruleset := range []string{out, one} {
+		cmd := exec.Command("unshare", "-n", "nft", "-f", "-")
+		cmd.Stdin = strings.NewReader(ruleset)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("kernel rejected ruleset: %v\n%s\n%s", err, b, ruleset)
+		}
 	}
 }

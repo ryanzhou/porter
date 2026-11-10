@@ -28,8 +28,11 @@ type Policy struct {
 	Rules    []Rule
 	// Paused devices are refused outright.
 	Paused map[string]bool
-	// DeviceRoute holds per-device actions; Default applies otherwise.
+	// DeviceRoute holds per-device actions, NetRoute those of the
+	// router's networks (matched by the client's address); Default applies
+	// otherwise.
 	DeviceRoute map[string]string
+	NetRoute    []NetRoute
 	Default     string
 	// PortalDevs resolve via the upstream network's own DNS so that a
 	// captive portal's host names work.
@@ -44,6 +47,12 @@ type Policy struct {
 	// WAN is always the network-provided resolver list.
 	WAN []config.Upstream
 	VPN map[string]VPNDNS
+}
+
+// NetRoute is the route of one of the router's networks.
+type NetRoute struct {
+	Prefixes []netip.Prefix
+	Action   string
 }
 
 type VPNDNS struct {
@@ -132,7 +141,30 @@ func RulesFrom(c *config.Config) []Rule {
 				cr.SrcCIDRs = append(cr.SrcCIDRs, p.Masked())
 			}
 		}
+		// A network is, to the forwarder, the addresses its clients have.
+		for _, id := range r.Src.Networks {
+			if n := c.Network(id); n != nil {
+				cr.SrcCIDRs = append(cr.SrcCIDRs, prefixesOf(*n)...)
+			}
+		}
 		out = append(out, cr)
+	}
+	return out
+}
+
+func prefixesOf(n config.Network) []netip.Prefix {
+	_, v4 := n.Prefix()
+	_, v6 := n.ULA()
+	return []netip.Prefix{v4, v6}
+}
+
+// NetRoutesFrom lists the routes set on networks.
+func NetRoutesFrom(c *config.Config) []NetRoute {
+	var out []NetRoute
+	for _, n := range c.Networks {
+		if n.Route != "" {
+			out = append(out, NetRoute{Prefixes: prefixesOf(n), Action: n.Route})
+		}
 	}
 	return out
 }
@@ -147,7 +179,7 @@ type path struct {
 
 // decide picks the path for a query, mirroring the packet classifier: the
 // first rule that would claim traffic from this client to this name wins,
-// then the device's own route, then the default.
+// then the device's own route, then its network's, then the default.
 func (p *Policy) decide(mac string, ip netip.Addr, name string) path {
 	if mac != "" && p.PortalDevs[mac] {
 		return path{kind: "wan", servers: p.WAN}
@@ -169,6 +201,13 @@ func (p *Policy) decide(mac string, ip netip.Addr, name string) path {
 	fromRule := action != ""
 	if action == "" && mac != "" {
 		action = p.DeviceRoute[mac]
+	}
+	for i := 0; action == "" && i < len(p.NetRoute); i++ {
+		for _, pf := range p.NetRoute[i].Prefixes {
+			if pf.Contains(ip) {
+				action = p.NetRoute[i].Action
+			}
+		}
 	}
 	if action == "" {
 		action = p.Default

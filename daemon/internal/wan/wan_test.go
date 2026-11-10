@@ -41,3 +41,35 @@ func TestDhcpcdConf(t *testing.T) {
 		t.Errorf("an automatic uplink has fixed addresses: %+v", got)
 	}
 }
+
+func TestActiveAndPreferred(t *testing.T) {
+	up := func(ifname string, metric, rank int, internet string) State {
+		return State{If: ifname, Metric: metric, Rank: rank, Carrier: true, IPv4: "192.0.2.2/24", Internet: internet}
+	}
+	name := func(s *State) string {
+		if s == nil {
+			return ""
+		}
+		return s.If
+	}
+	for _, tc := range []struct {
+		what              string
+		states            []State // in the configured order
+		active, preferred string
+	}{
+		{"all well: the first in the order", []State{up("eth0", 100, 0, StOnline), up("wlan0", 200, 1, StOnline)}, "eth0", "eth0"},
+		{"Wi-Fi ranked first", []State{up("wlan0", 200, 0, StOnline), up("eth0", 100, 1, StOnline)}, "wlan0", "eth0"},
+		{"first has no internet", []State{up("eth0", 100, 0, StLimited), up("usb0", 300, 1, StOnline)}, "usb0", "eth0"},
+		{"a sign-in page is not stepped past", []State{up("wlan0", 200, 0, StCaptive), up("usb0", 300, 1, StOnline)}, "wlan0", "wlan0"},
+		{"nothing works: the first with an address", []State{up("eth0", 100, 0, StLimited), up("usb0", 300, 1, StLimited)}, "eth0", "eth0"},
+		{"no link on the first", []State{{If: "eth0", Metric: 100, Internet: StDown}, up("wlan0", 200, 1, StOnline)}, "wlan0", "wlan0"},
+		{"none", nil, "", ""},
+	} {
+		if got := name(Active(tc.states)); got != tc.active {
+			t.Errorf("%s: active %q, want %q", tc.what, got, tc.active)
+		}
+		if got := name(Preferred(tc.states)); got != tc.preferred {
+			t.Errorf("%s: preferred by the routing table %q, want %q", tc.what, got, tc.preferred)
+		}
+	}
+}

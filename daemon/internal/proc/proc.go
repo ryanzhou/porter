@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -17,6 +18,8 @@ import (
 type Proc struct {
 	Name string
 	Argv []string
+	// Env is added to the environment the process inherits ("K=V").
+	Env []string
 	// OnLine receives every output line (stdout and stderr).
 	OnLine func(line string)
 	// OnExit is called after each exit, before any restart.
@@ -86,6 +89,9 @@ func (p *Proc) loop() {
 
 func (p *Proc) runOnce() error {
 	cmd := exec.Command(p.Argv[0], p.Argv[1:]...)
+	if len(p.Env) > 0 {
+		cmd.Env = append(os.Environ(), p.Env...)
+	}
 	// Own process group, and die with the router daemon.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
 	pr, pw := io.Pipe()

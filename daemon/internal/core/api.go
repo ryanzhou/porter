@@ -19,6 +19,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/dnsfwd"
 	"github.com/ryanzhou/porter/daemon/internal/flows"
 	"github.com/ryanzhou/porter/daemon/internal/fw"
+	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
 	"github.com/ryanzhou/porter/daemon/internal/speedtest"
 	"github.com/ryanzhou/porter/daemon/internal/stats"
@@ -196,6 +197,11 @@ type HookMessage struct {
 
 func HookSocket(runDir string) string { return filepath.Join(runDir, "hook.sock") }
 
+// HookSocketEnv names the environment variable that tells a hook helper
+// where the daemon listens. dhcpcd and dnsmasq are started with it set
+// and pass it on.
+const HookSocketEnv = "PORTER_HOOK_SOCKET"
+
 func (c *Core) serveHooks(ctx context.Context) error {
 	path := HookSocket(c.opt.RunDir)
 	os.Remove(path)
@@ -228,6 +234,7 @@ func (c *Core) serveHooks(ctx context.Context) error {
 						if len(m.Args) >= 4 {
 							host = m.Args[3]
 						}
+						c.log.Debug("lease", "event", m.Args[0], "mac", m.Args[1], "ip", m.Args[2], "host", host)
 						c.devs.Lease(m.Args[0], strings.ToLower(m.Args[1]), m.Args[2], host)
 						c.Kick()
 					}
@@ -256,10 +263,15 @@ type Status struct {
 	Portal   PortalStatus     `json:"portal"`
 	APs      []wifi.APStatus  `json:"aps"`
 	STAs     []wifi.STAStatus `json:"stas"`
-	LAN      LANStatus        `json:"lan"`
-	VPNs     []VPNStatus      `json:"vpns"`
-	GeoIP    GeoIPStatus      `json:"geoip"`
-	Adblock  adblock.Status   `json:"adblock"`
+	// OffAir lists the Wi-Fi networks that are switched on but that no
+	// radio is able to carry.
+	OffAir []string `json:"off_air"`
+	// Ports are the wired interfaces that are plugged in, uplinks or not.
+	Ports   []PortStatus   `json:"ports"`
+	LAN     LANStatus      `json:"lan"`
+	VPNs    []VPNStatus    `json:"vpns"`
+	GeoIP   GeoIPStatus    `json:"geoip"`
+	Adblock adblock.Status `json:"adblock"`
 }
 
 // GeoIPStatus says whether country rules and country display can work.
@@ -278,6 +290,17 @@ type LANStatus struct {
 	Address string `json:"address"`
 	ULA     string `json:"ula,omitempty"`
 	Clients int    `json:"clients"`
+	// Networks counts the devices online in each network, by id.
+	Networks map[string]int `json:"networks"`
+}
+
+// PortStatus is one wired interface.
+type PortStatus struct {
+	Name  string `json:"name"`
+	Label string `json:"label,omitempty"`
+	// Phone: a phone sharing its connection over USB.
+	Phone   bool `json:"phone"`
+	Carrier bool `json:"carrier"`
 }
 
 type VPNStatus struct {
@@ -299,7 +322,11 @@ func (c *Core) status() Status {
 		Time: time.Now().Unix(), Uptime: int64(time.Since(c.started) / time.Second), Temp: system.CPUTemp(),
 		Ready: cfg.Ready(), Rev: cfg.Rev, Pairing: c.pairingOpen(),
 		Internet: wan.StDown, WAN: states, APs: []wifi.APStatus{}, STAs: []wifi.STAStatus{}, VPNs: []VPNStatus{},
-		LAN: LANStatus{Address: cfg.LAN.Address},
+		OffAir: append([]string{}, c.offAir...), Ports: []PortStatus{},
+		LAN: LANStatus{Address: cfg.Main().Address, Networks: map[string]int{}},
+	}
+	for _, p := range c.ports {
+		st.Ports = append(st.Ports, PortStatus{Name: p.Name, Label: p.Label, Phone: p.Phone, Carrier: netx.Carrier(p.Name)})
 	}
 	if st.WAN == nil {
 		st.WAN = []wan.State{}
@@ -315,11 +342,14 @@ func (c *Core) status() Status {
 		}
 	}
 	if cfg.LAN.IPv6 {
-		st.LAN.ULA = cfg.LAN.ULAPrefix
+		st.LAN.ULA = cfg.Main().ULAPrefix
 	}
 	for _, d := range c.devs.List() {
 		if d.Online {
 			st.LAN.Clients++
+			if d.Network != "" {
+				st.LAN.Networks[d.Network]++
+			}
 		}
 	}
 	for _, rc := range cfg.Radios {
@@ -500,6 +530,48 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		}
 		return map[string]uint64{"rev": rev}, nil
 
+	case "config.check":
+		// Says what applying a configuration would do, without applying
+		// it: whether it would be accepted, what the hardware cannot do
+		// of it, and what the people using the router will notice.
+		p, perr := decode[struct {
+			Config *config.Config `json:"config"`
+		}](req)
+		if perr != nil {
+			return nil, perr
+		}
+		if p.Config == nil {
+			return nil, proto.Errf(proto.ErrInvalid, "missing config")
+		}
+		var out CheckResult
+		c.do(func() { out = c.check(p.Config) })
+		return out, nil
+
+	case "wifi.uplink":
+		// Chooses the radio that joins upstream Wi-Fi networks ("" for
+		// none) and rearranges the others around it, in one step.
+		p, perr := decode[struct {
+			Radio string `json:"radio"`
+		}](req)
+		if perr != nil {
+			return nil, perr
+		}
+		var radios []wifi.Radio
+		c.do(func() { radios = c.radios })
+		find := func(id string) *wifi.Radio {
+			for i := range radios {
+				if radios[i].ID == id && radios[i].Iface != "" {
+					return &radios[i]
+				}
+			}
+			return nil
+		}
+		return nil, c.edit(func(cfg *config.Config) error {
+			return cfg.SetWifiUplink(p.Radio,
+				func(id string) bool { return find(id) != nil },
+				func(id string) bool { r := find(id); return r != nil && r.APSTA })
+		})
+
 	case "radios.list":
 		var out []RadioView
 		c.do(func() {
@@ -540,7 +612,16 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		if sta == nil {
 			return nil, proto.Errf("no_station", "no radio is set up to connect to Wi-Fi networks")
 		}
-		res, err := sta.Scan()
+		// With "quick", what the last scan found comes back at once and a
+		// new scan starts behind it; without, the call waits for that
+		// scan. An app asks quickly first, to have something to show.
+		q, perr := decode[struct {
+			Quick bool `json:"quick"`
+		}](req)
+		if perr != nil {
+			return nil, perr
+		}
+		res, err := sta.Scan(!q.Quick)
 		if err != nil {
 			return nil, proto.Errf(proto.ErrInternal, err.Error())
 		}
@@ -962,6 +1043,62 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		return nil, nil
 	}
 	return nil, proto.Errf(proto.ErrUnknown, "unknown method "+req.Method)
+}
+
+// CheckResult is the answer to config.check.
+type CheckResult struct {
+	// Error says why the configuration would be refused; empty when it
+	// would be accepted.
+	Error string `json:"error,omitempty"`
+	// Notes say what the hardware cannot do of what is asked.
+	Notes []string `json:"notes"`
+	// Effects say what applying it will be noticed as.
+	Effects []string `json:"effects"`
+}
+
+// check must run on the control loop.
+func (c *Core) check(next *config.Config) CheckResult {
+	out := CheckResult{Notes: []string{}, Effects: []string{}}
+	next = next.Clone()
+	next.Normalize()
+	if next.Rev != c.cfg.Rev {
+		out.Error = "The settings changed on the router in the meantime. Reload and make the change again."
+		return out
+	}
+	if err := next.Validate(); err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	if err := next.Consistent(); err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	if !next.Ready() {
+		return out
+	}
+	plan := planRadios(next, c.radios)
+	out.Notes = append(out.Notes, plan.notes...)
+	cur := c.cfg
+	j := func(v any) string { b, _ := json.Marshal(v); return string(b) }
+	if j(cur.Wifi) != j(next.Wifi) || j(cur.Radios) != j(next.Radios) || cur.System.Country != next.System.Country {
+		out.Effects = append(out.Effects, "Your Wi-Fi restarts. Devices reconnect by themselves within a few seconds.")
+	}
+	for _, w := range next.Wifi {
+		if old := cur.SSID(w.ID); old != nil && old.SSID != "" && (old.SSID != w.SSID || old.Passphrase != w.Passphrase) && w.Enabled {
+			out.Effects = append(out.Effects, fmt.Sprintf("Devices on “%s” have to join again with the new name or password.", old.SSID))
+		}
+	}
+	for _, n := range next.Networks {
+		if old := cur.Network(n.ID); old != nil && old.Address != n.Address {
+			out.Effects = append(out.Effects, fmt.Sprintf("Devices on %s get new addresses.", n.Name))
+		}
+	}
+	for _, n := range cur.Networks {
+		if next.Network(n.ID) == nil {
+			out.Effects = append(out.Effects, fmt.Sprintf("%s is removed. Its devices lose their connection.", n.Name))
+		}
+	}
+	return out
 }
 
 // edit applies a change to a copy of the configuration on the control

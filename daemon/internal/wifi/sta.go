@@ -29,13 +29,30 @@ type STASpec struct {
 	// network can only follow the uplink onto channels an access point is
 	// allowed on, which excludes the radar channels.
 	Only5 []int
+	// Shared says the radio carries the router's own network as well.
+	// Every scan then interrupts that network for a moment, so looking
+	// for a known network is done less eagerly.
+	Shared bool
+}
+
+// scanCeiling is the longest the station goes between scans while it has
+// nothing to connect to. A known network that comes into range is joined
+// within this time.
+func (s STASpec) scanCeiling() time.Duration {
+	if s.Shared {
+		return 2 * time.Minute
+	}
+	return 30 * time.Second
 }
 
 // STAStatus is the station's connection state.
 type STAStatus struct {
-	Radio  string `json:"radio"`
-	Iface  string `json:"iface"`
-	State  string `json:"state"` // "connected", "connecting", "disconnected"
+	Radio string `json:"radio"`
+	Iface string `json:"iface"`
+	// State is "connected"; "connecting" while joining a particular
+	// network; "scanning" while looking for one it knows; or
+	// "disconnected".
+	State  string `json:"state"`
 	SSID   string `json:"ssid,omitempty"`
 	BSSID  string `json:"bssid,omitempty"`
 	Freq   int    `json:"freq,omitempty"`
@@ -144,7 +161,12 @@ func wpaConf(spec STASpec, ctrlDir string) (string, map[string]netIDs) {
 	w("sae_pwe=2")
 	// Back off scanning while nothing known is in range: on a shared
 	// radio every scan interrupts the access point.
-	w("autoscan=exponential:3:300")
+	w("autoscan=exponential:3:%d", int(spec.scanCeiling()/time.Second))
+	// What a scan found stays good for joining a little longer than the
+	// default five seconds: on a shared radio the access point has to move
+	// to the network's channel first, and a second scan would only delay
+	// the connection further.
+	w("scan_res_valid_for_connect=20")
 	five, two := freqLists(spec.Only5)
 	next := 0
 	block := func(n config.WifiNetwork, freqs string, off bool, priority int) int {
@@ -284,6 +306,9 @@ func (s *STA) onLine(line string) {
 			close(s.scanDone)
 			s.scanDone = nil
 		}
+		// A known network may just have come into range: act on it now,
+		// while the results are fresh enough to join from.
+		notify = true
 	}
 	s.mu.Unlock()
 	if notify && s.OnChange != nil {
@@ -323,10 +348,12 @@ func (s *STA) Status() STAStatus {
 	switch kv["wpa_state"] {
 	case "COMPLETED":
 		st.State = "connected"
-	case "SCANNING", "AUTHENTICATING", "ASSOCIATING", "ASSOCIATED", "4WAY_HANDSHAKE", "GROUP_HANDSHAKE":
+	case "AUTHENTICATING", "ASSOCIATING", "ASSOCIATED", "4WAY_HANDSHAKE", "GROUP_HANDSHAKE":
 		st.State = "connecting"
+	case "SCANNING":
+		st.State = "scanning"
 	}
-	if st.State != "disconnected" {
+	if st.State == "connected" || st.State == "connecting" {
 		st.SSID = unescapeSSID(kv["ssid"])
 		st.BSSID = kv["bssid"]
 		st.Freq, _ = strconv.Atoi(kv["freq"])
@@ -339,12 +366,17 @@ func (s *STA) Status() STAStatus {
 	return st
 }
 
-// Scan triggers a scan and returns what is in range, strongest first, one
-// entry per network name.
-func (s *STA) Scan() ([]ScanResult, error) {
+// Scan returns what is in range, strongest first, one entry per network
+// name. With wait it scans first and returns the new results; without, it
+// returns what the last scan found at once and starts a new scan in the
+// background, the results of which a later call will have.
+func (s *STA) Scan(wait bool) ([]ScanResult, error) {
 	done := make(chan struct{})
 	s.mu.Lock()
-	s.scanDone = done
+	if wait {
+		s.scanDone = done
+	}
+	s.lastScan = time.Now()
 	s.mu.Unlock()
 	if _, err := s.cli("scan"); err != nil {
 		// A scan may already be running; its results will do.
@@ -352,9 +384,11 @@ func (s *STA) Scan() ([]ScanResult, error) {
 			return nil, err
 		}
 	}
-	select {
-	case <-done:
-	case <-time.After(12 * time.Second):
+	if wait {
+		select {
+		case <-done:
+		case <-time.After(12 * time.Second):
+		}
 	}
 	out, err := s.cli("scan_results")
 	if err != nil {
@@ -518,7 +552,12 @@ func (s *STA) look() ([]bss, bool) {
 // saved network has a 5 GHz block and a 2.4 GHz block in wpa_supplicant,
 // all switched off to begin with, and Steer switches on the one for the
 // band chosen. Call it regularly.
-func (s *STA) Steer() {
+//
+// With hold, nothing is switched on: the radio's access point is not yet
+// on the channel the network is on, and a station that tries to join
+// before it is gets refused, after which wpa_supplicant leaves the
+// network alone for a while.
+func (s *STA) Steer(hold bool) {
 	if _, ok := s.look(); !ok {
 		return
 	}
@@ -572,6 +611,7 @@ func (s *STA) Steer() {
 	now := time.Now()
 	due := false
 	s.mu.Lock()
+	ceiling := s.spec.scanCeiling()
 	switch kv["wpa_state"] {
 	case "COMPLETED":
 		s.scanGap = 0
@@ -584,7 +624,7 @@ func (s *STA) Steer() {
 		}
 		if now.Sub(s.lastScan) >= s.scanGap {
 			due = true
-			s.scanGap = min(2*s.scanGap, 5*time.Minute)
+			s.scanGap = min(2*s.scanGap, ceiling)
 		}
 	}
 	if due {

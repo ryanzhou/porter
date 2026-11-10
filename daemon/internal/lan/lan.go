@@ -1,17 +1,19 @@
-// Package lan manages the client-facing side: the bridge, its addresses,
-// and dnsmasq for DHCPv4 and IPv6 router advertisements. DNS is not
+// Package lan manages the client-facing side: one bridge per network,
+// their addresses, and dnsmasq for DHCPv4 and IPv6 router advertisements. DNS is not
 // dnsmasq's job here; the router's own forwarder answers on port 53.
 package lan
 
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 
+	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/fw"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proc"
@@ -22,12 +24,22 @@ type Reservation struct {
 	IP  string
 }
 
+// Net is one network: a bridge, the router's addresses on it, and the
+// wired ports that belong to it.
+type Net struct {
+	Bridge string
+	Addr   netip.Prefix // router address with prefix length
+	ULA    netip.Prefix // router IPv6 address with /64; zero = no IPv6
+	Ports  []string     // wired members
+}
+
 // Desired is the LAN state to establish.
 type Desired struct {
-	Addr         netip.Prefix // router address with prefix length
-	ULA          netip.Prefix // router IPv6 address with /64; zero = no IPv6
+	// Nets are the networks, the main one first.
+	Nets []Net
+	// BridgeMAC is the address of the main network's bridge; the others
+	// get addresses next to it.
 	BridgeMAC    string
-	Ports        []string // wired LAN members
 	LeaseMinutes int
 	Domain       string
 	Reservations []Reservation
@@ -40,36 +52,80 @@ type Manager struct {
 	Log      *slog.Logger
 	RunDir   string
 	HookPath string // executable dnsmasq calls on lease changes
+	// HookEnv is passed to dnsmasq, and through it to the hook, which
+	// has no other way of knowing where to report: dnsmasq starts it by
+	// its bare name.
+	HookEnv []string
 
 	dnsmasq  *proc.Proc
 	lastConf string
+	swept    bool
+	bridges  map[string]bool
 }
 
-// IsAPInterface is consulted so that access point interfaces attached to
-// the bridge by hostapd are not thrown out when syncing wired ports.
-var IsAPInterface = func(name string) bool { return false }
+// APBridge is consulted so that access point interfaces attached to a
+// bridge by hostapd are not thrown out when syncing wired ports. It
+// returns the bridge an access point interface belongs to.
+var APBridge = func(iface string) (bridge string, ok bool) { return "", false }
 
-// Apply establishes the desired state. addrChanged reports that the LAN
+// macFor gives the i-th network's bridge its address.
+func macFor(base string, i int) string {
+	hw, err := net.ParseMAC(base)
+	if err != nil || len(hw) != 6 || i == 0 {
+		return base
+	}
+	hw[5] += byte(i)
+	return hw.String()
+}
+
+// Apply establishes the desired state. addrChanged reports that a network
 // was renumbered, in which case clients need to be made to re-request
 // their leases.
 func (m *Manager) Apply(d Desired) (addrChanged bool, err error) {
-	if err := netx.EnsureBridge(fw.LANBridge, d.BridgeMAC); err != nil {
-		return false, err
+	want := map[string]bool{}
+	for i, n := range d.Nets {
+		want[n.Bridge] = true
+		if err := netx.EnsureBridge(n.Bridge, macFor(d.BridgeMAC, i)); err != nil {
+			return addrChanged, err
+		}
+		// The bridge must answer router solicitations itself (dnsmasq
+		// does); it must never autoconfigure from someone else's.
+		netx.Sysctl("net/ipv6/conf/"+n.Bridge+"/accept_ra", "0")
+		addrs := []netip.Prefix{n.Addr}
+		if n.ULA.IsValid() && fw.HaveIPv6() {
+			addrs = append(addrs, n.ULA)
+		}
+		changed, err := netx.SyncAddrs(n.Bridge, addrs)
+		if err != nil {
+			return addrChanged, err
+		}
+		addrChanged = addrChanged || changed
+		bridge := n.Bridge
+		keep := func(name string) bool {
+			b, ok := APBridge(name)
+			return ok && b == bridge
+		}
+		if err := netx.SetBridgePorts(n.Bridge, n.Ports, keep); err != nil {
+			m.Log.Warn("bridge ports", "bridge", n.Bridge, "err", err)
+		}
 	}
-	// The bridge must answer router solicitations itself (dnsmasq does);
-	// it must never autoconfigure from someone else's.
-	netx.Sysctl("net/ipv6/conf/"+fw.LANBridge+"/accept_ra", "0")
-	want := []netip.Prefix{d.Addr}
-	if d.ULA.IsValid() && fw.HaveIPv6() {
-		want = append(want, d.ULA)
+	// Bridges of networks that no longer exist go: those this run made,
+	// and once, those an earlier run left behind.
+	if !m.swept {
+		m.swept = true
+		for _, name := range netx.Bridges("br-") {
+			if !want[name] {
+				netx.DeleteLink(name)
+			}
+		}
 	}
-	addrChanged, err = netx.SyncAddrs(fw.LANBridge, want)
-	if err != nil {
-		return false, err
+	for name := range m.bridges {
+		if !want[name] {
+			netx.DeleteLink(name)
+		}
 	}
-	if err := netx.SetBridgePorts(fw.LANBridge, d.Ports, IsAPInterface); err != nil {
-		m.Log.Warn("bridge ports", "err", err)
-	}
+	m.bridges = want
+
 	conf := m.dnsmasqConf(d)
 	if conf != m.lastConf || m.dnsmasq == nil {
 		path := filepath.Join(m.RunDir, "dnsmasq.conf")
@@ -79,7 +135,7 @@ func (m *Manager) Apply(d Desired) (addrChanged bool, err error) {
 		if m.dnsmasq != nil {
 			m.dnsmasq.Stop()
 		}
-		m.dnsmasq = &proc.Proc{Name: "dnsmasq", Log: m.Log, Argv: []string{"dnsmasq", "--keep-in-foreground", "--conf-file=" + path}}
+		m.dnsmasq = &proc.Proc{Name: "dnsmasq", Log: m.Log, Argv: []string{"dnsmasq", "--keep-in-foreground", "--conf-file=" + path}, Env: m.HookEnv}
 		m.dnsmasq.Start()
 		m.lastConf = conf
 	}
@@ -114,13 +170,12 @@ func Pool(p netip.Prefix) (start, end netip.Addr) {
 func (m *Manager) dnsmasqConf(d Desired) string {
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
-	router := d.Addr.Addr()
-	start, end := Pool(d.Addr)
-	mask := netip.PrefixFrom(netip.AddrFrom4([4]byte{255, 255, 255, 255}), d.Addr.Bits()).Masked().Addr()
 
 	w("# generated by porterd")
 	w("port=0")
-	w("interface=%s", fw.LANBridge)
+	for _, n := range d.Nets {
+		w("interface=%s", n.Bridge)
+	}
 	w("bind-dynamic")
 	w("except-interface=lo")
 	w("no-resolv")
@@ -139,47 +194,51 @@ func (m *Manager) dnsmasqConf(d Desired) string {
 		w("dhcp-script=%s", m.HookPath)
 	}
 	w("domain=%s", d.Domain)
-	w("dhcp-range=%s,%s,%s,%dm", start, end, mask, d.LeaseMinutes)
-	w("dhcp-option=option:router,%s", router)
-	w("dhcp-option=option:dns-server,%s", router)
+	ra := false
+	for i, n := range d.Nets {
+		// Each network's clients are told about that network's router
+		// and resolver: the tag ties the options to the address range.
+		tag := fmt.Sprintf("n%d", i)
+		router := n.Addr.Addr()
+		start, end := Pool(n.Addr)
+		mask := netip.PrefixFrom(netip.AddrFrom4([4]byte{255, 255, 255, 255}), n.Addr.Bits()).Masked().Addr()
+		w("dhcp-range=set:%s,%s,%s,%s,%dm", tag, start, end, mask, d.LeaseMinutes)
+		w("dhcp-option=tag:%s,option:router,%s", tag, router)
+		w("dhcp-option=tag:%s,option:dns-server,%s", tag, router)
+		if n.ULA.IsValid() && fw.HaveIPv6() {
+			if !ra {
+				w("enable-ra")
+				ra = true
+			}
+			w("dhcp-range=set:%s,::,constructor:%s,ra-stateless,64,%dm", tag, n.Bridge, d.LeaseMinutes)
+			w("dhcp-option=tag:%s,option6:dns-server,[%s]", tag, n.ULA.Addr())
+			w("ra-param=%s,30,1800", n.Bridge)
+		}
+	}
 	if d.CaptiveURL != "" && !strings.ContainsAny(d.CaptiveURL, ",\n\r ") {
 		w("dhcp-option=114,%s", d.CaptiveURL)
 	}
 	for _, r := range d.Reservations {
 		w("dhcp-host=%s,%s", r.MAC, r.IP)
 	}
-	if d.ULA.IsValid() && fw.HaveIPv6() {
-		w("enable-ra")
-		w("dhcp-range=::,constructor:%s,ra-stateless,64,%dm", fw.LANBridge, d.LeaseMinutes)
-		w("dhcp-option=option6:dns-server,[%s]", d.ULA.Addr())
-		w("ra-param=%s,30,1800", fw.LANBridge)
-	}
 	return b.String()
 }
 
-// Candidates are the subnets the LAN may move to when its configured one
-// collides with the upstream network.
-var Candidates = []string{"10.83.0.1/24", "10.84.0.1/24", "172.23.83.1/24", "192.168.83.1/24", "10.85.0.1/24"}
-
-// Renumber returns a LAN address that does not overlap any of the given
-// upstream subnets, or ok=false when the current one is already fine.
-func Renumber(current netip.Prefix, upstream []netip.Prefix) (next netip.Prefix, ok bool) {
-	overlaps := func(p netip.Prefix) bool {
-		for _, u := range upstream {
-			if u.Masked().Overlaps(p.Masked()) {
-				return true
-			}
+// Renumber returns an address for a network that does not overlap any of
+// the given subnets (the upstream networks, and the router's other
+// networks), or ok=false when the current one is already fine.
+func Renumber(current netip.Prefix, avoid []netip.Prefix) (next netip.Prefix, ok bool) {
+	overlaps := false
+	for _, u := range avoid {
+		if u.Masked().Overlaps(current.Masked()) {
+			overlaps = true
 		}
-		return false
 	}
-	if !overlaps(current) {
+	if !overlaps {
 		return current, false
 	}
-	for _, c := range Candidates {
-		p := netip.MustParsePrefix(c)
-		if !overlaps(p) {
-			return p, true
-		}
+	if p, found := config.FreeSubnet(avoid); found {
+		return p, true
 	}
 	return current, false
 }

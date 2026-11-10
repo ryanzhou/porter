@@ -33,9 +33,19 @@ const (
 
 // Uplink is an interface to use as WAN.
 type Uplink struct {
-	If     string
-	Kind   string // "eth" or "wifi"
+	If string
+	// Kind is "eth", "wifi" or "phone" (a phone sharing its connection
+	// over USB). Key is the uplink's entry in the configured order, and
+	// Label what the hardware calls itself, where it says.
+	Kind  string
+	Key   string
+	Label string
+	// Metric is the uplink's route metric. It goes into the addresses and
+	// routes the uplink is given, so it is chosen once and left alone.
+	// Rank is the uplink's place in the configured order, 0 first, and
+	// can change at any time without the uplink noticing.
 	Metric int
+	Rank   int
 	// IP says, per address family, whether the uplink configures itself
 	// (DHCP; router advertisements and DHCPv6) or has a fixed address.
 	IP config.IPSetup
@@ -45,7 +55,10 @@ type Uplink struct {
 type State struct {
 	If       string   `json:"if"`
 	Kind     string   `json:"kind"`
+	Key      string   `json:"key"`
+	Label    string   `json:"label,omitempty"`
 	Metric   int      `json:"metric"`
+	Rank     int      `json:"rank"`
 	Carrier  bool     `json:"carrier"`
 	Internet string   `json:"internet"`
 	IPv4     string   `json:"ipv4,omitempty"` // address/prefix
@@ -70,6 +83,7 @@ type uplink struct {
 	api     string
 	st      State
 	lastOK  time.Time
+	fails   int // probes that got no answer, in a row
 	probeAt time.Time
 	probing bool
 }
@@ -78,6 +92,8 @@ type Manager struct {
 	Log      *slog.Logger
 	RunDir   string
 	HookPath string
+	// HookEnv is passed to dhcpcd, and through it to the hook.
+	HookEnv []string
 	// OnChange is called (from any goroutine) when an uplink's state
 	// changes in a way the rest of the router cares about.
 	OnChange func()
@@ -127,10 +143,19 @@ func (m *Manager) Apply(list []Uplink, probe config.Probe) {
 	}
 	var stopped []*proc.Proc
 	var cleared []Uplink
+	reranked := false
 	for name, u := range m.uplinks {
 		w, ok := want[name]
-		if ok && reflect.DeepEqual(w, u.cfg) {
-			continue
+		if ok {
+			// A new place in the order is only noted: the uplink keeps
+			// its addresses and its lease.
+			if w.Rank != u.cfg.Rank {
+				u.cfg.Rank, u.st.Rank = w.Rank, w.Rank
+				reranked = true
+			}
+			if reflect.DeepEqual(w, u.cfg) {
+				continue
+			}
 		}
 		if u.dhcpcd != nil {
 			stopped = append(stopped, u.dhcpcd)
@@ -143,7 +168,7 @@ func (m *Manager) Apply(list []Uplink, probe config.Probe) {
 		if _, ok := m.uplinks[name]; ok {
 			continue
 		}
-		u := &uplink{cfg: w, dns6: map[string][]string{}, st: State{If: w.If, Kind: w.Kind, Metric: w.Metric, Internet: StDown}}
+		u := &uplink{cfg: w, dns6: map[string][]string{}, st: State{If: w.If, Kind: w.Kind, Key: w.Key, Label: w.Label, Metric: w.Metric, Rank: w.Rank, Internet: StDown}}
 		m.uplinks[name] = u
 		started = append(started, u)
 	}
@@ -158,7 +183,7 @@ func (m *Manager) Apply(list []Uplink, probe config.Probe) {
 	for _, u := range started {
 		m.startDHCP(u)
 	}
-	if len(cleared)+len(started) > 0 {
+	if len(cleared)+len(started) > 0 || reranked {
 		m.changed()
 	}
 }
@@ -235,6 +260,7 @@ func (m *Manager) startDHCP(u *uplink) {
 	p := &proc.Proc{
 		Name: "dhcpcd-" + u.cfg.If, Log: m.Log,
 		Argv: []string{"dhcpcd", "--nobackground", "--config", path, u.cfg.If},
+		Env:  m.HookEnv,
 	}
 	m.mu.Lock()
 	u.dhcpcd = p
@@ -419,16 +445,20 @@ func (m *Manager) runProbe(u *uplink, p config.Probe, dns []string) {
 	next := 5 * time.Second
 	switch res.State {
 	case StOnline:
-		u.lastOK = now
+		u.lastOK, u.fails = now, 0
 		u.st.Internet, u.st.PortalURL = StOnline, ""
 		next = 45 * time.Second
 	case StCaptive:
+		u.fails = 0
 		u.st.Internet, u.st.PortalURL = StCaptive, res.PortalURL
 		next = 4 * time.Second
 	default:
-		// One lost probe does not make a working uplink "limited".
-		if prev == StOnline && now.Sub(u.lastOK) < 100*time.Second {
-			next = 5 * time.Second
+		// One lost probe does not make a working uplink "limited"; three
+		// in a row, some twenty seconds of nothing, do. Another uplink can
+		// then take over.
+		u.fails++
+		if prev == StOnline && u.fails < 3 {
+			next = 3 * time.Second
 		} else if u.st.Internet != StDown && u.st.Internet != StConnecting {
 			u.st.Internet, u.st.PortalURL = StLimited, ""
 		}
@@ -452,7 +482,7 @@ func (m *Manager) ProbeNow() {
 	m.refresh()
 }
 
-// States returns all uplinks, best first.
+// States returns all uplinks in the configured order, best first.
 func (m *Manager) States() []State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -461,6 +491,9 @@ func (m *Manager) States() []State {
 		out = append(out, u.st)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].Rank != out[j].Rank {
+			return out[i].Rank < out[j].Rank
+		}
 		if out[i].Metric != out[j].Metric {
 			return out[i].Metric < out[j].Metric
 		}
@@ -469,15 +502,38 @@ func (m *Manager) States() []State {
 	return out
 }
 
-// Active picks the uplink the main routing table currently prefers: the
-// lowest-metric one that has an address.
-func Active(states []State) *State {
+// Preferred picks the uplink the main routing table uses by itself: of
+// those that have an address, the one with the lowest metric.
+func Preferred(states []State) *State {
+	var best *State
 	for i := range states {
-		if states[i].Carrier && (states[i].IPv4 != "" || states[i].HasV6) {
-			return &states[i]
+		if s := &states[i]; s.Carrier && (s.IPv4 != "" || s.HasV6) && (best == nil || s.Metric < best.Metric) {
+			best = s
 		}
 	}
-	return nil
+	return best
+}
+
+// Active picks the uplink to use from states in their configured order:
+// the first that reaches the internet or stands behind a sign-in page
+// (which only signing in will get past, so it is not skipped). When none
+// does either, it is the first with an address, as there is nothing
+// better to offer.
+func Active(states []State) *State {
+	var fallback *State
+	for i := range states {
+		s := &states[i]
+		if !s.Carrier || (s.IPv4 == "" && !s.HasV6) {
+			continue
+		}
+		if s.Internet == StOnline || s.Internet == StCaptive {
+			return s
+		}
+		if fallback == nil {
+			fallback = s
+		}
+	}
+	return fallback
 }
 
 func stateEqual(a, b State) bool {

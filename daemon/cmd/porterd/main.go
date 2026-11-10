@@ -158,8 +158,14 @@ func hook(kind string) {
 			}
 		}
 	}
-	// os.Args[0] is the symlink's path as the caller invoked it.
-	sock := core.HookSocket(filepath.Dir(os.Args[0]))
+	// The daemon says where it listens through the environment of the
+	// program that calls the hook. The hook's own location is the
+	// fallback, and only works for a caller that starts it by its full
+	// path: dhcpcd does, dnsmasq uses the bare name.
+	sock := os.Getenv(core.HookSocketEnv)
+	if sock == "" {
+		sock = core.HookSocket(filepath.Dir(os.Args[0]))
+	}
 	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
 	if err != nil {
 		return

@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/ryanzhou/porter/daemon/internal/adblock"
 	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/devices"
@@ -114,6 +116,14 @@ type Core struct {
 	stas   map[string]*wifi.STA // by radio id
 	staMAC map[string]string    // address policy last applied, by interface
 	apAuto map[string]int       // 5 GHz channel chosen to keep clear of an uplink, by radio id
+	// apShared is the frequency last used by the access point of a radio
+	// that is also the uplink, by radio id. The access point stays there
+	// until the uplink needs it elsewhere.
+	apShared map[string]int
+	// offAir lists the Wi-Fi networks that are switched on but that no
+	// radio carries, and ports the wired ports as last seen.
+	offAir []string
+	ports  []wiredPort
 
 	reqs chan func()
 	kick chan struct{}
@@ -131,6 +141,7 @@ type Core struct {
 	sysKey     string
 	statusKey  string
 	lanApplied bool
+	overrideIf string
 	regdom     string
 	lastAcct   time.Time
 	lastSave   time.Time
@@ -157,6 +168,7 @@ func New(opt Options) (*Core, error) {
 		stas:     map[string]*wifi.STA{},
 		staMAC:   map[string]string{},
 		apAuto:   map[string]int{},
+		apShared: map[string]int{},
 		reqs:     make(chan func(), 64),
 		kick:     make(chan struct{}, 1),
 		started:  time.Now(),
@@ -195,11 +207,7 @@ func New(opt Options) (*Core, error) {
 	// The flow tracker is polled from the control loop, so its hooks may
 	// read the configuration directly.
 	c.flows = flows.New(flows.Hooks{
-		LAN: func(a netip.Addr) bool {
-			_, lan4 := c.cfg.LANPrefix()
-			_, ula := c.cfg.ULA()
-			return lan4.Contains(a) || ula.Contains(a)
-		},
+		LAN:       func(a netip.Addr) bool { return c.cfg.NetworkOf(a) != nil },
 		LookupMAC: c.devs.LookupMAC,
 		NameFor:   func(a netip.Addr) string { return c.dns.NameFor(a) },
 		Country:   func(a netip.Addr) string { return c.geo.Lookup(a) },
@@ -220,8 +228,9 @@ func New(opt Options) (*Core, error) {
 		c.Kick()
 	}
 	c.dns = dnsfwd.New(dnsfwd.Hooks{LookupMAC: c.devs.LookupMAC, Learn: c.fwm.Learn, AdBlocked: c.ads.Blocked}, c.log)
-	c.lan = &lan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.LeaseHook}
-	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, OnChange: c.Kick}
+	hookEnv := []string{HookSocketEnv + "=" + HookSocket(opt.RunDir)}
+	c.lan = &lan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.LeaseHook, HookEnv: hookEnv}
+	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, HookEnv: hookEnv, OnChange: c.Kick}
 	c.mpq = &mpquic.Manager{Log: c.log, RunDir: opt.RunDir, Binaries: opt.MPQUIC, OnChange: c.Kick}
 	c.vpn = &vpn.Manager{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace, Resolve: c.resolveDirect}
 	c.vpn.Carrying = func(id string) (bool, string) {
@@ -230,15 +239,15 @@ func New(opt Options) (*Core, error) {
 		}
 		return true, ""
 	}
-	lan.IsAPInterface = func(name string) bool {
+	lan.APBridge = func(name string) (string, bool) {
 		// Only this package's goroutine mutates aps, but the bridge sync
 		// runs on it too, so no locking is needed.
 		for _, ap := range c.aps {
-			if ap.Spec().Iface == name {
-				return true
+			if b, ok := ap.Bridge(name); ok {
+				return b, true
 			}
 		}
-		return false
+		return "", false
 	}
 	return c, nil
 }
@@ -340,13 +349,25 @@ func (c *Core) shutdown() {
 
 func (c *Core) periodic() {
 	now := time.Now()
+	// Who is here, and on which network: from each network's neighbour
+	// table and from the access points.
+	neigh := map[netip.Addr]string{}
+	home := map[string]string{}
+	for _, n := range c.cfg.Networks {
+		for ip, mac := range netx.Neighbors(fw.Bridge(n.ID)) {
+			neigh[ip], home[mac] = mac, n.ID
+		}
+	}
 	var stations []devices.Station
 	for _, ap := range c.aps {
 		for _, s := range ap.Stations() {
 			stations = append(stations, devices.Station{MAC: s.MAC, Iface: s.Iface, Signal: s.Signal})
+			if b, ok := ap.Bridge(s.Iface); ok {
+				home[s.MAC] = strings.TrimPrefix(b, "br-")
+			}
 		}
 	}
-	c.devs.Observe(netx.Neighbors(fw.LANBridge), stations)
+	c.devs.Observe(neigh, stations, home)
 
 	// Read traffic counters often while someone is looking, rarely
 	// otherwise.
@@ -397,10 +418,16 @@ func (c *Core) updateLED() {
 	}
 }
 
-// setConfig validates, persists and applies a new configuration.
+// setConfig validates, persists and applies a new configuration. The
+// whole of it takes effect in one pass of the control loop, so a change
+// to several things at once never passes through a state in which only
+// some of them have been made.
 func (c *Core) setConfig(next *config.Config) error {
 	next.Normalize()
 	if err := next.Validate(); err != nil {
+		return err
+	}
+	if err := next.Consistent(); err != nil {
 		return err
 	}
 	next.Rev = c.cfg.Rev + 1
@@ -428,16 +455,26 @@ func (c *Core) reconcile() {
 			c.addEvent("radio", "New Wi-Fi adapter detected: "+r.Product, "")
 		}
 	}
-	ports := wiredPorts()
-	for _, p := range ports {
+	c.ports = wiredPorts()
+	present := map[string]wiredPort{}
+	for _, p := range c.ports {
+		present[p.Name] = p
+		if p.Phone {
+			// A phone is an uplink for as long as it is plugged in, and
+			// nothing about it is worth remembering.
+			continue
+		}
 		known := false
 		for _, e := range cfg.Ethernet {
-			known = known || e.Name == p
+			known = known || e.Name == p.Name
 		}
 		if !known {
-			cfg.Ethernet = append(cfg.Ethernet, config.EthPort{Name: p, Role: config.EthWAN})
+			cfg.Ethernet = append(cfg.Ethernet, config.EthPort{Name: p.Name, Role: config.EthWAN, Network: config.MainNetwork})
 			changedCfg = true
 		}
+	}
+	if changedCfg {
+		cfg.Normalize() // ranks the new ports among the uplinks
 	}
 
 	// Radios.
@@ -452,28 +489,30 @@ func (c *Core) reconcile() {
 	}
 	wantAP := map[string]wifi.APSpec{}
 	wantSTA := map[string]wifi.STASpec{}
+	staStatus := map[string]wifi.STAStatus{}
+	for id, sta := range c.stas {
+		staStatus[id] = sta.Status()
+	}
+	// Whether a station has to wait for its radio's access point; see
+	// wifi.STA.Steer.
+	knownFreq := map[string]int{}
+	c.offAir = nil
 	if ready {
+		plan := planRadios(cfg, c.radios)
+		c.offAir = plan.offAir
 		for _, rc := range cfg.Radios {
-			var hw *wifi.Radio
-			for i := range c.radios {
-				if c.radios[i].ID == rc.ID {
-					hw = &c.radios[i]
-				}
-			}
-			if hw == nil || hw.Iface == "" {
+			hw := plan.hw[rc.ID]
+			if hw == nil {
 				continue
 			}
-			role := rc.Role
-			if role == config.RoleAPWAN && !hw.APSTA {
-				// Not possible on this radio; the uplink matters more.
-				role = config.RoleWAN
-			}
-			if (role == config.RoleWAN || role == config.RoleAPWAN) && hw.STA {
+			role := plan.role[rc.ID]
+			if role == config.RoleWAN || role == config.RoleAPWAN {
 				spec := wifi.STASpec{Radio: rc.ID, Iface: hw.Iface, Country: cfg.System.Country, Networks: cfg.WAN.Networks}
-				if role == config.RoleAPWAN {
+				if role == config.RoleAPWAN && len(plan.ssids[rc.ID]) > 0 {
 					// The access point has to share the uplink's channel,
 					// and it is not allowed on every channel the uplink
 					// could use.
+					spec.Shared = true
 					spec.Only5 = []int{}
 					if b := hw.Band("5"); b != nil {
 						for _, ch := range b.Channels {
@@ -485,60 +524,135 @@ func (c *Core) reconcile() {
 				}
 				wantSTA[rc.ID] = spec
 			}
-			if (role == config.RoleAP || role == config.RoleAPWAN) && hw.AP {
-				spec := wifi.APSpec{Radio: *hw, Iface: hw.Iface, Bridge: fw.LANBridge, Country: cfg.System.Country, AP: cfg.AP, Width: rc.Width}
-				band, channel := rc.Band, rc.Channel
-				if role == config.RoleAPWAN {
-					spec.Iface, spec.Virtual = wifi.VifPrefix+hw.Iface, true
-					// A shared radio has one channel, and the uplink decides
-					// it: the access point sits on the channel the station
-					// is using or, while it is not connected, on the channel
-					// of the saved network it is most likely to join. An
-					// access point parked elsewhere would stop the station
-					// from ever associating.
-					if sta := c.stas[rc.ID]; sta != nil {
-						freq := 0
-						if st := sta.Status(); st.State == "connected" && st.Freq != 0 {
-							freq = st.Freq
-						} else if f, ok := sta.KnownInRange(); ok {
-							freq = f
-						}
-						if freq != 0 && hw.Band(wifi.BandOfFreq(freq)) != nil {
-							band, channel = wifi.BandOfFreq(freq), wifi.FreqToChannel(freq)
-						}
+			ssids := plan.ssids[rc.ID]
+			if len(ssids) == 0 {
+				continue
+			}
+			spec := wifi.APSpec{Radio: *hw, Iface: hw.Iface, Country: cfg.System.Country, Width: rc.Width}
+			band, channel := rc.Band, rc.Channel
+			if role == config.RoleAPWAN {
+				spec.Iface, spec.Virtual = wifi.VifName(hw.Phy, 0), true
+				// A shared radio has one channel, and the uplink decides
+				// it: the access point sits on the channel the station
+				// is using or, while it is not connected, on the channel
+				// of the saved network it is most likely to join. An
+				// access point parked elsewhere would stop the station
+				// from ever associating. With nothing to follow it stays
+				// where it last was: moving costs every device its
+				// connection, and is only worth it for an uplink.
+				freq := 0
+				if st := staStatus[rc.ID]; st.State == "connected" && st.Freq != 0 {
+					freq = st.Freq
+				} else if sta := c.stas[rc.ID]; sta != nil {
+					if f, ok := sta.KnownInRange(); ok {
+						freq, knownFreq[rc.ID] = f, f
 					}
 				}
-				if band == "" || hw.Band(band) == nil {
-					band = "2.4"
-					if b := hw.Band("5"); b != nil {
-						if _, ok := wifi.PickChannel(b, 0); ok {
-							band = "5"
-						}
+				if freq == 0 {
+					freq = c.apShared[rc.ID]
+				}
+				if freq != 0 && hw.Band(wifi.BandOfFreq(freq)) != nil {
+					band, channel = wifi.BandOfFreq(freq), wifi.FreqToChannel(freq)
+					c.apShared[rc.ID] = freq
+				}
+			} else {
+				delete(c.apShared, rc.ID)
+			}
+			if band == "" || hw.Band(band) == nil {
+				band = "2.4"
+				if b := hw.Band("5"); b != nil {
+					if _, ok := wifi.PickChannel(b, 0); ok {
+						band = "5"
 					}
 				}
-				if b := hw.Band(band); b != nil {
-					ch, ok := wifi.PickChannel(b, channel)
-					if !ok {
-						ch, ok = wifi.PickChannel(b, 0)
+			}
+			if b := hw.Band(band); b != nil {
+				ch, ok := wifi.PickChannel(b, channel)
+				if !ok {
+					ch, ok = wifi.PickChannel(b, 0)
+				}
+				if role == config.RoleAP && channel == 0 && band == "5" {
+					// Left to choose, keep clear of an uplink on
+					// another radio: two radios a few centimetres
+					// apart on neighbouring channels deafen each
+					// other.
+					if away, found := wifi.ChannelAwayFrom(b, c.uplinkFreq(rc.ID), c.apAuto[rc.ID]); found {
+						ch, ok = away, true
+						c.apAuto[rc.ID] = away
 					}
-					if role == config.RoleAP && channel == 0 && band == "5" {
-						// Left to choose, keep clear of an uplink on
-						// another radio: two radios a few centimetres
-						// apart on neighbouring channels deafen each
-						// other.
-						if away, found := wifi.ChannelAwayFrom(b, c.uplinkFreq(rc.ID), c.apAuto[rc.ID]); found {
-							ch, ok = away, true
-							c.apAuto[rc.ID] = away
-						}
-					}
-					if ok {
-						spec.Band, spec.Channel = band, ch
-						wantAP[rc.ID] = spec
-					}
+				}
+				if ok {
+					spec.Band, spec.Channel = band, ch
+					spec.BSS = wifi.Networks(*hw, spec.Iface, ssids, fw.Bridge)
+					wantAP[rc.ID] = spec
 				}
 			}
 		}
 	}
+
+	// Uplinks, ranked as configured. They are worked out before anything
+	// is started so that an interface that stops being an uplink is let
+	// go of first: an access point must not start on an interface that
+	// still has the upstream network's address on it.
+	// The order is carried out by the routing override further down, not
+	// by route metrics: those stay what the kind of uplink gives them, so
+	// that reordering never costs an uplink its lease.
+	rank := func(key string) int {
+		for i, k := range cfg.WAN.Order {
+			if k == key {
+				return i
+			}
+		}
+		return len(cfg.WAN.Order)
+	}
+	ethMAC := ""
+	if cfg.WAN.EthMAC.Mode != config.MACHardware {
+		ethMAC = cfg.WAN.EthMAC.Address
+	}
+	var uplinks []wan.Uplink
+	lanPorts := map[string][]string{}
+	for i, e := range cfg.Ethernet {
+		hw, here := present[e.Name]
+		if !here {
+			continue
+		}
+		switch e.Role {
+		case config.EthWAN:
+			if err := netx.SetMAC(e.Name, ethMAC); err != nil {
+				c.log.Warn("setting wired MAC", "if", e.Name, "err", err)
+			}
+			uplinks = append(uplinks, wan.Uplink{If: e.Name, Kind: "eth", Key: config.UplinkEth(e.Name), Label: hw.Label, Metric: 100 + i, Rank: rank(config.UplinkEth(e.Name)), IP: e.IP})
+		case config.EthLAN:
+			_ = netx.SetMAC(e.Name, "")
+			lanPorts[e.Network] = append(lanPorts[e.Network], e.Name)
+		}
+	}
+	nPhone := 0
+	for _, p := range c.ports {
+		if p.Phone {
+			uplinks = append(uplinks, wan.Uplink{If: p.Name, Kind: "phone", Key: config.UplinkPhone, Label: p.Label, Metric: 300 + nPhone, Rank: rank(config.UplinkPhone)})
+			nPhone++
+		}
+	}
+	staIDs := make([]string, 0, len(wantSTA))
+	for id := range wantSTA {
+		staIDs = append(staIDs, id)
+	}
+	sort.Strings(staIDs)
+	for i, id := range staIDs {
+		up := wan.Uplink{If: wantSTA[id].Iface, Kind: "wifi", Key: config.UplinkWifi, Metric: 200 + i, Rank: rank(config.UplinkWifi)}
+		// How a wireless uplink gets its addresses belongs to the network
+		// it is on (or is joining).
+		if ssid := staStatus[id].SSID; ssid != "" {
+			for _, n := range cfg.WAN.Networks {
+				if n.SSID == ssid {
+					up.IP = n.IP
+				}
+			}
+		}
+		uplinks = append(uplinks, up)
+	}
+
 	for id, sta := range c.stas {
 		if _, ok := wantSTA[id]; !ok {
 			delete(c.staMAC, sta.Spec().Iface)
@@ -558,7 +672,7 @@ func (c *Core) reconcile() {
 		wifiMAC = cfg.WAN.WifiMAC.Address
 	}
 	apKey := func(spec wifi.APSpec) string {
-		return fmt.Sprintf("%s|%v|%s|%d|%d|%s|%+v", spec.Iface, spec.Virtual, spec.Band, spec.Channel, spec.Width, spec.Country, spec.AP)
+		return fmt.Sprintf("%s|%v|%s|%d|%d|%s|%+v", spec.Iface, spec.Virtual, spec.Band, spec.Channel, spec.Width, spec.Country, spec.BSS)
 	}
 	// An access point that is about to change is stopped before stations
 	// start: when a radio changes role, its interface has to be free.
@@ -567,6 +681,7 @@ func (c *Core) reconcile() {
 			ap.Stop()
 		}
 	}
+	c.wan.Apply(uplinks, cfg.WAN.Probe)
 	for id, spec := range wantSTA {
 		sta := c.stas[id]
 		// The address is set when the policy for it changes, and once
@@ -599,7 +714,19 @@ func (c *Core) reconcile() {
 		if err := sta.Start(spec); err != nil {
 			c.log.Error("starting station", "err", err)
 		}
-		sta.Steer()
+		// On a shared radio the station joins a network only once the
+		// access point is on that network's channel (or has shown that it
+		// cannot be: the uplink matters more than being tidy).
+		hold := false
+		if ap, shared := wantAP[id]; shared && knownFreq[id] != 0 && staStatus[id].State != "connected" {
+			settled := false
+			if cur := c.aps[id]; cur != nil && c.apKeys[id] == apKey(ap) {
+				st := cur.Status().State
+				settled = st == "up" || st == "failed"
+			}
+			hold = !settled
+		}
+		sta.Steer(hold)
 	}
 	for id, spec := range wantAP {
 		key := apKey(spec)
@@ -608,7 +735,7 @@ func (c *Core) reconcile() {
 		}
 		ap := c.aps[id]
 		if ap == nil {
-			ap = &wifi.AP{Log: c.log, RunDir: c.opt.RunDir}
+			ap = &wifi.AP{Log: c.log, RunDir: c.opt.RunDir, OnChange: c.Kick}
 			c.aps[id] = ap
 		}
 		if !spec.Virtual {
@@ -621,61 +748,11 @@ func (c *Core) reconcile() {
 		c.apKeys[id] = key
 	}
 
-	// Uplinks.
-	ethBase, wifiBase := 100, 200
-	if cfg.WAN.PreferWifi {
-		ethBase, wifiBase = 200, 100
-	}
-	ethMAC := ""
-	if cfg.WAN.EthMAC.Mode != config.MACHardware {
-		ethMAC = cfg.WAN.EthMAC.Address
-	}
-	present := map[string]bool{}
-	for _, p := range ports {
-		present[p] = true
-	}
-	var uplinks []wan.Uplink
-	var lanPorts []string
-	for i, e := range cfg.Ethernet {
-		if !present[e.Name] {
-			continue
-		}
-		switch e.Role {
-		case config.EthWAN:
-			if err := netx.SetMAC(e.Name, ethMAC); err != nil {
-				c.log.Warn("setting wired MAC", "if", e.Name, "err", err)
-			}
-			uplinks = append(uplinks, wan.Uplink{If: e.Name, Kind: "eth", Metric: ethBase + i, IP: e.IP})
-		case config.EthLAN:
-			_ = netx.SetMAC(e.Name, "")
-			lanPorts = append(lanPorts, e.Name)
-		}
-	}
-	staIDs := make([]string, 0, len(wantSTA))
-	for id := range wantSTA {
-		staIDs = append(staIDs, id)
-	}
-	sort.Strings(staIDs)
-	for i, id := range staIDs {
-		up := wan.Uplink{If: wantSTA[id].Iface, Kind: "wifi", Metric: wifiBase + i}
-		// How a wireless uplink gets its addresses belongs to the network
-		// it is on (or is joining).
-		if sta := c.stas[id]; sta != nil {
-			if ssid := sta.Status().SSID; ssid != "" {
-				for _, n := range cfg.WAN.Networks {
-					if n.SSID == ssid {
-						up.IP = n.IP
-					}
-				}
-			}
-		}
-		uplinks = append(uplinks, up)
-	}
-	c.wan.Apply(uplinks, cfg.WAN.Probe)
 	states := c.wan.States()
 	active := wan.Active(states)
 
-	// Move the LAN out of the way of the upstream network.
+	// Move a network out of the way of the upstream network (and of the
+	// router's other networks, should it have to move onto one's range).
 	if cfg.LAN.AutoRenumber {
 		var upstream []netip.Prefix
 		for _, s := range states {
@@ -683,16 +760,34 @@ func (c *Core) reconcile() {
 				upstream = append(upstream, p)
 			}
 		}
-		cur := netip.MustParsePrefix(cfg.LAN.Address)
-		if next, ok := lan.Renumber(cur, upstream); ok {
-			c.addEvent("lan", fmt.Sprintf("LAN moved to %s: %s is in use upstream", next.Masked(), cur.Masked()), "")
-			cfg.LAN.Address = next.String()
-			for i := range cfg.Devices {
-				if a, err := netip.ParseAddr(cfg.Devices[i].IP); err == nil {
+		for i := range cfg.Networks {
+			n := &cfg.Networks[i]
+			avoid := append([]netip.Prefix(nil), upstream...)
+			cur := netip.MustParsePrefix(n.Address)
+			collides := false
+			for _, u := range upstream {
+				collides = collides || u.Masked().Overlaps(cur.Masked())
+			}
+			if !collides {
+				continue
+			}
+			for j, o := range cfg.Networks {
+				if j != i {
+					avoid = append(avoid, netip.MustParsePrefix(o.Address))
+				}
+			}
+			next, ok := lan.Renumber(cur, avoid)
+			if !ok {
+				continue
+			}
+			c.addEvent("lan", fmt.Sprintf("%s moved to %s: %s is in use upstream", n.Name, next.Masked(), cur.Masked()), "")
+			n.Address = next.String()
+			for d := range cfg.Devices {
+				if a, err := netip.ParseAddr(cfg.Devices[d].IP); err == nil && cur.Masked().Contains(a) {
 					if m, ok := lan.Remap(a, cur, next); ok {
-						cfg.Devices[i].IP = m.String()
+						cfg.Devices[d].IP = m.String()
 					} else {
-						cfg.Devices[i].IP = ""
+						cfg.Devices[d].IP = ""
 					}
 				}
 			}
@@ -737,14 +832,15 @@ func (c *Core) reconcile() {
 	}
 
 	// LAN.
-	routerAddr := netip.MustParsePrefix(cfg.LAN.Address)
-	d := lan.Desired{
-		Addr: routerAddr, BridgeMAC: bridgeMAC(c.identity.Public), Ports: lanPorts,
-		LeaseMinutes: cfg.LAN.LeaseMinutes, Domain: cfg.LAN.Domain,
-	}
-	if cfg.LAN.IPv6 {
-		ula, pfx := cfg.ULA()
-		d.ULA = netip.PrefixFrom(ula, pfx.Bits())
+	routerAddr := netip.MustParsePrefix(cfg.Main().Address)
+	d := lan.Desired{BridgeMAC: bridgeMAC(c.identity.Public), LeaseMinutes: cfg.LAN.LeaseMinutes, Domain: cfg.LAN.Domain}
+	for _, n := range cfg.Networks {
+		ln := lan.Net{Bridge: fw.Bridge(n.ID), Addr: netip.MustParsePrefix(n.Address), Ports: lanPorts[n.ID]}
+		if cfg.LAN.IPv6 {
+			ula, pfx := n.ULA()
+			ln.ULA = netip.PrefixFrom(ula, pfx.Bits())
+		}
+		d.Nets = append(d.Nets, ln)
 	}
 	for _, dev := range cfg.Devices {
 		if dev.IP != "" {
@@ -800,8 +896,25 @@ func (c *Core) reconcile() {
 		c.acctEnabled = true
 	}
 	routes := c.vpn.Routes(running.VPNs)
-	if key := fmt.Sprintf("%+v", routes); key != c.routeKey {
-		if err := fw.SyncRouting(routes); err != nil {
+	// When the best-ranked uplink has an address but no way out, and a
+	// lower one works, traffic is sent past it.
+	var override *fw.UplinkOverride
+	if pref := wan.Preferred(states); active != nil && pref != nil && pref.If != active.If {
+		override = &fw.UplinkOverride{If: active.If, V6: active.HasV6}
+		override.Gw4, _ = netip.ParseAddr(active.Gateway)
+		if active.HasV6 {
+			override.Gw6, _ = netx.DefaultRoute(active.If, unix.AF_INET6)
+		}
+	}
+	if (override == nil) != (c.overrideIf == "") || (override != nil && override.If != c.overrideIf) {
+		c.overrideIf = ""
+		if override != nil {
+			c.overrideIf = override.If
+			c.log.Info("uplink override", "use", active.If, "instead_of", wan.Preferred(states).If)
+		}
+	}
+	if key := fmt.Sprintf("%+v|%+v", routes, override); key != c.routeKey {
+		if err := fw.SyncRouting(routes, override); err != nil {
 			c.log.Error("policy routing", "err", err)
 		} else {
 			flush = flush || c.routeKey != ""
@@ -844,13 +957,22 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 		Default:     cfg.Policy.Default,
 		PortalDevs:  map[string]bool{},
 		VPN:         map[string]dnsfwd.VPNDNS{},
+		NetRoute:    dnsfwd.NetRoutesFrom(cfg),
 	}
-	listen := []string{"127.0.0.1:53", net.JoinHostPort(router.Addr().String(), "53")}
+	// The forwarder answers on the router's address in every network;
+	// the router's own name is its address in the main one.
+	listen := []string{"127.0.0.1:53"}
 	own := []netip.Addr{router.Addr()}
-	if cfg.LAN.IPv6 && fw.HaveIPv6() {
-		ula, _ := cfg.ULA()
-		own = append(own, ula)
-		listen = append(listen, net.JoinHostPort(ula.String(), "53"))
+	for i, n := range cfg.Networks {
+		a, _ := n.Prefix()
+		listen = append(listen, net.JoinHostPort(a.String(), "53"))
+		if cfg.LAN.IPv6 && fw.HaveIPv6() {
+			ula, _ := n.ULA()
+			listen = append(listen, net.JoinHostPort(ula.String(), "53"))
+			if i == 0 {
+				own = append(own, ula)
+			}
+		}
 	}
 	for _, n := range []string{"porter", "porter." + cfg.LAN.Domain} {
 		pol.Hosts[n] = own
@@ -1015,7 +1137,6 @@ func bridgeMAC(seed []byte) string {
 	return fmt.Sprintf("02:%02x:%02x:%02x:%02x:%02x", seed[0], seed[1], seed[2], seed[3], seed[4])
 }
 
-// wiredPorts lists physical non-wireless network interfaces.
 // uplinkFreq returns the frequency a station on another radio than the
 // given one is connected on, or 0.
 func (c *Core) uplinkFreq(radio string) int {
@@ -1030,16 +1151,25 @@ func (c *Core) uplinkFreq(radio string) int {
 	return 0
 }
 
-func wiredPorts() []string {
+// wiredPort is a physical non-wireless network interface.
+type wiredPort struct {
+	Name string
+	// Phone: the interface is a phone sharing its connection over USB.
+	Phone bool
+	// Label is what a USB device calls itself.
+	Label string
+}
+
+func wiredPorts() []wiredPort {
 	entries, _ := os.ReadDir("/sys/class/net")
-	var out []string
+	var out []wiredPort
 	for _, e := range entries {
 		name := e.Name()
 		base := filepath.Join("/sys/class/net", name)
 		if _, err := os.Stat(filepath.Join(base, "device")); err != nil {
 			// Virtual interface. Test rigs use veth pairs named like
 			// real ports, which are accepted.
-			if !(strings.HasPrefix(name, "eth") || strings.HasPrefix(name, "lan")) || name == "lo" {
+			if !(strings.HasPrefix(name, "eth") || strings.HasPrefix(name, "lan") || strings.HasPrefix(name, "usb")) || name == "lo" {
 				continue
 			}
 		}
@@ -1049,11 +1179,129 @@ func wiredPorts() []string {
 		if _, err := os.Stat(filepath.Join(base, "wireless")); err == nil {
 			continue
 		}
-		if strings.HasPrefix(name, "wg-") || name == fw.LANBridge {
+		if strings.HasPrefix(name, "wg-") || strings.HasPrefix(name, "br-") {
 			continue
 		}
-		out = append(out, name)
+		p := wiredPort{Name: name}
+		driver := ""
+		if l, err := os.Readlink(filepath.Join(base, "device", "driver")); err == nil {
+			driver = filepath.Base(l)
+		}
+		// For USB the product string sits on the device above the
+		// interface the driver bound to.
+		if b, err := os.ReadFile(filepath.Join(base, "device", "..", "product")); err == nil {
+			p.Label = strings.TrimSpace(string(b))
+		}
+		switch {
+		case driver == "ipheth":
+			// An iPhone with Personal Hotspot.
+			p.Phone = true
+			if p.Label == "" {
+				p.Label = "iPhone"
+			}
+		case driver == "rndis_host", strings.HasPrefix(name, "usb") && driver == "":
+			// An Android phone with USB tethering. (The second form is
+			// how test rigs name a stand-in for one.)
+			p.Phone = true
+			if p.Label == "" {
+				p.Label = "Phone"
+			}
+		}
+		out = append(out, p)
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// radioPlan is what the configuration asks of the radios that are
+// present, as far as they can do it.
+type radioPlan struct {
+	hw    map[string]*wifi.Radio   // radios present and usable, by id
+	role  map[string]string        // the role each will actually have
+	ssids map[string][]config.SSID // the Wi-Fi networks each carries
+	// offAir lists the ids of the Wi-Fi networks that are switched on but
+	// fit on no radio, and notes says, for people, what could not be done
+	// as asked.
+	offAir []string
+	notes  []string
+}
+
+func radioName(r *wifi.Radio) string {
+	if r.ID == "builtin" {
+		return "The built-in radio"
+	}
+	if r.Product != "" {
+		return r.Product
+	}
+	return "The USB adapter"
+}
+
+// planRadios works out which radio does what. It depends on nothing but
+// its arguments, so it can also say what a configuration that is only
+// being considered would lead to.
+func planRadios(cfg *config.Config, radios []wifi.Radio) radioPlan {
+	p := radioPlan{hw: map[string]*wifi.Radio{}, role: map[string]string{}, ssids: map[string][]config.SSID{}}
+	var on []config.SSID
+	for _, w := range cfg.Wifi {
+		if w.Enabled && w.SSID != "" && w.Passphrase != "" {
+			on = append(on, w)
+		}
+	}
+	var aps []string
+	var capacity []int
+	for _, rc := range cfg.Radios {
+		var hw *wifi.Radio
+		for i := range radios {
+			if radios[i].ID == rc.ID {
+				hw = &radios[i]
+			}
+		}
+		if hw == nil || hw.Iface == "" {
+			continue
+		}
+		p.hw[rc.ID] = hw
+		role := rc.Role
+		if role == config.RoleAPWAN && !hw.APSTA {
+			// Not possible on this radio; the uplink matters more.
+			role = config.RoleWAN
+			p.notes = append(p.notes, radioName(hw)+" cannot broadcast your network and join another at the same time. It will only join.")
+		}
+		if (role == config.RoleWAN || role == config.RoleAPWAN) && !hw.STA {
+			role = config.RoleOff
+		}
+		if (role == config.RoleAP || role == config.RoleAPWAN) && !hw.AP {
+			p.notes = append(p.notes, radioName(hw)+" cannot broadcast a network.")
+			role = map[string]string{config.RoleAP: config.RoleOff, config.RoleAPWAN: config.RoleWAN}[role]
+		}
+		p.role[rc.ID] = role
+		switch role {
+		case config.RoleAP:
+			aps, capacity = append(aps, rc.ID), append(capacity, max(hw.MaxAP, 1))
+		case config.RoleAPWAN:
+			aps, capacity = append(aps, rc.ID), append(capacity, max(hw.MaxAPSTA, 1))
+		}
+	}
+	carried := map[int]bool{}
+	for r, picks := range wifi.Assign(capacity, len(on)) {
+		for _, i := range picks {
+			p.ssids[aps[r]] = append(p.ssids[aps[r]], on[i])
+			carried[i] = true
+		}
+	}
+	for i, w := range on {
+		if carried[i] || len(aps) == 0 {
+			continue
+		}
+		p.offAir = append(p.offAir, w.ID)
+		most := 0
+		for _, c := range capacity {
+			most = max(most, c)
+		}
+		if most <= 1 {
+			p.notes = append(p.notes, fmt.Sprintf("“%s” will not be on air: this radio broadcasts one network at a time. A USB Wi-Fi adapter that can carry several, or a second radio for it, would.", w.SSID))
+		} else {
+			p.notes = append(p.notes, fmt.Sprintf("“%s” will not be on air: the radios cannot carry that many networks.", w.SSID))
+		}
+	}
+	return p
 }
