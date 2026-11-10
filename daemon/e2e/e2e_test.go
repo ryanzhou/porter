@@ -33,6 +33,7 @@ import (
 
 	"github.com/ryanzhou/porter/daemon/internal/client"
 	"github.com/ryanzhou/porter/daemon/internal/config"
+	"github.com/ryanzhou/porter/daemon/internal/fw"
 	"github.com/ryanzhou/porter/daemon/internal/vpn"
 )
 
@@ -47,6 +48,12 @@ const (
 	siteB    = "198.51.100.20" // site reached through a domain rule
 	vpnSrvIP = "10.99.0.1"
 	vpnCliIP = "10.99.0.2"
+
+	// IPv6, where the kernel has it: the upstream network hands out a /64
+	// by router advertisement and nothing more (no prefix delegation).
+	ispIP6  = "2001:db8:100::1"
+	ispNet6 = "2001:db8:100:"
+	site6   = "2001:db8:200::10"
 )
 
 func sh(t *testing.T, format string, a ...any) string {
@@ -87,7 +94,11 @@ func listen(t *testing.T, ns, addr string) net.Listener {
 	t.Helper()
 	var ln net.Listener
 	var err error
-	inNS(ns, func() { ln, err = net.Listen("tcp4", addr) })
+	network := "tcp4"
+	if strings.HasPrefix(addr, "[") {
+		network = "tcp6"
+	}
+	inNS(ns, func() { ln, err = net.Listen(network, addr) })
 	if err != nil {
 		t.Fatalf("listen %s in %s: %v", addr, ns, err)
 	}
@@ -100,7 +111,7 @@ func httpGet(ns, url string) (string, error) {
 	tr := &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, network, addr string) (c net.Conn, err error) {
-			inNS(ns, func() { c, err = (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp4", addr) })
+			inNS(ns, func() { c, err = (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp", addr) })
 			return
 		},
 	}
@@ -150,8 +161,9 @@ type status struct {
 	Internet string `json:"internet"`
 	Active   string `json:"active"`
 	WAN      []struct {
-		If   string `json:"if"`
-		IPv4 string `json:"ipv4"`
+		If    string `json:"if"`
+		IPv4  string `json:"ipv4"`
+		HasV6 bool   `json:"has_v6"`
 	} `json:"wan"`
 	Portal struct {
 		Captive bool   `json:"captive"`
@@ -259,16 +271,26 @@ func TestRouter(t *testing.T) {
 		sh(t, "ip -n %s addr add %s/32 dev lo", nsISP, a)
 	}
 	sh(t, "ip -n %s link set pt-c1if up && ip -n %s link set pt-c2if up", nsC1, nsC2)
+	v6 := fw.HaveIPv6()
+	if v6 {
+		sh(t, "ip -n %s addr add %s/64 dev isp0 nodad", nsISP, ispIP6)
+		sh(t, "ip -n %s addr add %s/128 dev lo nodad", nsISP, site6)
+	}
 
 	// Upstream DHCP and DNS.
 	ispConf := filepath.Join(dir, "isp-dnsmasq.conf")
-	os.WriteFile(ispConf, []byte(strings.Join([]string{
-		"interface=isp0", "except-interface=lo", "bind-interfaces", "listen-address=" + ispIP, "no-resolv", "no-hosts", "user=root", "keep-in-foreground",
+	ispLines := []string{
+		"interface=isp0", "except-interface=lo", "bind-interfaces", "no-resolv", "no-hosts", "user=root", "keep-in-foreground",
 		"dhcp-range=100.64.0.50,100.64.0.99,255.255.255.0,10m", "dhcp-option=option:router," + ispIP,
 		"dhcp-option=option:dns-server," + ispIP, "dhcp-leasefile=" + filepath.Join(dir, "isp.leases"),
 		"address=/probe.test/" + siteA, "address=/direct.test/" + siteA, "address=/tunnel.test/" + siteB,
 		"address=/dnspath.test/203.0.113.1", "address=/portal.test/" + ispIP,
-	}, "\n")+"\n"), 0o644)
+	}
+	if v6 {
+		// Addresses by router advertisement only.
+		ispLines = append(ispLines, "enable-ra", "dhcp-range=::,constructor:isp0,ra-only,10m")
+	}
+	os.WriteFile(ispConf, []byte(strings.Join(ispLines, "\n")+"\n"), 0o644)
 	start("isp dnsmasq", "isp-dnsmasq.log", "ip", "netns", "exec", nsISP, "dnsmasq", "--conf-file="+ispConf)
 
 	// "The internet": every site reports the address it was reached from.
@@ -284,6 +306,9 @@ func TestRouter(t *testing.T) {
 	})
 	for _, a := range []string{siteA, siteB} {
 		go http.Serve(listen(t, nsISP, a+":80"), site)
+	}
+	if v6 {
+		go http.Serve(listen(t, nsISP, "["+site6+"]:80"), site)
 	}
 	// The captive portal: while enabled, the upstream network redirects
 	// every web request to its login page.
@@ -385,7 +410,7 @@ func TestRouter(t *testing.T) {
 
 	// --- clients ----------------------------------------------------------------
 	cliConf := filepath.Join(dir, "client-dhcpcd.conf")
-	os.WriteFile(cliConf, []byte("script /bin/true\nnoipv4ll\nipv4only\nhostname\n"), 0o644)
+	os.WriteFile(cliConf, []byte("script /bin/true\nnoipv4ll\nhostname\nipv6rs\nslaac hwaddr\n"), 0o644)
 	start("client1 dhcp", "c1-dhcpcd.log", "ip", "netns", "exec", nsC1, "dhcpcd", "--nobackground", "--config", cliConf, "pt-c1if")
 	start("client2 dhcp", "c2-dhcpcd.log", "ip", "netns", "exec", nsC2, "dhcpcd", "--nobackground", "--config", cliConf, "pt-c2if")
 	var devs []device
@@ -426,6 +451,35 @@ func TestRouter(t *testing.T) {
 		// router all the same.
 		if a, _, err := lookup(nsC1, "198.51.100.53", "direct.test"); err != nil || a != siteA {
 			t.Errorf("intercepted query: %q %v", a, err)
+		}
+	})
+
+	t.Run("IPv6NAT66", func(t *testing.T) {
+		if !v6 {
+			t.Skip("this kernel has IPv6 disabled")
+		}
+		eventually(t, "uplink to get IPv6 by router advertisement", 40*time.Second, func() bool {
+			s := getStatus()
+			return len(s.WAN) > 0 && s.WAN[0].HasV6
+		})
+		// The client has only a ULA address, yet reaches an IPv6 site,
+		// which sees the router's upstream address: NAT66.
+		eventually(t, "client reaching an IPv6 site", 40*time.Second, func() bool {
+			got, err := httpGet(nsC1, "http://["+site6+"]/ip")
+			return err == nil && strings.HasPrefix(got, ispNet6)
+		})
+		addrs := sh(t, "ip -n %s -6 addr show dev pt-c1if scope global", nsC1)
+		if !strings.Contains(addrs, "inet6 fd") || strings.Contains(addrs, ispNet6) {
+			t.Errorf("client should hold only a ULA address:\n%s", addrs)
+		}
+		// The resolver answers on the router's IPv6 address too.
+		var cfg config.Config
+		if err := c.Call("config.get", nil, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		ula, _ := cfg.ULA()
+		if a, _, err := lookup(nsC1, ula.String(), "direct.test"); err != nil || a != siteA {
+			t.Errorf("DNS over IPv6: %q %v", a, err)
 		}
 	})
 
@@ -488,6 +542,17 @@ func TestRouter(t *testing.T) {
 		})
 		if got, err := httpGet(nsC1, "http://"+siteA+"/ip"); err != nil || got != wanIP {
 			t.Errorf("device one should be direct: %q %v", got, err)
+		}
+		if v6 {
+			// The tunnel carries IPv4 only. Device two's IPv6 must be
+			// refused, not quietly sent out the uplink beside the tunnel.
+			eventually(t, "IPv6 of the tunnelled device refused", 15*time.Second, func() bool {
+				_, err := httpGet(nsC2, "http://["+site6+"]/ip")
+				return err != nil
+			})
+			if got, err := httpGet(nsC1, "http://["+site6+"]/ip"); err != nil || !strings.HasPrefix(got, ispNet6) {
+				t.Errorf("direct device IPv6 should be unaffected: %q %v", got, err)
+			}
 		}
 		// DNS follows the path: device two's queries reach the VPN's
 		// resolver, device one's the upstream network's.

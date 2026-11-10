@@ -1,0 +1,36 @@
+name: Image
+
+# Builds the SD card image. Runs on demand and for version tags, not on
+# every push: it takes a while and the result is large.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+      - name: Build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends mmdebstrap qemu-user-static binfmt-support \
+            dosfstools mtools fdisk e2fsprogs xz-utils gpg curl
+      - name: Build image
+        run: sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" image/build.sh "$PWD/build"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porter-image
+          path: |
+            build/*.img.xz
+            build/*.sha256
+          compression-level: 0
+          retention-days: 30

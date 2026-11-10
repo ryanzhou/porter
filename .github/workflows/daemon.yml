@@ -1,0 +1,39 @@
+name: Daemon
+
+on:
+  push:
+    paths: ["daemon/**", "ios/PorterKit/Tests/PorterKitTests/Resources/**", ".github/workflows/daemon.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: daemon-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+      - name: Vet and unit tests
+        working-directory: daemon
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go vet -tags e2e ./e2e/
+          go test -count=1 ./...
+      - name: Tools for the end-to-end test
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends dnsmasq-base dhcpcd-base wireguard-tools nftables iproute2
+          sudo modprobe wireguard
+      - name: Kernel-level tests (firewall, policy routing) as root
+        working-directory: daemon
+        run: sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" go test -count=1 -v ./internal/fw/
+      - name: End-to-end test in network namespaces
+        working-directory: daemon
+        run: sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" go test -tags e2e -count=1 -v -timeout 10m ./e2e/
