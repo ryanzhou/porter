@@ -288,4 +288,10 @@ How it is built, how to build the image yourself, the tests, and the
 control protocol are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and
 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
+## Licence
+
+[Apache 2.0](LICENSE). [NOTICE](NOTICE) lists the third-party software
+and data Porter uses; the software inside a built SD card image keeps its
+own licences.
+
 IP geolocation by [DB-IP](https://db-ip.com).

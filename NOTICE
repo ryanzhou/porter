@@ -1,0 +1,40 @@
+Porter
+Copyright 2026 The Porter authors
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+
+Third-party software
+
+The router daemon (daemon/) is built with these Go modules, each under
+its own licence:
+
+  github.com/flynn/noise                  BSD 3-Clause
+  github.com/godbus/dbus                  BSD 2-Clause
+  github.com/miekg/dns                    BSD 3-Clause
+  github.com/vishvananda/netlink, netns   Apache 2.0
+  github.com/mdlayher/netlink, genetlink,
+    socket                                MIT
+  github.com/josharian/native             MIT
+  golang.zx2c4.com/wireguard, wgctrl      MIT
+  golang.org/x/crypto, net, sync, sys     BSD 3-Clause
+
+PorterKit (ios/PorterKit) uses Apple's CryptoKit on Apple platforms and
+swift-crypto (Apache 2.0) where it is built on Linux for tests.
+
+
+Data
+
+IP geolocation by DB-IP (https://db-ip.com), licensed under CC BY 4.0.
+The database is not part of this repository: the image build downloads
+it, and the router refreshes it.
+
+
+The SD card image
+
+An image built by image/build.sh contains Debian and Raspberry Pi
+packages, among them the Linux kernel, BlueZ, dnsmasq and nftables (GPL),
+hostapd and wpa_supplicant (BSD), and radio firmware under its vendors'
+redistribution terms. Those remain under their own licences, which this
+repository's licence does not change; whoever distributes an image is
+responsible for meeting them.
