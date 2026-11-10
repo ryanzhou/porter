@@ -270,12 +270,21 @@ private struct SavedNetworksSection: View {
     private var savedSection: some View {
         Section {
             ForEach(networks) { network in
-                HStack {
-                    Text(network.ssid)
-                    Spacer()
-                    Text(note(for: network.ssid))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                NavigationLink {
+                    IPSetupPage(title: network.ssid, initial: network.ip ?? IPSetup()) { setup in
+                        await saveAddresses(network.ssid, setup)
+                    }
+                } label: {
+                    HStack {
+                        Text(network.ssid)
+                        if network.ip?.isAutomatic == false {
+                            Badge(text: "Manual")
+                        }
+                        Spacer()
+                        Text(note(for: network.ssid))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .swipeActions {
                     Button("Forget", role: .destructive) { forget(network.ssid) }
@@ -288,6 +297,130 @@ private struct SavedNetworksSection: View {
 
     private func forget(_ ssid: String) {
         Task { await model.attempt { try await $0.forgetWifi(ssid: ssid) } }
+    }
+
+    private func saveAddresses(_ ssid: String, _ setup: IPSetup) async -> Bool {
+        await model.update { cfg in
+            if let index = cfg.wan.networks.firstIndex(where: { $0.ssid == ssid }) {
+                cfg.wan.networks[index].ip = setup
+            }
+        }
+    }
+}
+
+// MARK: - Addresses
+
+/// How an uplink gets its addresses: from the network, or typed in, for
+/// IPv4 and IPv6 separately.
+struct IPSetupPage: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let initial: IPSetup
+    let save: (IPSetup) async -> Bool
+
+    @State private var draft = IPSetup()
+    @State private var dns4: String = ""
+    @State private var dns6: String = ""
+    @State private var loaded = false
+    @State private var saving = false
+
+    /// The draft with the DNS fields folded in.
+    private var result: IPSetup {
+        var out = draft
+        out.v4.dns = servers(dns4)
+        out.v6.dns = servers(dns6)
+        return out
+    }
+
+    private func servers(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0 == "," || $0 == " " || $0.isNewline }).map { String($0) }
+    }
+
+    private func complete(_ family: IPFamilySetup) -> Bool {
+        !family.isStatic || (!family.address.isEmpty && !family.gateway.isEmpty)
+    }
+
+    private var canSave: Bool {
+        loaded && !saving && result != initial && complete(draft.v4) && complete(draft.v6)
+    }
+
+    var body: some View {
+        Form {
+            IPFamilySection(name: "IPv4", family: $draft.v4, dns: $dns4, address: "192.168.1.50/24", gateway: "192.168.1.1", server: "1.1.1.1")
+            IPFamilySection(name: "IPv6", family: $draft.v6, dns: $dns6, address: "2001:db8::50/64", gateway: "fe80::1", server: "2606:4700:4700::1111")
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") { commit() }
+                    .disabled(!canSave)
+            }
+        }
+        .onAppear { load() }
+    }
+
+    private func load() {
+        guard !loaded else { return }
+        loaded = true
+        draft = initial
+        dns4 = initial.v4.dns.joined(separator: ", ")
+        dns6 = initial.v6.dns.joined(separator: ", ")
+    }
+
+    private func commit() {
+        let setup = result
+        saving = true
+        Task {
+            let ok = await save(setup)
+            saving = false
+            if ok {
+                dismiss()
+            }
+        }
+    }
+}
+
+private struct IPFamilySection: View {
+    let name: String
+    @Binding var family: IPFamilySetup
+    @Binding var dns: String
+    let address: String
+    let gateway: String
+    let server: String
+
+    var body: some View {
+        Section(name) {
+            Picker(name, selection: $family.mode) {
+                Text("Automatic").tag("auto")
+                Text("Manual").tag("static")
+            }
+            .pickerStyle(.segmented)
+            .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+            if family.isStatic {
+                AddressField(label: "Address", text: $family.address, example: address)
+                AddressField(label: "Gateway", text: $family.gateway, example: gateway)
+                AddressField(label: "DNS", text: $dns, example: server)
+            }
+        }
+    }
+}
+
+/// A labelled field for an address, with an example where the value goes.
+private struct AddressField: View {
+    let label: String
+    @Binding var text: String
+    let example: String
+
+    var body: some View {
+        LabeledContent(label) {
+            TextField(label, text: $text, prompt: Text(verbatim: example))
+                .multilineTextAlignment(.trailing)
+                .font(.body.monospaced())
+                .keyboardType(.numbersAndPunctuation)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        }
     }
 }
 
@@ -567,6 +700,14 @@ private struct WiredPortsSection: View {
         )
     }
 
+    private func saveAddresses(_ name: String, _ setup: IPSetup) async -> Bool {
+        await model.update { cfg in
+            if let index = cfg.ethernet.firstIndex(where: { $0.name == name }) {
+                cfg.ethernet[index].ip = setup
+            }
+        }
+    }
+
     var body: some View {
         if !ports.isEmpty {
             Section {
@@ -583,6 +724,15 @@ private struct WiredPortsSection: View {
                         .pickerStyle(.segmented)
                         .labelsHidden()
                         .frame(maxWidth: 210)
+                    }
+                    if port.role == .wan {
+                        NavigationLink {
+                            IPSetupPage(title: port.name, initial: port.ip ?? IPSetup()) { setup in
+                                await saveAddresses(port.name, setup)
+                            }
+                        } label: {
+                            LabeledContent("Addresses", value: port.ip?.isAutomatic == false ? "Manual" : "Automatic")
+                        }
                     }
                 }
             } header: {

@@ -632,7 +632,7 @@ func (c *Core) reconcile() {
 			if err := netx.SetMAC(e.Name, ethMAC); err != nil {
 				c.log.Warn("setting wired MAC", "if", e.Name, "err", err)
 			}
-			uplinks = append(uplinks, wan.Uplink{If: e.Name, Kind: "eth", Metric: ethBase + i})
+			uplinks = append(uplinks, wan.Uplink{If: e.Name, Kind: "eth", Metric: ethBase + i, IP: e.IP})
 		case config.EthLAN:
 			_ = netx.SetMAC(e.Name, "")
 			lanPorts = append(lanPorts, e.Name)
@@ -644,7 +644,19 @@ func (c *Core) reconcile() {
 	}
 	sort.Strings(staIDs)
 	for i, id := range staIDs {
-		uplinks = append(uplinks, wan.Uplink{If: wantSTA[id].Iface, Kind: "wifi", Metric: wifiBase + i})
+		up := wan.Uplink{If: wantSTA[id].Iface, Kind: "wifi", Metric: wifiBase + i}
+		// How a wireless uplink gets its addresses belongs to the network
+		// it is on (or is joining).
+		if sta := c.stas[id]; sta != nil {
+			if ssid := sta.Status().SSID; ssid != "" {
+				for _, n := range cfg.WAN.Networks {
+					if n.SSID == ssid {
+						up.IP = n.IP
+					}
+				}
+			}
+		}
+		uplinks = append(uplinks, up)
 	}
 	c.wan.Apply(uplinks, cfg.WAN.Probe)
 	states := c.wan.States()

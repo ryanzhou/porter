@@ -194,6 +194,84 @@ func SyncAddrs(name string, want []netip.Prefix) (changed bool, err error) {
 	return changed, nil
 }
 
+func defaultDst(v6 bool) *net.IPNet {
+	if v6 {
+		return &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
+	}
+	return &net.IPNet{IP: net.IPv4zero.To4(), Mask: net.CIDRMask(0, 32)}
+}
+
+// SetStatic gives the interface a hand-configured address: addr becomes
+// its only global address of that family, and the family's default route
+// goes through gw with the given metric. It changes nothing that is
+// already as wanted, so it can be called over and over.
+func SetStatic(name string, addr netip.Prefix, gw netip.Addr, metric int) error {
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		return err
+	}
+	v6 := addr.Addr().Is6()
+	family := unix.AF_INET
+	if v6 {
+		family = unix.AF_INET6
+	}
+	have, err := netlink.AddrList(l, family)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, a := range have {
+		ip, ok := netip.AddrFromSlice(a.IP)
+		if !ok {
+			continue
+		}
+		ip = ip.Unmap()
+		if ip.IsLinkLocalUnicast() {
+			continue
+		}
+		ones, _ := a.Mask.Size()
+		if netip.PrefixFrom(ip, ones) == addr {
+			found = true
+			continue
+		}
+		a := a
+		if err := netlink.AddrDel(l, &a); err != nil {
+			return fmt.Errorf("remove %s from %s: %w", ip, name, err)
+		}
+	}
+	if !found {
+		a := &netlink.Addr{IPNet: &net.IPNet{IP: addr.Addr().AsSlice(), Mask: net.CIDRMask(addr.Bits(), addr.Addr().BitLen())}}
+		if err := netlink.AddrAdd(l, a); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("add %s to %s: %w", addr, name, err)
+		}
+	}
+	if cur, ok := DefaultRoute(name, family); ok && cur == gw {
+		return nil
+	}
+	route := &netlink.Route{
+		LinkIndex: l.Attrs().Index, Dst: defaultDst(v6), Gw: gw.AsSlice(),
+		Priority: metric, Table: unix.RT_TABLE_MAIN, Protocol: unix.RTPROT_STATIC,
+	}
+	if err := netlink.RouteReplace(route); err != nil {
+		return fmt.Errorf("default route via %s on %s: %w", gw, name, err)
+	}
+	return nil
+}
+
+// ClearStatic takes back what SetStatic set up.
+func ClearStatic(name string, addr netip.Prefix, gw netip.Addr, metric int) {
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		return
+	}
+	v6 := addr.Addr().Is6()
+	_ = netlink.RouteDel(&netlink.Route{
+		LinkIndex: l.Attrs().Index, Dst: defaultDst(v6), Gw: gw.AsSlice(),
+		Priority: metric, Table: unix.RT_TABLE_MAIN,
+	})
+	_ = netlink.AddrDel(l, &netlink.Addr{IPNet: &net.IPNet{IP: addr.Addr().AsSlice(), Mask: net.CIDRMask(addr.Bits(), addr.Addr().BitLen())}})
+}
+
 // Addrs returns the interface's global addresses.
 func Addrs(name string) (v4, v6 []netip.Prefix) {
 	l, err := netlink.LinkByName(name)

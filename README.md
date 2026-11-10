@@ -107,6 +107,11 @@ Networks you have joined are remembered and rejoined automatically. If
 the venue's network uses the same address range as yours, the router
 moves your network out of the way by itself.
 
+Addresses come from the network by default. Where a network wants a
+fixed address instead, set it by hand: for a wired port under
+**Addresses**, for a Wi-Fi network by tapping it under **Saved**. IPv4
+and IPv6 are set separately, each with address, gateway and DNS servers.
+
 Where a network is on both bands the router joins it on 5 GHz, unless
 that signal is poor; the band shows next to the uplink. With one radio
 doing both jobs, your own network follows the uplink onto its channel,

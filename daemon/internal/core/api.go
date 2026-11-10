@@ -548,6 +548,10 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 				if n.SSID != p.SSID {
 					kept = append(kept, n)
 					top = max(top, n.Priority)
+				} else if p.IP.V4.Mode == "" && p.IP.V6.Mode == "" {
+					// Joining again with a new password keeps the
+					// addresses set for the network.
+					p.IP = n.IP
 				}
 			}
 			p.Priority = min(top+1, 1000)

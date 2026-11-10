@@ -931,6 +931,69 @@ func TestRouter(t *testing.T) {
 		}
 	})
 
+	t.Run("StaticUplink", func(t *testing.T) {
+		const fixed4, fixed6 = "100.64.0.200", "2001:db8:100::200"
+		set := func(ip config.IPSetup) {
+			editConfig(func(cfg *config.Config) {
+				for i := range cfg.Ethernet {
+					if cfg.Ethernet[i].Name == "eth0" {
+						cfg.Ethernet[i].IP = ip
+					}
+				}
+			})
+		}
+		uplink4 := func() (string, string) {
+			s := getStatus()
+			for _, w := range s.WAN {
+				if w.If == "eth0" {
+					return w.IPv4, s.Internet
+				}
+			}
+			return "", s.Internet
+		}
+		v4 := config.IPFamily{Mode: config.IPStatic, Address: fixed4 + "/24", Gateway: ispIP, DNS: []string{ispIP}}
+		set(config.IPSetup{V4: v4})
+		eventually(t, "uplink online on its fixed IPv4 address", 40*time.Second, func() bool {
+			addr, internet := uplink4()
+			return addr == fixed4+"/24" && internet == "online"
+		})
+		eventually(t, "client going out from the fixed address", 20*time.Second, func() bool {
+			got, err := httpGet(nsC1, "http://"+siteA+"/ip")
+			return err == nil && got == fixed4
+		})
+		// Names resolve through the DNS server that came with the address.
+		if a, _, err := lookup(nsC1, router, "direct.test"); err != nil || a != siteA {
+			t.Errorf("lookup with a fixed uplink address: %q %v", a, err)
+		}
+		if v6 {
+			// IPv6 by hand as well; IPv4 stays as it is.
+			set(config.IPSetup{V4: v4, V6: config.IPFamily{Mode: config.IPStatic, Address: fixed6 + "/64", Gateway: ispIP6}})
+			eventually(t, "client going out from the fixed IPv6 address", 40*time.Second, func() bool {
+				got, err := httpGet(nsC1, "http://["+site6+"]/ip")
+				return err == nil && got == fixed6
+			})
+			if got, err := httpGet(nsC1, "http://"+siteA+"/ip"); err != nil || got != fixed4 {
+				t.Errorf("IPv4 after fixing IPv6 too: %q %v", got, err)
+			}
+		}
+		// And back to what the network hands out.
+		set(config.IPSetup{})
+		eventually(t, "uplink back on DHCP", 60*time.Second, func() bool {
+			addr, internet := uplink4()
+			return addr != "" && addr != fixed4+"/24" && internet == "online"
+		})
+		eventually(t, "client going out from the leased address", 20*time.Second, func() bool {
+			got, err := httpGet(nsC1, "http://"+siteA+"/ip")
+			return err == nil && got != "" && got != fixed4
+		})
+		if v6 {
+			eventually(t, "IPv6 back to automatic", 60*time.Second, func() bool {
+				got, err := httpGet(nsC1, "http://["+site6+"]/ip")
+				return err == nil && strings.HasPrefix(got, ispNet6) && got != fixed6
+			})
+		}
+	})
+
 	t.Run("Events", func(t *testing.T) {
 		var evs []struct {
 			Kind string `json:"kind"`

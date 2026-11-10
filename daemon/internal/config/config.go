@@ -101,7 +101,38 @@ const (
 type EthPort struct {
 	Name string `json:"name"`
 	Role string `json:"role"`
+	// IP is how the port gets its addresses when it is an uplink.
+	IP IPSetup `json:"ip"`
 }
+
+// IPSetup is how an uplink gets its addresses, per address family. The
+// zero value is automatic for both: DHCP for IPv4; router advertisements
+// and DHCPv6 for IPv6.
+type IPSetup struct {
+	V4 IPFamily `json:"v4"`
+	V6 IPFamily `json:"v6"`
+}
+
+const (
+	IPAuto   = "auto"
+	IPStatic = "static"
+)
+
+// IPFamily is one address family of an IPSetup. Address, Gateway and DNS
+// are used only when Mode is IPStatic.
+type IPFamily struct {
+	Mode string `json:"mode"`
+	// Address is the uplink's own address with its prefix length, such
+	// as 192.0.2.10/24 or 2001:db8::10/64.
+	Address string `json:"address"`
+	// Gateway is the next hop for everything else. For IPv6 it may be a
+	// link-local address.
+	Gateway string   `json:"gateway"`
+	DNS     []string `json:"dns"`
+}
+
+// Static reports whether the family is configured by hand.
+func (f IPFamily) Static() bool { return f.Mode == IPStatic }
 
 const (
 	SecWPA2     = "wpa2"
@@ -137,6 +168,8 @@ type WifiNetwork struct {
 	PSK      string `json:"psk"`
 	Hidden   bool   `json:"hidden"`
 	Priority int    `json:"priority"`
+	// IP is how the router gets its addresses on this network.
+	IP IPSetup `json:"ip"`
 }
 
 type WAN struct {

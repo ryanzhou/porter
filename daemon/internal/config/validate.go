@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/netip"
@@ -63,6 +64,12 @@ func (c *Config) Normalize() {
 	}
 	if c.WAN.EthMAC.Mode == MACRandom && c.WAN.EthMAC.Address == "" {
 		c.WAN.EthMAC.Address = RandomMAC()
+	}
+	for i := range c.Ethernet {
+		c.Ethernet[i].IP.normalize()
+	}
+	for i := range c.WAN.Networks {
+		c.WAN.Networks[i].IP.normalize()
 	}
 	// Configurations saved before speed tests existed have no server set.
 	if c.SpeedTest.DownloadURL == "" && c.SpeedTest.UploadURL == "" {
@@ -237,6 +244,9 @@ func (c *Config) validateRadios() error {
 		default:
 			return fmt.Errorf("%s: invalid role %q", e.Name, e.Role)
 		}
+		if err := e.IP.validate(e.Name, len(c.DNS.Upstreams) > 0); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -284,6 +294,118 @@ func validMACPolicy(p MACPolicy, what string) error {
 	return nil
 }
 
+// normalize puts an address setup into its canonical form: a mode is
+// always named, addresses are written the standard way, and what a family
+// set to automatic does not use is cleared.
+func (s *IPSetup) normalize() {
+	for _, f := range []*IPFamily{&s.V4, &s.V6} {
+		f.Mode = strings.ToLower(strings.TrimSpace(f.Mode))
+		if f.Mode == "" {
+			f.Mode = IPAuto
+		}
+		if f.Mode == IPAuto {
+			f.Address, f.Gateway, f.DNS = "", "", []string{}
+			continue
+		}
+		f.Address = strings.TrimSpace(f.Address)
+		if p, err := netip.ParsePrefix(f.Address); err == nil {
+			f.Address = p.String()
+		}
+		f.Gateway = strings.TrimSpace(f.Gateway)
+		if a, err := netip.ParseAddr(f.Gateway); err == nil && a.Zone() == "" {
+			f.Gateway = a.String()
+		}
+		dns := []string{}
+		for _, d := range f.DNS {
+			d = strings.TrimSpace(d)
+			if d == "" {
+				continue
+			}
+			if a, err := netip.ParseAddr(d); err == nil && a.Zone() == "" {
+				d = a.String()
+			}
+			dns = append(dns, d)
+		}
+		f.DNS = dns
+	}
+}
+
+// validate checks an address setup. what names the port or network for
+// messages; haveDNS says that DNS servers are configured elsewhere, so a
+// static IPv4 setup need not bring its own.
+func (s IPSetup) validate(what string, haveDNS bool) error {
+	if err := s.V4.validate(what, false, haveDNS); err != nil {
+		return err
+	}
+	return s.V6.validate(what, true, true)
+}
+
+func (f IPFamily) validate(what string, v6, dnsOptional bool) error {
+	name := "IPv4"
+	if v6 {
+		name = "IPv6"
+	}
+	switch f.Mode {
+	case IPAuto:
+		return nil
+	case IPStatic:
+	default:
+		return fmt.Errorf("%s: %s is either automatic or static", what, name)
+	}
+	p, err := netip.ParsePrefix(f.Address)
+	if err != nil || p.Addr().Is6() != v6 || p.Addr().Is4In6() {
+		if v6 {
+			return fmt.Errorf("%s: the IPv6 address needs its prefix length, like 2001:db8::10/64", what)
+		}
+		return fmt.Errorf("%s: the IPv4 address needs its prefix length, like 192.168.1.50/24", what)
+	}
+	a := p.Addr()
+	if a.IsUnspecified() || a.IsLoopback() || a.IsMulticast() || a.IsLinkLocalUnicast() {
+		return fmt.Errorf("%s: %s is not an address an uplink can have", what, a)
+	}
+	if v6 {
+		if p.Bits() < 16 || p.Bits() > 128 {
+			return fmt.Errorf("%s: IPv6 prefix length must be 16 to 128", what)
+		}
+	} else {
+		if p.Bits() < 8 || p.Bits() > 31 {
+			return fmt.Errorf("%s: IPv4 prefix length must be 8 to 31", what)
+		}
+		if p.Bits() < 31 {
+			// Not the network's own address, nor its broadcast address.
+			host := binary.BigEndian.Uint32(a.AsSlice()) & (1<<(32-p.Bits()) - 1)
+			if host == 0 || host == 1<<(32-p.Bits())-1 {
+				return fmt.Errorf("%s: %s is the network or broadcast address of %s", what, a, p.Masked())
+			}
+		}
+	}
+	gw, err := netip.ParseAddr(f.Gateway)
+	if err != nil || gw.Is6() != v6 || gw.Is4In6() || gw.Zone() != "" || gw.IsUnspecified() || gw.IsMulticast() || gw.IsLoopback() {
+		return fmt.Errorf("%s: %s needs a gateway address", what, name)
+	}
+	if gw == a {
+		return fmt.Errorf("%s: the %s gateway cannot be the uplink's own address", what, name)
+	}
+	// The gateway has to be a neighbour: inside the uplink's own network
+	// or, for IPv6, a link-local address.
+	if !p.Masked().Contains(gw) && !(v6 && gw.IsLinkLocalUnicast()) {
+		return fmt.Errorf("%s: the gateway %s is not in %s", what, gw, p.Masked())
+	}
+	if len(f.DNS) > 3 {
+		return fmt.Errorf("%s: at most 3 %s DNS servers", what, name)
+	}
+	for _, d := range f.DNS {
+		s, err := netip.ParseAddr(d)
+		if err != nil || s.Is6() != v6 || s.Is4In6() || s.Zone() != "" || s.IsUnspecified() || s.IsMulticast() {
+			return fmt.Errorf("%s: %q is not an %s DNS server address", what, d, name)
+		}
+	}
+	if len(f.DNS) == 0 && !dnsOptional {
+		return fmt.Errorf("%s: a static IPv4 setup needs a DNS server (or set servers under DNS)", what)
+	}
+	return nil
+}
+
 func (c *Config) validateWAN() error {
 	w := c.WAN
 	if len(w.Networks) > 64 {
@@ -303,6 +425,9 @@ func (c *Config) validateWAN() error {
 		}
 		if n.Priority < 0 || n.Priority > 1000 {
 			return fmt.Errorf("saved network %q: invalid priority", n.SSID)
+		}
+		if err := n.IP.validate(n.SSID, len(c.DNS.Upstreams) > 0); err != nil {
+			return err
 		}
 	}
 	if err := validMACPolicy(w.WifiMAC, "wan.wifi_mac"); err != nil {

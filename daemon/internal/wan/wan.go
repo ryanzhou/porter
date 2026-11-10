@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +36,9 @@ type Uplink struct {
 	If     string
 	Kind   string // "eth" or "wifi"
 	Metric int
+	// IP says, per address family, whether the uplink configures itself
+	// (DHCP; router advertisements and DHCPv6) or has a fixed address.
+	IP config.IPSetup
 }
 
 // State is the observable condition of an uplink.
@@ -58,6 +62,7 @@ type State struct {
 
 type uplink struct {
 	cfg     Uplink
+	static  string // the last problem applying fixed addresses, for logging once
 	dhcpcd  *proc.Proc
 	conf    string
 	dns4    []string
@@ -121,14 +126,16 @@ func (m *Manager) Apply(list []Uplink, probe config.Probe) {
 		want[u.If] = u
 	}
 	var stopped []*proc.Proc
+	var cleared []Uplink
 	for name, u := range m.uplinks {
 		w, ok := want[name]
-		if ok && w == u.cfg {
+		if ok && reflect.DeepEqual(w, u.cfg) {
 			continue
 		}
 		if u.dhcpcd != nil {
 			stopped = append(stopped, u.dhcpcd)
 		}
+		cleared = append(cleared, u.cfg)
 		delete(m.uplinks, name)
 	}
 	var started []*uplink
@@ -145,23 +152,85 @@ func (m *Manager) Apply(list []Uplink, probe config.Probe) {
 	for _, p := range stopped {
 		p.Stop()
 	}
+	for _, old := range cleared {
+		clearStatic(old)
+	}
 	for _, u := range started {
 		m.startDHCP(u)
 	}
-	if len(stopped)+len(started) > 0 {
+	if len(cleared)+len(started) > 0 {
 		m.changed()
 	}
 }
 
+// statics lists the fixed addresses of an uplink: address and gateway
+// per family configured by hand. The configuration has been validated,
+// so these parse.
+func statics(u Uplink) (out []struct {
+	Addr netip.Prefix
+	Gw   netip.Addr
+}) {
+	for _, f := range []config.IPFamily{u.IP.V4, u.IP.V6} {
+		if !f.Static() {
+			continue
+		}
+		addr, err1 := netip.ParsePrefix(f.Address)
+		gw, err2 := netip.ParseAddr(f.Gateway)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		out = append(out, struct {
+			Addr netip.Prefix
+			Gw   netip.Addr
+		}{addr, gw})
+	}
+	return out
+}
+
+// applyStatic puts an uplink's fixed addresses and routes in place. It is
+// called when the uplink starts and on every refresh: an interface that
+// was not there yet, or lost its addresses when its link went down and
+// came back, is put right within seconds.
+func (m *Manager) applyStatic(u *uplink) {
+	problem := ""
+	for _, s := range statics(u.cfg) {
+		if err := netx.SetStatic(u.cfg.If, s.Addr, s.Gw, u.cfg.Metric); err != nil {
+			problem = err.Error()
+		}
+	}
+	if problem != u.static {
+		u.static = problem
+		if problem != "" {
+			m.Log.Warn("fixed uplink address", "if", u.cfg.If, "err", problem)
+		}
+	}
+}
+
+func clearStatic(u Uplink) {
+	for _, s := range statics(u) {
+		netx.ClearStatic(u.If, s.Addr, s.Gw, u.Metric)
+	}
+}
+
 func (m *Manager) startDHCP(u *uplink) {
+	if err := netx.Up(u.cfg.If); err != nil {
+		m.Log.Warn("uplink not available yet", "if", u.cfg.If, "err", err)
+	}
+	if u.cfg.IP.V4.Static() || u.cfg.IP.V6.Static() {
+		m.Log.Info("uplink with fixed addresses", "if", u.cfg.If, "ipv4", u.cfg.IP.V4.Address, "ipv6", u.cfg.IP.V6.Address)
+		m.mu.Lock()
+		m.applyStatic(u)
+		m.mu.Unlock()
+	}
+	if u.cfg.IP.V4.Static() && u.cfg.IP.V6.Static() {
+		// Nothing left to ask the network for.
+		return
+	}
 	conf := dhcpcdConf(u.cfg, m.HookPath)
 	path := filepath.Join(m.RunDir, "dhcpcd-"+u.cfg.If+".conf")
 	if err := os.WriteFile(path, []byte(conf), 0o644); err != nil {
 		m.Log.Error("write dhcpcd config", "err", err)
 		return
-	}
-	if err := netx.Up(u.cfg.If); err != nil {
-		m.Log.Warn("uplink not available yet", "if", u.cfg.If, "err", err)
 	}
 	p := &proc.Proc{
 		Name: "dhcpcd-" + u.cfg.If, Log: m.Log,
@@ -184,9 +253,18 @@ func dhcpcdConf(u Uplink, hook string) string {
 	w("option domain_name_servers, domain_name, interface_mtu, captive_portal_uri")
 	w("require dhcp_server_identifier")
 	w("noipv4ll")
-	w("slaac private")
-	w("ipv6rs")
-	w("ia_na")
+	// A family with a fixed address is none of dhcpcd's business.
+	switch {
+	case u.IP.V4.Static():
+		w("ipv6only")
+	case u.IP.V6.Static():
+		w("ipv4only")
+	}
+	if !u.IP.V6.Static() {
+		w("slaac private")
+		w("ipv6rs")
+		w("ia_na")
+	}
 	w(fmt.Sprintf("metric %d", u.Metric))
 	w("timeout 0")
 	w("script " + hook)
@@ -261,6 +339,7 @@ func (m *Manager) refresh() {
 	changed := false
 	now := time.Now()
 	for _, u := range m.uplinks {
+		m.applyStatic(u)
 		st := u.st
 		st.Carrier = netx.Carrier(u.cfg.If)
 		v4, v6 := netx.Addrs(u.cfg.If)
@@ -278,13 +357,24 @@ func (m *Manager) refresh() {
 		st.HasV6 = st.HasV6 && len(st.IPv6) > 0
 		st.MAC, _, _ = netx.HardwareAddr(u.cfg.If)
 		st.CaptiveAPI = u.api
-		dns := append([]string(nil), u.dns4...)
-		for _, k := range []string{"ra", "dhcp6"} {
-			for _, s := range u.dns6[k] {
-				// Link-local resolvers need a zone; skip them, a global
-				// one is practically always offered as well.
-				if a, err := netip.ParseAddr(s); err == nil && !a.IsLinkLocalUnicast() {
-					dns = append(dns, a.String())
+		// Resolvers come from wherever the addresses come from: typed in
+		// with a fixed address, learned from the network otherwise.
+		var dns []string
+		if u.cfg.IP.V4.Static() {
+			dns = append(dns, u.cfg.IP.V4.DNS...)
+		} else {
+			dns = append(dns, u.dns4...)
+		}
+		if u.cfg.IP.V6.Static() {
+			dns = append(dns, u.cfg.IP.V6.DNS...)
+		} else {
+			for _, k := range []string{"ra", "dhcp6"} {
+				for _, s := range u.dns6[k] {
+					// Link-local resolvers need a zone; skip them, a
+					// global one is practically always offered as well.
+					if a, err := netip.ParseAddr(s); err == nil && !a.IsLinkLocalUnicast() {
+						dns = append(dns, a.String())
+					}
 				}
 			}
 		}

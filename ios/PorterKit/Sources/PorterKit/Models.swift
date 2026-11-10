@@ -63,7 +63,43 @@ public enum PortRole: String, Codable, CaseIterable, Identifiable {
 public struct EthernetPort: Codable, Equatable, Identifiable {
     public var name: String
     public var role: PortRole
+    /// How the port gets its addresses as an uplink; nil from a router
+    /// too old to say, which means automatic.
+    public var ip: IPSetup?
     public var id: String { name }
+}
+
+/// One address family of an uplink's address setup.
+public struct IPFamilySetup: Codable, Equatable {
+    /// "auto" or "static".
+    public var mode: String
+    /// With its prefix length: 192.168.1.50/24, 2001:db8::50/64.
+    public var address: String
+    public var gateway: String
+    public var dns: [String]
+
+    public init(mode: String = "auto", address: String = "", gateway: String = "", dns: [String] = []) {
+        self.mode = mode
+        self.address = address
+        self.gateway = gateway
+        self.dns = dns
+    }
+
+    public var isStatic: Bool { mode == "static" }
+}
+
+/// How an uplink gets its addresses: per family, from the network or
+/// typed in.
+public struct IPSetup: Codable, Equatable {
+    public var v4: IPFamilySetup
+    public var v6: IPFamilySetup
+
+    public init(v4: IPFamilySetup = IPFamilySetup(), v6: IPFamilySetup = IPFamilySetup()) {
+        self.v4 = v4
+        self.v6 = v6
+    }
+
+    public var isAutomatic: Bool { !v4.isStatic && !v6.isStatic }
 }
 
 public enum WifiSecurity: String, Codable, CaseIterable, Identifiable {
@@ -96,6 +132,9 @@ public struct SavedNetwork: Codable, Equatable, Identifiable {
     public var psk: String
     public var hidden: Bool
     public var priority: Int
+    /// How the router gets its addresses on this network. Left out when
+    /// joining, which keeps whatever is already set for the network.
+    public var ip: IPSetup?
     public var id: String { ssid }
 
     public init(ssid: String, psk: String, hidden: Bool = false, priority: Int = 0) {

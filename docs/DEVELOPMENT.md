@@ -48,6 +48,11 @@ every subsystem against it and against what the network is doing.
 - **IPv6.** The LAN gets a ULA /64; the uplink takes whatever RA or
   DHCPv6 offers; traffic is masqueraded (NAT66). No prefix delegation is
   needed.
+- **Uplink addresses.** dhcpcd configures an uplink (DHCP, router
+  advertisements, DHCPv6) unless a family is set by hand, per wired port
+  or per saved Wi-Fi network. A fixed address and its default route are
+  put in place by porterd itself and re-checked every two seconds;
+  dhcpcd then handles only the other family, or does not run.
 - **Upstream band.** wpa_supplicant and radio firmware choose an access
   point mostly by signal strength, which favours 2.4 GHz. porterd decides
   the band itself from the scan results (5 GHz when it is at least fair,

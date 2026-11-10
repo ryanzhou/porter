@@ -167,3 +167,93 @@ func TestMigrate(t *testing.T) {
 		t.Errorf("round trip through the store: %+v %v", back, err)
 	}
 }
+
+func TestIPSetup(t *testing.T) {
+	base := func() *Config {
+		c := Default()
+		c.System.Country, c.AP.SSID, c.AP.Passphrase = "AU", "net", "password1"
+		c.Ethernet = []EthPort{{Name: "eth0", Role: EthWAN}}
+		return c
+	}
+	// Nothing set means automatic, spelled out after normalising.
+	c := base()
+	c.Normalize()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Ethernet[0].IP; got.V4.Mode != IPAuto || got.V6.Mode != IPAuto || got.V4.DNS == nil {
+		t.Errorf("default setup: %+v", got)
+	}
+
+	good := IPSetup{
+		V4: IPFamily{Mode: "Static", Address: " 192.168.1.50/24", Gateway: "192.168.1.1", DNS: []string{"1.1.1.1", " "}},
+		V6: IPFamily{Mode: IPStatic, Address: "2001:DB8::50/64", Gateway: "FE80::1"},
+	}
+	c = base()
+	c.Ethernet[0].IP = good
+	c.WAN.Networks = []WifiNetwork{{SSID: "Hotel", IP: good}}
+	c.Normalize()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a correct static setup was refused: %v", err)
+	}
+	got := c.WAN.Networks[0].IP
+	if got.V4.Mode != IPStatic || got.V4.Address != "192.168.1.50/24" || len(got.V4.DNS) != 1 || got.V6.Address != "2001:db8::50/64" || got.V6.Gateway != "fe80::1" {
+		t.Errorf("normalised: %+v", got)
+	}
+	// Going back to automatic drops what was typed.
+	c.Ethernet[0].IP.V4.Mode = IPAuto
+	c.Normalize()
+	if c.Ethernet[0].IP.V4.Address != "" || c.Ethernet[0].IP.V4.Gateway != "" {
+		t.Errorf("automatic kept static values: %+v", c.Ethernet[0].IP.V4)
+	}
+
+	v4 := func(addr, gw string, dns ...string) IPSetup {
+		return IPSetup{V4: IPFamily{Mode: IPStatic, Address: addr, Gateway: gw, DNS: dns}}
+	}
+	v6 := func(addr, gw string, dns ...string) IPSetup {
+		return IPSetup{V6: IPFamily{Mode: IPStatic, Address: addr, Gateway: gw, DNS: dns}}
+	}
+	bad := map[string]IPSetup{
+		"no prefix length":          v4("192.168.1.50", "192.168.1.1", "1.1.1.1"),
+		"gateway outside":           v4("192.168.1.50/24", "192.168.2.1", "1.1.1.1"),
+		"gateway is self":           v4("192.168.1.50/24", "192.168.1.50", "1.1.1.1"),
+		"no gateway":                v4("192.168.1.50/24", "", "1.1.1.1"),
+		"network address":           v4("192.168.1.0/24", "192.168.1.1", "1.1.1.1"),
+		"broadcast address":         v4("192.168.1.255/24", "192.168.1.1", "1.1.1.1"),
+		"no DNS":                    v4("192.168.1.50/24", "192.168.1.1"),
+		"IPv6 DNS in the IPv4 list": v4("192.168.1.50/24", "192.168.1.1", "2001:db8::1"),
+		"IPv6 address as IPv4":      v4("2001:db8::50/64", "2001:db8::1", "1.1.1.1"),
+		"loopback":                  v4("127.0.0.5/8", "127.0.0.1", "1.1.1.1"),
+		"too many DNS":              v4("192.168.1.50/24", "192.168.1.1", "1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"),
+		"v6 without prefix":         v6("2001:db8::50", "fe80::1"),
+		"v6 link-local as address":  v6("fe80::50/64", "fe80::1"),
+		"v6 gateway outside":        v6("2001:db8::50/64", "2001:db9::1"),
+		"v6 IPv4 gateway":           v6("2001:db8::50/64", "192.168.1.1"),
+		"v6 gateway with a zone":    v6("2001:db8::50/64", "fe80::1%eth0"),
+		"v6 IPv4 DNS":               v6("2001:db8::50/64", "fe80::1", "1.1.1.1"),
+		"unknown mode":              {V4: IPFamily{Mode: "manual"}},
+	}
+	for name, setup := range bad {
+		c := base()
+		c.Ethernet[0].IP = setup
+		c.Normalize()
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// A static IPv4 setup may leave DNS out when servers are set globally.
+	c = base()
+	c.DNS.Upstreams = []string{"9.9.9.9"}
+	c.Ethernet[0].IP = v4("192.168.1.50/24", "192.168.1.1")
+	c.Normalize()
+	if err := c.Validate(); err != nil {
+		t.Errorf("static IPv4 without its own DNS, with global servers: %v", err)
+	}
+	// A /31 has no network or broadcast address.
+	c = base()
+	c.Ethernet[0].IP = v4("192.0.2.0/31", "192.0.2.1", "1.1.1.1")
+	c.Normalize()
+	if err := c.Validate(); err != nil {
+		t.Errorf("/31: %v", err)
+	}
+}
