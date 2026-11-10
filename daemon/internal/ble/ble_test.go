@@ -102,8 +102,12 @@ func (p *phoneLink) ReadPacket() ([]byte, error) {
 			if tag, ok := proto.FragTag(frag); !ok || tag != p.tag {
 				continue
 			}
-			if len(frag) > p.mtu-3 {
-				return nil, errors.New("notification exceeds MTU")
+			// What BlueZ does to a value on its way out: never more than
+			// an attribute may hold, and never more than fits the batched
+			// form of notification that newer phones ask for. Anything
+			// longer is cut short without a word.
+			if limit := min(512, p.mtu-5); len(frag) > limit {
+				frag = frag[:limit]
 			}
 			pkt, err := p.re.Add(frag)
 			if err != nil {
@@ -237,26 +241,32 @@ func TestGATTServer(t *testing.T) {
 	if err := bz.AddMatchSignal(dbus.WithMatchInterface(ifaceProps), dbus.WithMatchMember("PropertiesChanged")); err != nil {
 		t.Fatal(err)
 	}
-	link := &phoneLink{f: f, tag: 0x1234, mtu: 64, device: "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF", sigs: sigs}
-	app, _ := proto.NewIdentity()
-	sess, err := proto.Dial(link, app)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(sess.Remote, router.Public) {
-		t.Fatal("router key not authenticated")
-	}
-	big := bytes.Repeat([]byte("0123456789abcdef"), 1500) // 24 kB
-	for _, msg := range [][]byte{[]byte("ping"), big} {
-		if err := sess.Send(msg); err != nil {
-			t.Fatal(err)
-		}
-		got, err := sess.Recv()
+	// The smallest MTU there is, the one older iPhones settle on, and the
+	// one current iPhones negotiate with BlueZ.
+	mtus := []int{23, 185, 517}
+	var link *phoneLink
+	for i, mtu := range mtus {
+		link = &phoneLink{f: f, tag: 0x1234 + uint16(i), mtu: mtu, device: "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF", sigs: sigs}
+		app, _ := proto.NewIdentity()
+		sess, err := proto.Dial(link, app)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("mtu %d: %v", mtu, err)
 		}
-		if !bytes.Equal(got, append([]byte("echo:"), msg...)) {
-			t.Fatalf("echo mismatch (%d bytes)", len(got))
+		if !bytes.Equal(sess.Remote, router.Public) {
+			t.Fatal("router key not authenticated")
+		}
+		big := bytes.Repeat([]byte("0123456789abcdef"), 1500) // 24 kB
+		for _, msg := range [][]byte{[]byte("ping"), big} {
+			if err := sess.Send(msg); err != nil {
+				t.Fatalf("mtu %d: %v", mtu, err)
+			}
+			got, err := sess.Recv()
+			if err != nil {
+				t.Fatalf("mtu %d, %d byte message: %v", mtu, len(msg), err)
+			}
+			if !bytes.Equal(got, append([]byte("echo:"), msg...)) {
+				t.Fatalf("mtu %d: echo mismatch (%d bytes)", mtu, len(got))
+			}
 		}
 	}
 
@@ -264,7 +274,7 @@ func TestGATTServer(t *testing.T) {
 	srv.mu.Lock()
 	n := len(srv.sessions)
 	srv.mu.Unlock()
-	if n != 1 {
+	if n != len(mtus) {
 		t.Fatalf("sessions: %d", n)
 	}
 	bz.Emit(link.device, ifaceProps+".PropertiesChanged", "org.bluez.Device1",

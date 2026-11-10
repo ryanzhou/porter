@@ -101,8 +101,7 @@ func (s *session) WritePacket(p []byte) error {
 	mtu := s.mtu
 	s.last = time.Now()
 	s.srv.mu.Unlock()
-	// An ATT notification carries MTU-3 bytes.
-	for _, frag := range proto.Fragment(s.tag, p, mtu-3) {
+	for _, frag := range proto.Fragment(s.tag, p, notifySize(mtu)) {
 		if err := s.srv.notify(frag); err != nil {
 			return err
 		}
@@ -120,6 +119,20 @@ func (s *session) Close() error {
 		s.srv.mu.Unlock()
 	})
 	return nil
+}
+
+// maxValue is the longest value an attribute can have. BlueZ cuts a
+// notified value down to it.
+const maxValue = 512
+
+// notifySize is the largest fragment that reaches the phone whole at the
+// given ATT MTU. A notification can carry MTU-3 bytes, but BlueZ sends
+// them in the batched form (ATT Multiple Handle Value Notification) to a
+// phone that supports it, which leaves MTU-5 for a value; and whatever
+// the MTU, a value is at most maxValue long. BlueZ silently drops the end
+// of anything longer, so the size has to be right here.
+func notifySize(mtu int) int {
+	return min(mtu-5, maxValue)
 }
 
 // Dialer opens the bus connection; dbus.ConnectSystemBus in production.

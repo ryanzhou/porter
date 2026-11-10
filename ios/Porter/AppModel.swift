@@ -150,9 +150,14 @@ final class AppModel: ObservableObject {
         } catch is CancellationError {
             teardown()
         } catch SessionError.routerKeyMismatch {
+            // No automatic retry after a failure: it would fail the same
+            // way and put the message up again every few seconds. The
+            // user taps the router to try again.
+            holdOff = true
             teardown()
             errorMessage = "This router's identity is different from the one this phone paired with. If you reset the router, forget it here and pair again. Otherwise something may be impersonating it."
         } catch {
+            if !Task.isCancelled { holdOff = true }
             teardown()
             if !Task.isCancelled { errorMessage = describe(error) }
         }

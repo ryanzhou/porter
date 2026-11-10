@@ -48,9 +48,15 @@ byte 3..   payload
 The app picks a random tag when it connects and uses it for every
 fragment; the router echoes it. The app ignores notifications carrying
 another tag (TX notifications reach every subscribed central). A fragment
-with the *first* flag and an unknown tag starts a new session. A fragment
-is at most ATT MTU − 3 bytes; the router sizes its notifications from the
-MTU BlueZ reports for the app's writes.
+with the *first* flag and an unknown tag starts a new session.
+
+A fragment is never longer than 512 bytes, the limit for an attribute
+value, whatever the MTU: BlueZ silently discards longer writes and cuts
+longer notifications short. Within that, the app writes at most ATT MTU −
+3 bytes and the router notifies at most ATT MTU − 5, taking the MTU from
+what BlueZ reports with the app's writes. (The two bytes less are because
+BlueZ sends notifications in ATT's batched form to phones that support
+it.)
 
 The app should use write-without-response and honour
 `canSendWriteWithoutResponse`.

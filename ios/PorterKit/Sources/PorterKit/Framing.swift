@@ -6,6 +6,9 @@ public enum Framing {
     public static let last: UInt8 = 0x40
     public static let headerSize = 3
     public static let maxPacket = 65535
+    /// The longest value a GATT attribute can have, and so the longest
+    /// fragment either side may send whatever the MTU.
+    public static let maxFragment = 512
 
     /// Splits a packet into fragments of at most `mtu` bytes each.
     public static func fragment(tag: UInt16, packet: Data, mtu: Int) -> [Data] {

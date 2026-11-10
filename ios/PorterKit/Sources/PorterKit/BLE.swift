@@ -305,7 +305,9 @@ public final class BLELink: NSObject, PacketTransport {
         }
         if let failure { throw failure }
         guard let rx else { throw BLEError.serviceMissing }
-        let mtu = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        // Never more than an attribute value may hold: the router's
+        // Bluetooth stack discards longer writes without saying so.
+        let mtu = min(peripheral.maximumWriteValueLength(for: .withoutResponse), Framing.maxFragment)
         for fragment in Framing.fragment(tag: tag, packet: packet, mtu: mtu) {
             while !peripheral.canSendWriteWithoutResponse {
                 if let failure { throw failure }
