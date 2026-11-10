@@ -91,9 +91,10 @@ app then shows sample data and needs neither a router nor an Apple ID.
 1. Stand near the Pi and open the app. Allow Bluetooth when asked.
 2. Tap **Porter** in the list. A new router pairs with the first phone
    that connects.
-3. Choose your **country** (it decides which Wi-Fi channels are legal),
-   a **Wi-Fi name** and a **password**, then tap **Start router**.
-4. Join that Wi-Fi network from your devices.
+3. Choose a **Wi-Fi name**, a **password** and your **country** (it
+   decides which Wi-Fi channels are legal), then tap **Start**.
+4. Join that Wi-Fi network from your devices. The QR button on
+   **Overview** shows a code they can scan instead of typing.
 
 Out of the box the built-in radio is your Wi-Fi network and the Ethernet
 port is the uplink. If you have a cable, plug it in and you are online.
@@ -107,7 +108,7 @@ Everything here is on the **Internet** tab.
 |---|---|
 | A wired port | Plug in Ethernet. Nothing else to do. |
 | Wi-Fi only, Pi alone | Set the built-in radio's role to **Both**, tap **Scan**, and join the network. Your own network briefly drops while it moves to the same channel. |
-| Wi-Fi only, plus a USB Wi-Fi adapter | Give the adapter the **Upstream Wi-Fi** role, scan and join. The built-in radio stays your network. This is faster and steadier than one radio doing both. |
+| Wi-Fi only, plus a USB Wi-Fi adapter | Give the adapter the **Uplink** role, scan and join. The built-in radio stays your network. This is faster and steadier than one radio doing both. |
 | Only your phone's data | Turn on Personal Hotspot and join it as above. |
 
 Networks you have joined are remembered and rejoined automatically. If
@@ -122,9 +123,9 @@ signing in, for everyone:
 
 - On the device named there, connected to *your* Wi-Fi, tap **Open
   sign-in page** (or just open any website). Complete the page.
-- If nothing appears, tap **Reconnect that device**: it rejoins your
+- If nothing appears, tap **Reconnect**: that device rejoins your
   Wi-Fi and its own sign-in sheet pops up.
-- To use a different device, pick it under **Sign-in device**.
+- To use a different device, pick it from the menu on the same card.
 
 Once the venue lets the router through, every device is online and the
 section disappears. Until then only the sign-in device can reach the
@@ -136,14 +137,16 @@ protected.
 On the **VPN** tab tap **Add VPN** and paste the WireGuard configuration
 from your VPN provider or your own server (or import the `.conf` file).
 
-- **Everything through the VPN:** set **Default route** to that VPN.
+- **Everything through the VPN:** set **Everything else**, the last row
+  of the rules, to that VPN.
 - **One device:** open it on the **Devices** tab and set its **Route**.
 - **Some destinations:** tap **Add rule** and choose sources (devices)
   and destinations (domains, address ranges, countries, ports), then
   where that traffic goes: a VPN, **Direct**, or **Blocked**.
 
-Rules are checked top to bottom and the first match wins; then the
-device's own route; then the default. Drag to reorder.
+Rules are numbered in the order they are checked and the first match
+wins; then the device's own route; then **Everything else**. Tap **Edit**
+to reorder, swipe a rule right to turn it off.
 
 **Kill switch** (per VPN, on by default): if the tunnel is down, traffic
 meant for it is stopped rather than sent out unprotected.
@@ -166,9 +169,9 @@ VPN's DNS server.
   internet, not the Wi-Fi between you and the router.)
 - **Another phone.** Briefly press the Pi's power button; the light
   blinks fast for two minutes while a new phone can pair. Or use
-  Settings → Paired phones. Remove a phone there too.
+  Settings → Phones. Remove a phone there too.
 - **Turning it off.** Hold the power button for a second and release, or
-  use Settings → System. Simply pulling the plug is safe as well: the
+  use Settings → Power off. Simply pulling the plug is safe as well: the
   system is read-only and cannot be corrupted that way.
 
 ### The light and the button
@@ -199,7 +202,7 @@ phone. Press the button briefly, then try again.
 days. Connect the phone to your Mac and press Run in Xcode.
 
 **No Wi-Fi network appears after setup.** Open **Overview** and look at
-**Access point** for an error, and check the country is right.
+the Wi-Fi card for an error, and check the country is right.
 
 **Online, but a device has no internet.** Check it is not paused, and
 whether it is routed through a VPN that is down (kill switch).
@@ -235,7 +238,7 @@ porterctl call config.set "{\"config\": $(cat /tmp/c.json)}"
 
 Delete the `porter-debug` file when you are done.
 
-**Starting over.** Settings → System → Factory reset erases all
+**Starting over.** Settings → Reset erases all
 settings and pairings. Re-flashing the card does the same.
 
 ## Good to know

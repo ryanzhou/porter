@@ -20,8 +20,8 @@ struct DevicesView: View {
     var body: some View {
         List {
             if model.devices.isEmpty {
-                Text("No device has joined the router yet.")
-                    .foregroundStyle(.secondary)
+                ContentUnavailableView("No devices yet", systemImage: "laptopcomputer.and.iphone")
+                    .listRowBackground(Color.clear)
             }
             if !online.isEmpty {
                 Section("Online") {
@@ -75,59 +75,53 @@ private struct DeviceRow: View {
     @EnvironmentObject private var model: AppModel
     let device: DeviceInfo
 
-    private var subtitle: String {
-        var parts: [String] = []
-        if let address = device.ipv4, !address.isEmpty { parts.append(address) }
-        parts.append(formatBytes(device.up + device.down))
-        if !device.online { parts.append("seen " + relativeTime(device.lastSeen)) }
-        return parts.joined(separator: " · ")
+    private var symbol: String {
+        if device.paused { return "pause.fill" }
+        return device.link == "wired" ? "cable.connector" : "wifi"
     }
 
-    private var hasBadges: Bool {
-        device.paused || !device.route.isEmpty || device.portal == true
+    private var color: Color {
+        if device.paused { return Color.orange }
+        return device.online ? Color.accentColor : Color.gray
+    }
+
+    /// Online: the address. Offline: when it was last here.
+    private var subtitle: String {
+        if !device.online { return relativeTime(device.lastSeen) }
+        if let address = device.ipv4, !address.isEmpty { return address }
+        return device.mac.uppercased()
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
+            Glyph(symbol: symbol, color: color)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(device.displayName)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if hasBadges {
-                    badges
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if !device.route.isEmpty {
+                        Badge(text: model.actionLabel(device.route), color: Color.blue)
+                    }
+                    if device.portal == true {
+                        Badge(text: "Sign-in", color: Color.purple)
+                    }
                 }
             }
-            Spacer()
-            if device.online {
-                linkIndicator
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(formatBytes(device.up + device.down))
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                if device.online, device.link != "wired", let signal = device.signal {
+                    SignalBars(rssi: signal)
+                }
             }
         }
-    }
-
-    private var badges: some View {
-        HStack(spacing: 6) {
-            if device.paused {
-                Badge(text: "Paused", color: Color.orange)
-            }
-            if !device.route.isEmpty {
-                Badge(text: model.actionLabel(device.route), color: Color.blue)
-            }
-            if device.portal == true {
-                Badge(text: "Sign-in device", color: Color.purple)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var linkIndicator: some View {
-        if device.link == "wired" {
-            Text("Wired")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else if let signal = device.signal {
-            SignalBars(rssi: signal)
-        }
+        .opacity(device.online ? 1 : 0.6)
     }
 }
 
@@ -169,7 +163,7 @@ struct DeviceDetailView: View {
                     Section {
                         ConfirmedButton(
                             title: "Forget device",
-                            message: "Removes this device's name, settings and history. It can join again like any new device.",
+                            message: "Its name, settings and history are removed.",
                             confirmTitle: "Forget"
                         ) {
                             forget()
@@ -177,8 +171,7 @@ struct DeviceDetailView: View {
                     }
                 }
             } else {
-                Text("The router no longer knows this device.")
-                    .foregroundStyle(.secondary)
+                ContentUnavailableView("Device forgotten", systemImage: "questionmark.circle")
             }
         }
         .navigationTitle(device?.displayName ?? "Device")
@@ -198,7 +191,7 @@ struct DeviceDetailView: View {
     private func settingsSection(_ device: DeviceInfo) -> some View {
         Section {
             TextField(device.hostname ?? "Name", text: $name)
-            Toggle("Pause internet", isOn: pausedBinding)
+            Toggle("Pause", isOn: pausedBinding)
             if model.config?.dns.adblock.enabled == true {
                 Toggle("Skip ad blocking", isOn: noAdblockBinding)
             }
@@ -208,13 +201,12 @@ struct DeviceDetailView: View {
                     Text(model.actionLabel(action.raw)).tag(action.raw)
                 }
             }
-            TextField("Reserved IPv4 address (optional)", text: $reservedIP)
-                .keyboardType(.numbersAndPunctuation)
-                .autocorrectionDisabled()
-        } header: {
-            Text("Settings")
-        } footer: {
-            Text("The route overrides the default for this device; rules on the VPN tab still come first. A reserved address has to be inside the router's local network.")
+            LabeledContent("Fixed address") {
+                TextField(device.ipv4 ?? "Automatic", text: $reservedIP)
+                    .multilineTextAlignment(.trailing)
+                    .keyboardType(.numbersAndPunctuation)
+                    .autocorrectionDisabled()
+            }
         }
     }
 
@@ -229,9 +221,7 @@ struct DeviceDetailView: View {
                 FlowsView(mac: mac)
             }
         } header: {
-            Text("Usage")
-        } footer: {
-            Text("This device's traffic over the last hour, minute by minute.")
+            Text("Last hour")
         }
     }
 
@@ -240,20 +230,23 @@ struct DeviceDetailView: View {
             if loadingQueries {
                 ProgressView()
             } else if queries.isEmpty {
-                Text("None recorded.")
+                Text("None")
                     .foregroundStyle(.secondary)
             }
             ForEach(Array(queries.enumerated()), id: \.offset) { item in
                 QueryRow(query: item.element)
             }
-            Button("Reload") {
-                Task { await loadQueries() }
-            }
-            .disabled(loadingQueries)
         } header: {
-            Text("Recent lookups")
-        } footer: {
-            Text("Names this device asked the router to resolve, newest first, and where each question was sent.")
+            HStack {
+                Text("Lookups")
+                Spacer()
+                Button {
+                    Task { await loadQueries() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(loadingQueries)
+            }
         }
     }
 
@@ -350,17 +343,27 @@ private struct DeviceFactsSection: View {
 
     private var addresses6: [String] { device.ipv6 ?? [] }
 
+    private var seen: String {
+        device.online ? "Now" : relativeTime(device.lastSeen)
+    }
+
     var body: some View {
-        Section("Details") {
-            LabeledContent("MAC address", value: device.mac.uppercased())
-            LabeledContent("IPv4", value: device.ipv4 ?? "None")
+        Section {
+            HStack(spacing: 24) {
+                TransferFigure(symbol: "arrow.down", bytes: device.down, color: TrafficSeries.downloadColor)
+                TransferFigure(symbol: "arrow.up", bytes: device.up, color: TrafficSeries.uploadColor)
+                Spacer()
+            }
+            .padding(.vertical, 4)
+            LabeledContent("MAC", value: device.mac.uppercased())
+            if let address = device.ipv4, !address.isEmpty {
+                LabeledContent("IPv4", value: address)
+            }
             ForEach(addresses6, id: \.self) { address in
                 LabeledContent("IPv6", value: address)
             }
-            LabeledContent("First seen", value: formatDate(device.firstSeen))
-            LabeledContent("Last seen", value: device.online ? "Now" : formatDate(device.lastSeen))
-            LabeledContent("Sent", value: formatBytes(device.up))
-            LabeledContent("Received", value: formatBytes(device.down))
+            LabeledContent("Seen", value: seen)
+            LabeledContent("Since", value: formatDate(device.firstSeen))
         }
     }
 }
@@ -373,7 +376,7 @@ private struct QueryRow: View {
         switch query.path {
         case "direct", "wan": return "Direct"
         case "block": return "Blocked"
-        case "local": return "Answered by the router"
+        case "local": return "Router"
         case "refuse": return "Refused"
         default:
             if let action = RouteAction(query.path), case .vpn(let id) = action {
@@ -383,25 +386,29 @@ private struct QueryRow: View {
         }
     }
 
-    private var detail: String {
-        query.type + " · " + pathLabel + " · " + relativeTime(query.t)
+    private var color: Color {
+        switch query.path {
+        case "block", "refuse": return Color.red
+        case "direct", "wan", "local": return Color.secondary
+        default: return Color.blue
+        }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(query.name)
-                .font(.footnote.monospaced())
-                .lineLimit(1)
-            HStack(spacing: 6) {
-                Text(detail)
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(query.name)
+                    .font(.footnote.monospaced())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(query.type + " · " + relativeTime(query.t))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if query.failed == true {
-                    Text("Failed")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
             }
+            Spacer(minLength: 4)
+            Badge(text: query.failed == true ? "Failed" : pathLabel, color: query.failed == true ? Color.red : color)
+                .lineLimit(1)
+                .layoutPriority(1)
         }
     }
 }

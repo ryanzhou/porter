@@ -43,15 +43,6 @@ private func sumBytes(_ values: [UInt64]) -> UInt64 {
     return total
 }
 
-/// "↓ 1.2 MB ↑ 300 KB", the form the VPN list uses.
-private func transferLabel(down: UInt64, up: UInt64) -> String {
-    "↓ " + formatBytes(down) + " ↑ " + formatBytes(up)
-}
-
-private func formatMbps(_ value: Double) -> String {
-    String(format: "%.1f Mbps", value)
-}
-
 private func formatLatency(_ milliseconds: Double) -> String {
     String(format: "%.0f ms", milliseconds)
 }
@@ -127,7 +118,7 @@ struct TrafficChart: View {
 
     var body: some View {
         if isEmpty {
-            Text("No traffic recorded yet")
+            Text("No traffic yet")
                 .foregroundStyle(.secondary)
         } else {
             chart
@@ -149,6 +140,7 @@ struct TrafficChart: View {
             TrafficSeries.download: TrafficSeries.downloadColor,
             TrafficSeries.upload: TrafficSeries.uploadColor,
         ])
+        .chartLegend(.hidden)
         .chartYScale(domain: 0.0...top)
         .chartYAxis {
             AxisMarks(values: ticks) { value in
@@ -174,8 +166,8 @@ private enum TrafficRange: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .hour: return "Last hour"
-        case .days: return "Last 3 days"
+        case .hour: return "Hour"
+        case .days: return "3 days"
         }
     }
 }
@@ -195,11 +187,11 @@ struct TrafficView: View {
             ThroughputSection(stats: stats, loaded: loaded, range: $range)
             TopDevicesSection(talkers: talkers, loaded: loaded)
             Section {
-                NavigationLink("Connections") {
+                NavigationLink {
                     FlowsView(mac: "")
+                } label: {
+                    Label("Connections", systemImage: "arrow.left.arrow.right")
                 }
-            } footer: {
-                Text("What each device is connected to right now, and what it was connected to recently.")
             }
         }
         .navigationTitle("Traffic")
@@ -268,19 +260,18 @@ private struct ThroughputSection: View {
                 }
             }
             .pickerStyle(.segmented)
+            .listRowSeparator(.hidden)
             if loaded {
-                TrafficChart(samples: samples, unit: unit)
-                if downloaded > 0 || uploaded > 0 {
-                    LabeledContent("Downloaded", value: formatBytes(downloaded))
-                    LabeledContent("Uploaded", value: formatBytes(uploaded))
+                HStack(spacing: 24) {
+                    TransferFigure(symbol: "arrow.down", bytes: downloaded, color: TrafficSeries.downloadColor, font: Font.title2)
+                    TransferFigure(symbol: "arrow.up", bytes: uploaded, color: TrafficSeries.uploadColor, font: Font.title2)
+                    Spacer()
                 }
+                .listRowSeparator(.hidden)
+                TrafficChart(samples: samples, unit: unit)
             } else {
                 ProgressView()
             }
-        } header: {
-            Text("Whole network")
-        } footer: {
-            Text("Download is what devices on the router's network received; upload is what they sent. The totals cover the range shown.")
         }
     }
 }
@@ -305,9 +296,9 @@ private struct TopDevicesSection: View {
     }
 
     var body: some View {
-        Section("Top devices (24 hours)") {
+        Section("Today") {
             if loaded && shown.isEmpty {
-                Text("No device has used the network in the last 24 hours.")
+                Text("Nothing yet")
                     .foregroundStyle(.secondary)
             }
             ForEach(shown) { talker in
@@ -332,8 +323,9 @@ private struct TopTalkerRow: View {
                 Text(name)
                     .lineLimit(1)
                 Spacer()
-                Text(transferLabel(down: talker.down, up: talker.up))
-                    .font(.caption)
+                Text(formatBytes(talker.down &+ talker.up))
+                    .font(.subheadline)
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
             UsageBar(down: Double(talker.down), up: Double(talker.up), largest: largest)
@@ -418,10 +410,10 @@ struct FlowsView: View {
     }
 
     private var emptyText: String {
-        if !query.isEmpty { return "No connection matches the search." }
+        if !query.isEmpty { return "No match" }
         switch filter {
-        case .active: return "No connections are open right now."
-        case .recent: return "No connections have ended recently."
+        case .active: return "Nothing open"
+        case .recent: return "Nothing recent"
         }
     }
 
@@ -438,6 +430,8 @@ struct FlowsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
             }
             FlowListSection(
                 rows: visible,
@@ -505,7 +499,7 @@ private struct FlowListSection: View {
             }
         } footer: {
             if countriesMissing {
-                Text("Destination countries are not shown because this router image was built without the country database.")
+                Text("No country database on this router.")
             }
         }
     }
@@ -530,37 +524,33 @@ private struct FlowRow: View {
         if showDevice {
             parts.append(model.deviceName(flow.mac))
         }
+        if !flow.active {
+            parts.append(relativeTime(flow.last))
+        }
         return parts.joined(separator: " · ")
     }
 
-    private var usage: String {
-        let transfer = transferLabel(down: flow.down, up: flow.up)
-        if flow.active { return transfer }
-        return transfer + " · " + relativeTime(flow.last)
-    }
-
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    if !flag.isEmpty {
-                        Text(flag)
-                    }
-                    Text(destination)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        HStack(alignment: .center, spacing: 10) {
+            Text(flag.isEmpty ? "🌐" : flag)
+                .font(.title3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(destination)
                     .lineLimit(1)
-                Text(usage)
+                    .truncationMode(.middle)
+                Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 4)
-            PathBadge(path: flow.path)
+            VStack(alignment: .trailing, spacing: 4) {
+                PathBadge(path: flow.path)
+                Text(formatBytes(flow.down &+ flow.up))
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -609,12 +599,25 @@ struct SpeedTestView: View {
         return ["direct"] + tunnels
     }
 
-    private var explanation: String {
-        "The test runs from the router, so it measures the router's connection to the internet, or the chosen VPN, and not the Wi-Fi between this phone and the router. It takes about 20 seconds. It exchanges data with the test server set in Settings. That is the one time the router contacts a service of this kind, and it happens only when you run a test."
+    /// What the top of the screen shows: this session's result, or else
+    /// the most recent one the router remembers.
+    private var shown: SpeedTestResult? {
+        latest ?? history.first
     }
 
     var body: some View {
         List {
+            Section {
+                if let progress = model.speedTestProgress {
+                    SpeedTestProgressPanel(progress: progress)
+                } else if let shown {
+                    SpeedTestResultPanel(result: shown)
+                } else {
+                    SpeedTestResultPanel(result: nil)
+                }
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
             Section {
                 Picker("Through", selection: $via) {
                     ForEach(paths, id: \.self) { path in
@@ -622,12 +625,15 @@ struct SpeedTestView: View {
                     }
                 }
                 .disabled(running)
+            } footer: {
+                Text("Measured from the router, not from this phone.")
             }
             Section {
                 Button {
                     run()
                 } label: {
-                    Text("Run test")
+                    Text(running ? "Testing" : "Start")
+                        .font(.headline)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -635,13 +641,6 @@ struct SpeedTestView: View {
                 .disabled(running)
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
-            } footer: {
-                Text(explanation)
-            }
-            if let progress = model.speedTestProgress {
-                SpeedTestProgressSection(progress: progress)
-            } else if let latest {
-                SpeedTestResultSection(result: latest)
             }
             SpeedTestHistorySection(history: history, loaded: historyLoaded)
         }
@@ -685,78 +684,105 @@ struct SpeedTestView: View {
     }
 }
 
-private struct SpeedTestProgressSection: View {
-    let progress: SpeedTestProgress
-
-    private var phaseLabel: String {
-        switch progress.phase {
-        case "latency": return "Measuring latency"
-        case "download": return "Download"
-        case "upload": return "Upload"
-        default: return "Working"
-        }
-    }
-
-    /// The figure means something only while data is being moved.
-    private var figure: String {
-        switch progress.phase {
-        case "download", "upload": return String(format: "%.1f", progress.mbps)
-        default: return "–"
-        }
-    }
+/// One measurement: what it is above, the number below.
+private struct SpeedFigure: View {
+    let symbol: String
+    let color: Color
+    let value: String
+    let unit: String
+    var active: Bool = false
 
     var body: some View {
-        Section {
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text(phaseLabel)
-                        .font(.headline)
-                }
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(figure)
-                        .font(.largeTitle.weight(.semibold))
-                        .monospacedDigit()
-                    Text("Mbps")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
+        VStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.footnote.weight(.bold))
+                .foregroundStyle(color)
+                .symbolEffect(.pulse, isActive: active)
+            Text(value)
+                .font(.system(size: 34, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            Text(unit)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity)
     }
 }
 
-private struct SpeedTestResultSection: View {
+private func speedNumber(_ value: Double) -> String {
+    guard value > 0 else { return "–" }
+    return value >= 100 ? String(format: "%.0f", value) : String(format: "%.1f", value)
+}
+
+/// Download, upload and latency side by side.
+private struct SpeedTestResultPanel: View {
     @EnvironmentObject private var model: AppModel
-    let result: SpeedTestResult
+    let result: SpeedTestResult?
 
     private var failure: String? {
-        guard let error = result.error, !error.isEmpty else { return nil }
+        guard let error = result?.error, !error.isEmpty else { return nil }
         return error
     }
 
+    private var caption: String {
+        guard let result else { return "" }
+        return formatDate(result.t) + " · " + model.actionLabel(result.via)
+    }
+
+    private var latency: String {
+        let value: Double = result?.latencyMs ?? 0
+        return value > 0 ? String(format: "%.0f", value) : "–"
+    }
+
     var body: some View {
-        Section("Result") {
+        VStack(spacing: 14) {
+            HStack(spacing: 0) {
+                SpeedFigure(symbol: "arrow.down", color: TrafficSeries.downloadColor, value: speedNumber(result?.downMbps ?? 0), unit: "Mbps")
+                SpeedFigure(symbol: "arrow.up", color: TrafficSeries.uploadColor, value: speedNumber(result?.upMbps ?? 0), unit: "Mbps")
+                SpeedFigure(symbol: "stopwatch", color: Color.secondary, value: latency, unit: "ms")
+            }
             if let failure {
-                Text("The test did not finish.")
-                    .font(.headline)
                 Text(failure)
+                    .font(.footnote)
                     .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+            } else if !caption.isEmpty {
+                Text(caption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            // A failed test still reports what it measured before failing.
-            if failure == nil || result.downMbps > 0 {
-                LabeledContent("Download", value: formatMbps(result.downMbps))
-            }
-            if failure == nil || result.upMbps > 0 {
-                LabeledContent("Upload", value: formatMbps(result.upMbps))
-            }
-            if failure == nil || result.latencyMs > 0 {
-                LabeledContent("Latency", value: formatLatency(result.latencyMs))
-            }
-            LabeledContent("Through", value: model.actionLabel(result.via))
         }
+        .padding(.vertical, 20)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity)
+        .background(Surface.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
+/// The same three columns while a test runs: the one being measured is
+/// live, the others wait.
+private struct SpeedTestProgressPanel: View {
+    let progress: SpeedTestProgress
+
+    private func figure(_ phase: String) -> String {
+        progress.phase == phase ? speedNumber(progress.mbps) : "–"
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 0) {
+                SpeedFigure(symbol: "arrow.down", color: TrafficSeries.downloadColor, value: figure("download"), unit: "Mbps", active: progress.phase == "download")
+                SpeedFigure(symbol: "arrow.up", color: TrafficSeries.uploadColor, value: figure("upload"), unit: "Mbps", active: progress.phase == "upload")
+                SpeedFigure(symbol: "stopwatch", color: Color.secondary, value: "–", unit: "ms", active: progress.phase == "latency")
+            }
+            ProgressView()
+        }
+        .padding(.vertical, 20)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity)
+        .background(Surface.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 }
 
@@ -765,15 +791,15 @@ private struct SpeedTestHistorySection: View {
     let loaded: Bool
 
     var body: some View {
-        Section("History") {
-            if !loaded {
+        if !loaded {
+            Section {
                 ProgressView()
-            } else if history.isEmpty {
-                Text("No test has been run yet.")
-                    .foregroundStyle(.secondary)
             }
-            ForEach(Array(history.enumerated()), id: \.offset) { item in
-                SpeedTestHistoryRow(result: item.element)
+        } else if !history.isEmpty {
+            Section("Earlier") {
+                ForEach(Array(history.enumerated()), id: \.offset) { item in
+                    SpeedTestHistoryRow(result: item.element)
+                }
             }
         }
     }
@@ -783,30 +809,36 @@ private struct SpeedTestHistoryRow: View {
     @EnvironmentObject private var model: AppModel
     let result: SpeedTestResult
 
-    private var title: String {
-        formatDate(result.t) + " · " + model.actionLabel(result.via)
-    }
-
-    private var failure: String? {
-        guard let error = result.error, !error.isEmpty else { return nil }
-        return error
+    private var failed: Bool {
+        guard let error = result.error else { return false }
+        return !error.isEmpty
     }
 
     private var figures: String {
-        "↓ " + formatMbps(result.downMbps) + " ↑ " + formatMbps(result.upMbps) + " · " + formatLatency(result.latencyMs)
+        "↓ " + speedNumber(result.downMbps) + "  ↑ " + speedNumber(result.upMbps)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-            if let failure {
-                Text(failure)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(formatDate(result.t))
+                    .font(.subheadline)
+                if result.via != "direct" {
+                    ActionBadge(action: result.via)
+                }
+            }
+            Spacer(minLength: 8)
+            if failed {
+                Badge(text: "Failed", color: Color.red)
             } else {
-                Text(figures)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(figures)
+                        .font(.subheadline)
+                        .monospacedDigit()
+                    Text(formatLatency(result.latencyMs))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }

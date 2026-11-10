@@ -1,6 +1,171 @@
+import CoreImage.CIFilterBuiltins
 import PorterKit
 import SwiftUI
 import UIKit
+
+// MARK: - Design
+//
+// The app's own screens are built from a few pieces: cards on the grouped
+// background, an icon tile that says what a row is about, and figures set
+// large enough to be read without a label next to them.
+
+enum Surface {
+    static let page: Color = Color(uiColor: UIColor.systemGroupedBackground)
+    static let card: Color = Color(uiColor: UIColor.secondarySystemGroupedBackground)
+}
+
+/// A rounded panel.
+struct Card<Content: View>: View {
+    var padding: CGFloat = 16
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content()
+            .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Surface.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
+/// An icon on a tinted rounded square.
+struct Glyph: View {
+    let symbol: String
+    var color: Color = Color.accentColor
+    var size: CGFloat = 34
+    var filled: Bool = false
+
+    private var background: Color {
+        filled ? color : color.opacity(0.14)
+    }
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: size * 0.46, weight: .semibold))
+            .foregroundStyle(filled ? Color.white : color)
+            .frame(width: size, height: size)
+            .background(background, in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
+            .accessibilityHidden(true)
+    }
+}
+
+/// A number that is the point of the card it is on, with its unit small
+/// beside it.
+struct Figure: View {
+    let value: String
+    var unit: String = ""
+    var font: Font = Font.title2
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 3) {
+            Text(value)
+                .font(font.weight(.semibold))
+                .monospacedDigit()
+            if !unit.isEmpty {
+                Text(unit)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .fontDesign(.rounded)
+        .lineLimit(1)
+    }
+}
+
+/// A small heading above a card.
+struct Heading: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .textCase(.uppercase)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
+            .padding(.top, 8)
+    }
+}
+
+/// A byte count as number and unit, for `Figure`.
+func byteParts(_ n: UInt64) -> (value: String, unit: String) {
+    let text: String = formatBytes(n)
+    let pieces: [Substring] = text.split(separator: " ")
+    guard pieces.count == 2 else { return (text, "") }
+    return (String(pieces[0]), String(pieces[1]))
+}
+
+private struct SparkShape: Shape {
+    let values: [Double]
+    let closed: Bool
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard values.count > 1 else { return path }
+        let peak: Double = max(values.max() ?? 0, 1)
+        let step: CGFloat = rect.width / CGFloat(values.count - 1)
+        for (index, value) in values.enumerated() {
+            let x: CGFloat = rect.minX + CGFloat(index) * step
+            let y: CGFloat = rect.maxY - CGFloat(value / peak) * rect.height
+            let point = CGPoint(x: x, y: y)
+            if index == 0 {
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+        }
+        if closed {
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+            path.closeSubpath()
+        }
+        return path
+    }
+}
+
+/// The shape of a series, without axes.
+struct Sparkline: View {
+    let values: [Double]
+    var color: Color = Color.accentColor
+
+    var body: some View {
+        ZStack {
+            SparkShape(values: values, closed: true)
+                .fill(color.opacity(0.16))
+            SparkShape(values: values, closed: false)
+                .stroke(color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// The text a camera turns into "Join this network".
+func wifiJoinCode(ssid: String, passphrase: String, hidden: Bool) -> String {
+    func escaped(_ text: String) -> String {
+        var out = ""
+        for character in text {
+            if "\\;,:\"".contains(character) {
+                out.append("\\")
+            }
+            out.append(character)
+        }
+        return out
+    }
+    var code: String = "WIFI:T:WPA;S:" + escaped(ssid) + ";P:" + escaped(passphrase) + ";"
+    if hidden {
+        code += "H:true;"
+    }
+    return code + ";"
+}
+
+func qrCode(_ text: String) -> UIImage? {
+    let filter = CIFilter.qrCodeGenerator()
+    filter.message = Data(text.utf8)
+    filter.correctionLevel = "M"
+    guard let output = filter.outputImage else { return nil }
+    let scaled: CIImage = output.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
+    guard let image = CIContext().createCGImage(scaled, from: scaled.extent) else { return nil }
+    return UIImage(cgImage: image)
+}
 
 // MARK: - Indicators
 
@@ -275,7 +440,9 @@ struct StringListEditor: View {
         } header: {
             Text(title)
         } footer: {
-            Text(footer)
+            if !footer.isEmpty {
+                Text(footer)
+            }
         }
     }
 
@@ -335,28 +502,6 @@ struct CountryPicker: View {
             }
         }
         .pickerStyle(.navigationLink)
-    }
-}
-
-struct ActivityRow: View {
-    @EnvironmentObject private var model: AppModel
-    let event: ActivityEvent
-
-    private var detail: String {
-        let when = relativeTime(event.t)
-        if let mac = event.mac, !mac.isEmpty {
-            return model.deviceName(mac) + " · " + when
-        }
-        return when
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(event.msg)
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
     }
 }
 

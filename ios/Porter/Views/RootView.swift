@@ -75,6 +75,12 @@ struct DemoScreen: View {
             NavigationStack { AdblockPage() }
         case "device":
             NavigationStack { DeviceDetailView(mac: model.devices.first?.mac ?? "") }
+        case "setup":
+            NavigationStack { SetupView() }
+        case "connect":
+            NavigationStack { ConnectView() }
+        case "share":
+            WifiShareSheet()
         default:
             MainTabs(initial: name)
         }

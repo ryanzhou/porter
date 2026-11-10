@@ -11,15 +11,15 @@ private struct BlockListPreset: Identifiable {
     static let all: [BlockListPreset] = [
         BlockListPreset(
             name: "StevenBlack",
-            detail: "Ads and malware. Conservative; rarely breaks sites.",
+            detail: "Ads, malware",
             url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"),
         BlockListPreset(
             name: "HaGeZi Light",
-            detail: "Ads, tracking and telemetry.",
+            detail: "Ads, tracking, telemetry",
             url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/light.txt"),
         BlockListPreset(
             name: "OISD Small",
-            detail: "Ads and tracking, tuned to avoid breakage.",
+            detail: "Ads, tracking",
             url: "https://small.oisd.nl/"),
     ]
 }
@@ -52,9 +52,12 @@ struct AdblockPage: View {
     var body: some View {
         List {
             Section {
-                Toggle("Block ads and trackers", isOn: model.binding(\.dns.adblock.enabled, fallback: false))
-            } footer: {
-                Text("The router refuses to look up names that are on the block lists below, for every device on its network. It downloads the lists itself and refreshes them daily. Ads served from the same address as the content they sit in cannot be blocked this way.")
+                Toggle(isOn: model.binding(\.dns.adblock.enabled, fallback: false)) {
+                    HStack(spacing: 12) {
+                        Glyph(symbol: "hand.raised.fill", color: enabled ? Color.accentColor : Color.gray, filled: enabled)
+                        Text("Block ads and trackers")
+                    }
+                }
             }
             if enabled {
                 statusSection
@@ -66,7 +69,7 @@ struct AdblockPage: View {
                 items: allowBinding,
                 placeholder: "example.com",
                 keyboard: .URL,
-                footer: "Domains listed here, and their subdomains, are never blocked. To switch blocking off for one device, open the device and turn on Skip ad blocking."
+                footer: ""
             )
         }
         .navigationTitle("Ad blocking")
@@ -74,9 +77,12 @@ struct AdblockPage: View {
     }
 
     private var statusSection: some View {
-        Section("Status") {
-            LabeledContent("Domains blocked", value: (status?.domains ?? 0).formatted())
-            LabeledContent("Lookups blocked since start", value: (status?.blocked ?? 0).formatted())
+        Section {
+            HStack(spacing: 0) {
+                CountFigure(value: status?.blocked ?? 0, caption: "blocked")
+                CountFigure(value: UInt64(status?.domains ?? 0), caption: "on the lists")
+            }
+            .padding(.vertical, 4)
             ForEach(status?.lists ?? []) { list in
                 BlockListStatusRow(list: list)
             }
@@ -84,7 +90,7 @@ struct AdblockPage: View {
                 checkNow()
             } label: {
                 HStack {
-                    Text("Update now")
+                    Label("Update", systemImage: "arrow.clockwise")
                     Spacer()
                     if checking { ProgressView() }
                 }
@@ -118,9 +124,9 @@ struct AdblockPage: View {
                 .buttonStyle(.plain)
             }
         } header: {
-            Text("Block lists")
+            Text("Lists")
         } footer: {
-            Text("More lists block more, use more of the router's memory, and are more likely to break something. One is usually enough. While blocking is on, at least one list stays selected.")
+            Text("One is usually enough.")
         }
     }
 
@@ -151,8 +157,6 @@ struct AdblockPage: View {
             }
         } header: {
             Text("Other lists")
-        } footer: {
-            Text("Any list in hosts, plain domain or Adblock format.")
         }
     }
 
@@ -205,9 +209,9 @@ private struct BlockListStatusRow: View {
 
     private var detail: String {
         if let updated = list.updated {
-            return "\(list.domains.formatted()) domains · checked \(relativeTime(updated))"
+            return "\(list.domains.formatted()) · \(relativeTime(updated))"
         }
-        return "Not downloaded yet"
+        return "Waiting"
     }
 
     var body: some View {
@@ -217,10 +221,26 @@ private struct BlockListStatusRow: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             if let error = list.error, !error.isEmpty {
-                Text("Last update failed: \(error)")
+                Text(error)
                     .font(.footnote)
                     .foregroundStyle(.red)
             }
         }
+    }
+}
+
+/// A count with what it counts underneath.
+private struct CountFigure: View {
+    let value: UInt64
+    let caption: String
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Figure(value: value.formatted(), font: Font.title2)
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 }

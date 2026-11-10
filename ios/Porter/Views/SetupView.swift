@@ -17,58 +17,65 @@ struct SetupView: View {
         country.count == 2 && validRouterName(routerName) && validNetworkName(ssid) && validPassphrase(passphrase)
     }
 
-    private var passwordHint: String {
-        if passphrase.isEmpty || validPassphrase(passphrase) {
-            return "Devices join the router with this name and password. The password needs 8 to 63 characters."
-        }
-        return "The password needs 8 to 63 characters: letters, digits and common symbols."
+    /// Said only once the password is being typed and is not yet usable.
+    private var passwordProblem: Bool {
+        !passphrase.isEmpty && !validPassphrase(passphrase)
     }
 
     var body: some View {
         Form {
             Section {
-                Text("The router keeps its radios off until it knows which country it is in and what its Wi-Fi network is called.")
-                    .foregroundStyle(.secondary)
+                VStack(spacing: 10) {
+                    Glyph(symbol: "wifi.router.fill", size: 64, filled: true)
+                    Text("Name your network")
+                        .font(.title2.weight(.bold))
+                        .fontDesign(.rounded)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .listRowBackground(Color.clear)
             }
             Section {
-                CountryPicker(selection: $country)
-            } footer: {
-                Text("Decides which Wi-Fi channels and power levels the router may use.")
-            }
-            Section {
-                TextField("Network name", text: $ssid)
+                TextField("Wi-Fi name", text: $ssid)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 TextField("Password", text: $passphrase)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-            } header: {
-                Text("Wi-Fi network")
             } footer: {
-                Text(passwordHint)
+                Text("8 to 63 characters")
+                    .foregroundStyle(passwordProblem ? Color.red : Color.secondary)
             }
             Section {
-                TextField("Router name", text: $routerName)
-            } header: {
-                Text("Router name")
+                CountryPicker(selection: $country)
+                LabeledContent("Router") {
+                    TextField("Name", text: $routerName)
+                        .multilineTextAlignment(.trailing)
+                }
             } footer: {
-                Text("Shown in this app and over Bluetooth. Up to 20 characters.")
+                Text("The country sets the legal Wi-Fi channels.")
             }
             Section {
                 Button {
                     start()
                 } label: {
-                    HStack(spacing: 12) {
-                        Text("Start router")
+                    HStack(spacing: 10) {
+                        Text("Start")
+                            .font(.headline)
                         if saving {
                             ProgressView()
                         }
                     }
+                    .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .disabled(!valid || saving)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
             }
         }
-        .navigationTitle("Set up router")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Disconnect") { model.disconnect() }

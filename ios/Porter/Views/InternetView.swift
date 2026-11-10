@@ -13,7 +13,10 @@ struct InternetView: View {
             SavedNetworksSection()
             RadiosSection()
             WiredPortsSection()
-            UpstreamIdentitySection()
+            Section {
+                Toggle("Prefer Wi-Fi over wired", isOn: model.binding(\.wan.preferWifi, fallback: false))
+                NavigationLink("Hardware addresses") { UpstreamIdentityPage() }
+            }
         }
         .navigationTitle("Internet")
         .refreshable { await model.refresh() }
@@ -48,48 +51,66 @@ private struct UplinksSection: View {
 
     private var uplinks: [UplinkStatus] { model.status?.wan ?? [] }
 
+    private func network(_ uplink: UplinkStatus) -> String? {
+        guard uplink.kind == "wifi" else { return nil }
+        let stations: [StationStatus] = model.status?.stas ?? []
+        return stations.first(where: { $0.iface == uplink.iface })?.ssid
+    }
+
     var body: some View {
-        Section("Uplinks") {
+        Section {
             if uplinks.isEmpty {
-                Text("No wired port or radio is set up as an uplink.")
+                Text("No uplink")
                     .foregroundStyle(.secondary)
             }
             ForEach(uplinks) { uplink in
-                UplinkRow(uplink: uplink, active: uplink.iface == model.status?.active)
+                UplinkRow(uplink: uplink, network: network(uplink), active: uplink.iface == model.status?.active)
             }
         }
     }
 }
 
+/// One way out. The one in use has the filled icon.
 private struct UplinkRow: View {
     let uplink: UplinkStatus
+    let network: String?
     let active: Bool
+
+    private var title: String {
+        if uplink.kind == "wifi" {
+            if let network, !network.isEmpty { return network }
+            return "Wi-Fi"
+        }
+        return "Ethernet"
+    }
 
     private var detail: String {
         if let address = uplink.ipv4, !address.isEmpty { return address }
-        return uplink.carrier ? "No address yet" : "No link"
+        return uplink.carrier ? "No address" : "No link"
     }
 
+    private var color: Color { internetColor(uplink.internet) }
+
     var body: some View {
-        HStack(spacing: 10) {
-            StatusDot(color: internetColor(uplink.internet))
+        HStack(spacing: 12) {
+            Glyph(symbol: uplink.kind == "wifi" ? "wifi" : "cable.connector", color: color, filled: active)
             VStack(alignment: .leading, spacing: 2) {
-                Text(uplinkLabel(kind: uplink.kind, iface: uplink.iface))
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(internetLabel(uplink.internet))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                if active {
-                    Text("In use")
-                        .font(.caption)
-                        .foregroundStyle(.green)
+                Text(title)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(detail)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    if uplink.hasV6 {
+                        Badge(text: "IPv6", color: Color.accentColor)
+                    }
                 }
             }
+            Spacer(minLength: 8)
+            Text(internetLabel(uplink.internet))
+                .font(.subheadline)
+                .foregroundStyle(color)
+                .multilineTextAlignment(.trailing)
         }
     }
 }
@@ -126,13 +147,11 @@ private struct WifiScanSection: View {
                     joinTarget = JoinTarget(ssid: "", secured: true, other: true)
                 }
             } else {
-                Text("No radio is set to connect to Wi-Fi networks. Under Radios below, give one the upstream role.")
+                Text("No radio is set to Uplink")
                     .foregroundStyle(.secondary)
             }
         } header: {
-            Text("Wi-Fi networks")
-        } footer: {
-            Text(hasStation ? "A scan takes about 10 seconds." : "")
+            Text("Join Wi-Fi")
         }
     }
 
@@ -141,7 +160,8 @@ private struct WifiScanSection: View {
             scan()
         } label: {
             HStack(spacing: 12) {
-                Text(scanning ? "Scanning…" : "Scan")
+                Label(scanning ? "Scanning" : "Scan", systemImage: "antenna.radiowaves.left.and.right")
+                Spacer()
                 if scanning {
                     ProgressView()
                 }
@@ -181,8 +201,8 @@ private struct ScanResultRow: View {
     }
 
     private var note: String {
-        if result.security == "enterprise" { return "Enterprise sign-in is not supported" }
-        if result.security == "wep" { return "WEP is not supported" }
+        if result.security == "enterprise" { return "Enterprise: not supported" }
+        if result.security == "wep" { return "WEP: not supported" }
         return saved ? "Saved" : ""
     }
 
@@ -230,11 +250,13 @@ private struct SavedNetworksSection: View {
     }
 
     var body: some View {
+        if !networks.isEmpty {
+            savedSection
+        }
+    }
+
+    private var savedSection: some View {
         Section {
-            if networks.isEmpty {
-                Text("None")
-                    .foregroundStyle(.secondary)
-            }
             ForEach(networks) { network in
                 HStack {
                     Text(network.ssid)
@@ -248,9 +270,7 @@ private struct SavedNetworksSection: View {
                 }
             }
         } header: {
-            Text("Saved networks")
-        } footer: {
-            Text("The router joins saved networks on its own, the most recently added first. Swipe to forget one.")
+            Text("Saved")
         }
     }
 
@@ -291,11 +311,11 @@ private struct JoinNetworkSheet: View {
                 Section {
                     SecureField("Password", text: $password)
                 } footer: {
-                    Text(target.other ? "Leave the password empty for an open network. Otherwise 8 to 63 characters." : "8 to 63 characters.")
+                    Text(target.other ? "Empty for an open network." : "")
                 }
             } else {
                 Section {
-                    Text("This network has no password. Others nearby can see traffic that is not encrypted by a VPN or by the site itself.")
+                    Label("Open network: others nearby can see unencrypted traffic.", systemImage: "lock.open")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -340,14 +360,14 @@ private struct JoinNetworkSheet: View {
 private func radioRoleLabel(_ role: RadioRole) -> String {
     switch role {
     case .off: return "Off"
-    case .ap: return "Access point"
-    case .wan: return "Upstream Wi-Fi"
+    case .ap: return "Network"
+    case .wan: return "Uplink"
     case .apWan: return "Both"
     }
 }
 
 private func bandLabel(_ band: String) -> String {
-    band.isEmpty ? "Automatic" : band + " GHz"
+    band.isEmpty ? "Auto" : band + " GHz"
 }
 
 private func channelLabel(_ channel: Int) -> String {
@@ -358,22 +378,20 @@ private func widthLabel(_ width: Int) -> String {
     width == 0 ? "Auto" : "\(width) MHz"
 }
 
+/// One section for each radio: its name, what it is used for, and, when it
+/// carries the router's network, where on the air that network sits.
 private struct RadiosSection: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        Section {
-            if model.radios.isEmpty {
-                Text("No Wi-Fi radio found.")
+        if model.radios.isEmpty {
+            Section("Radios") {
+                Text("No Wi-Fi radio")
                     .foregroundStyle(.secondary)
             }
-            ForEach(model.radios) { radio in
-                RadioRows(radio: radio)
-            }
-        } header: {
-            Text("Radios")
-        } footer: {
-            Text("With one radio doing both jobs, the access point has to use the upstream network's channel, so band and channel cannot be chosen. A second adapter lets each radio do one job.")
+        }
+        ForEach(model.radios) { radio in
+            RadioRows(radio: radio)
         }
     }
 }
@@ -387,10 +405,6 @@ private struct RadioRows: View {
     }
 
     private var role: RadioRole { setting?.role ?? .off }
-
-    private var subtitle: String {
-        radio.present ? radio.id : radio.id + " · not plugged in"
-    }
 
     private var roleOptions: [RadioRole] {
         var options: [RadioRole] = [.off]
@@ -470,33 +484,42 @@ private struct RadioRows: View {
         )
     }
 
+    private var title: String {
+        let name: String = radio.product.isEmpty ? "Wi-Fi radio" : radio.product
+        return radio.present ? name : name + " · unplugged"
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(radio.product.isEmpty ? "Wi-Fi radio" : radio.product)
-            Text(subtitle)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        Picker("Role", selection: roleBinding) {
-            ForEach(roleOptions) { option in
-                Text(radioRoleLabel(option)).tag(option)
-            }
-        }
-        if role == .ap {
-            Picker("Band", selection: bandBinding) {
-                ForEach(bandOptions, id: \.self) { band in
-                    Text(bandLabel(band)).tag(band)
+        Section {
+            Picker("Role", selection: roleBinding) {
+                ForEach(roleOptions) { option in
+                    Text(radioRoleLabel(option)).tag(option)
                 }
             }
-            Picker("Channel", selection: channelBinding) {
-                ForEach(channelOptions, id: \.self) { channel in
-                    Text(channelLabel(channel)).tag(channel)
+            .pickerStyle(.segmented)
+            .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+            if role == .ap {
+                Picker("Band", selection: bandBinding) {
+                    ForEach(bandOptions, id: \.self) { band in
+                        Text(bandLabel(band)).tag(band)
+                    }
+                }
+                Picker("Channel", selection: channelBinding) {
+                    ForEach(channelOptions, id: \.self) { channel in
+                        Text(channelLabel(channel)).tag(channel)
+                    }
+                }
+                Picker("Width", selection: widthBinding) {
+                    ForEach(widthOptions, id: \.self) { width in
+                        Text(widthLabel(width)).tag(width)
+                    }
                 }
             }
-            Picker("Channel width", selection: widthBinding) {
-                ForEach(widthOptions, id: \.self) { width in
-                    Text(widthLabel(width)).tag(width)
-                }
+        } header: {
+            Text(title)
+        } footer: {
+            if role == .apWan {
+                Text("Your network follows the uplink's channel.")
             }
         }
     }
@@ -506,8 +529,8 @@ private struct RadioRows: View {
 
 private func portRoleLabel(_ role: PortRole) -> String {
     switch role {
-    case .wan: return "Internet"
-    case .lan: return "Local network"
+    case .wan: return "Uplink"
+    case .lan: return "Local"
     case .off: return "Off"
     }
 }
@@ -533,22 +556,26 @@ private struct WiredPortsSection: View {
     }
 
     var body: some View {
-        Section {
-            if ports.isEmpty {
-                Text("No wired port found.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(ports) { port in
-                Picker(port.name, selection: roleBinding(port.name)) {
-                    ForEach(PortRole.allCases) { option in
-                        Text(portRoleLabel(option)).tag(option)
+        if !ports.isEmpty {
+            Section {
+                ForEach(ports) { port in
+                    HStack(spacing: 12) {
+                        Label(port.name, systemImage: "cable.connector")
+                            .font(.body.monospaced())
+                        Spacer()
+                        Picker(port.name, selection: roleBinding(port.name)) {
+                            ForEach(PortRole.allCases) { option in
+                                Text(portRoleLabel(option)).tag(option)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: 210)
                     }
                 }
+            } header: {
+                Text("Wired")
             }
-        } header: {
-            Text("Wired ports")
-        } footer: {
-            Text("\"Internet\" takes the connection from whatever the port is plugged into. \"Local network\" shares the router's connection with what is plugged in.")
         }
     }
 }
@@ -563,19 +590,23 @@ private func macModeLabel(_ mode: MACMode) -> String {
     }
 }
 
-private struct UpstreamIdentitySection: View {
-    @EnvironmentObject private var model: AppModel
-
+/// The hardware (MAC) address the router shows upstream, per kind of uplink.
+private struct UpstreamIdentityPage: View {
     var body: some View {
-        Section {
-            MACPolicyRows(title: "Wi-Fi address", kind: "wifi", policyPath: \.wan.wifiMac)
-            MACPolicyRows(title: "Wired address", kind: "eth", policyPath: \.wan.ethMac)
-            Toggle("Prefer Wi-Fi over wired", isOn: model.binding(\.wan.preferWifi, fallback: false))
-        } header: {
-            Text("Upstream identity")
-        } footer: {
-            Text("The hardware (MAC) address the router shows to upstream networks. A random address stays the same until you ask for a new one; a new one makes the router look like a different device. The last switch decides which uplink is used when both are connected.")
+        Form {
+            Section("Wi-Fi") {
+                MACPolicyRows(title: "Address", kind: "wifi", policyPath: \.wan.wifiMac)
+            }
+            Section {
+                MACPolicyRows(title: "Address", kind: "eth", policyPath: \.wan.ethMac)
+            } header: {
+                Text("Wired")
+            } footer: {
+                Text("A new random address makes the router look like a different device upstream.")
+            }
         }
+        .navigationTitle("Hardware addresses")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -612,15 +643,15 @@ private struct MACPolicyRows: View {
             }
         }
         if shownMode == .random {
-            LabeledContent("Current address", value: policy?.address ?? "")
-            Button("New random address") { newRandom() }
+            LabeledContent("Now", value: policy?.address ?? "")
+            Button("New address") { newRandom() }
         }
         if shownMode == .custom {
             TextField("02:00:00:00:00:01", text: $custom)
                 .font(.body.monospaced())
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            Button("Use this address") { apply(mode: .custom, address: custom.lowercased()) }
+            Button("Use") { apply(mode: .custom, address: custom.lowercased()) }
                 .disabled(!customReady)
         }
     }
