@@ -36,6 +36,13 @@ final class AppModel: ObservableObject {
     private let store = KeyStore()
     private var connection: RouterConnection?
     private var link: BLELink?
+    /// The configuration as the router last reported it. `config`, which
+    /// the views show, is this with the edits applied that have been sent
+    /// and not yet confirmed: a control shows its new value the moment it
+    /// is touched, not a Bluetooth round trip later.
+    private var confirmedConfig: RouterConfig?
+    private var pendingEdits: [(id: Int, edit: (inout RouterConfig) -> Void)] = []
+    private var nextEditID = 0
     private var connectTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var subscriptions: Set<AnyCancellable> = []
@@ -202,7 +209,8 @@ final class AppModel: ObservableObject {
         link = nil
         Task { await old?.close() }
         status = nil
-        config = nil
+        pendingEdits.removeAll()
+        setConfirmed(nil)
         devices = []
         radios = []
         speedTestProgress = nil
@@ -241,13 +249,13 @@ final class AppModel: ObservableObject {
     func reload() async throws {
         let connection = try requireConnection()
         status = try await connection.status()
-        config = try await connection.config()
+        setConfirmed(try await connection.config())
         devices = try await connection.devices()
         radios = try await connection.radios()
     }
 
     private func reloadConfig() async throws {
-        config = try await requireConnection().config()
+        setConfirmed(try await requireConnection().config())
     }
 
     func refreshDevices() async throws {
@@ -265,13 +273,46 @@ final class AppModel: ObservableObject {
 
     // MARK: - Writing
 
-    /// Applies an edit to the configuration. If the router's copy changed
+    /// Takes a configuration from the router as the new truth and shows
+    /// it, with whatever edits are still on their way applied on top.
+    private func setConfirmed(_ fresh: RouterConfig?) {
+        confirmedConfig = fresh
+        showConfig()
+    }
+
+    private func showConfig() {
+        guard var shown = confirmedConfig else {
+            config = nil
+            return
+        }
+        for item in pendingEdits {
+            item.edit(&shown)
+        }
+        if shown != config {
+            config = shown
+        }
+    }
+
+    /// Applies an edit to the configuration. The edit shows at once and is
+    /// taken back if the router refuses it. If the router's copy changed
     /// in the meantime the edit is re-applied to the fresh copy once.
     @discardableResult
     func update(_ edit: @escaping (inout RouterConfig) -> Void) async -> Bool {
-        await attempt { connection in
+        let id = nextEditID
+        nextEditID += 1
+        pendingEdits.append((id: id, edit: edit))
+        showConfig()
+        let ok = await attempt { connection in
             for attemptNumber in 0..<2 {
-                var next = try await connection.config()
+                // The first try builds on the copy already here, which
+                // saves fetching the whole configuration over Bluetooth;
+                // if the router has moved on, the second fetches it.
+                var next: RouterConfig
+                if attemptNumber == 0, let known = self.confirmedConfig {
+                    next = known
+                } else {
+                    next = try await connection.config()
+                }
                 edit(&next)
                 do {
                     _ = try await connection.setConfig(next)
@@ -280,9 +321,16 @@ final class AppModel: ObservableObject {
                     continue
                 }
             }
-            self.config = try await connection.config()
+            let fresh = try await connection.config()
+            self.pendingEdits.removeAll(where: { $0.id == id })
+            self.setConfirmed(fresh)
             self.status = try await connection.status()
         }
+        if !ok {
+            pendingEdits.removeAll(where: { $0.id == id })
+            showConfig()
+        }
+        return ok
     }
 
     /// Runs a router operation, turning failures into `errorMessage`.
@@ -308,10 +356,23 @@ final class AppModel: ObservableObject {
     }
 
     func setDevice(_ settings: DeviceSettings) async {
-        await attempt { connection in
+        // Shown at once, like configuration edits; the router's answer
+        // replaces it, or the old state comes back if it refuses.
+        let before = devices
+        if let index = devices.firstIndex(where: { $0.mac == settings.mac }) {
+            devices[index].name = settings.name
+            devices[index].route = settings.route
+            devices[index].paused = settings.paused
+            devices[index].ip = settings.ip
+            devices[index].noAdblock = settings.noAdblock
+        }
+        let ok = await attempt { connection in
             try await connection.setDevice(settings)
             self.devices = try await connection.devices()
-            self.config = try await connection.config()
+            self.setConfirmed(try await connection.config())
+        }
+        if !ok {
+            devices = before
         }
     }
 
