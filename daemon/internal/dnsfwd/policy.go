@@ -21,6 +21,8 @@ type Policy struct {
 
 	Blocked SuffixSet
 	Rules   []Rule
+	// Paused devices are refused outright.
+	Paused map[string]bool
 	// DeviceRoute holds per-device actions; Default applies otherwise.
 	DeviceRoute map[string]string
 	Default     string
@@ -144,6 +146,9 @@ type path struct {
 func (p *Policy) decide(mac string, ip netip.Addr, name string) path {
 	if mac != "" && p.PortalDevs[mac] {
 		return path{kind: "wan", servers: p.WAN}
+	}
+	if mac != "" && p.Paused[mac] {
+		return path{kind: "refuse"}
 	}
 	action := ""
 	for i := range p.Rules {

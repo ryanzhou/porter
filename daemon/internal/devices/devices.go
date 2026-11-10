@@ -23,6 +23,8 @@ type Entry struct {
 	FirstSeen int64    `json:"first_seen"`
 	LastSeen  int64    `json:"last_seen"`
 	Online    bool     `json:"online"`
+	// OnlineSince is when the device last appeared (unix time).
+	OnlineSince int64 `json:"online_since,omitempty"`
 	// Link is the access point interface, or "wired".
 	Link   string `json:"link,omitempty"`
 	Signal int    `json:"signal,omitempty"`
@@ -176,6 +178,10 @@ func (t *Table) Observe(neigh map[netip.Addr]string, stations []Station) {
 		}
 		if was != e.Online {
 			t.dirty = true
+			e.OnlineSince = 0
+			if e.Online {
+				e.OnlineSince = now
+			}
 		}
 	}
 	// Forget address mappings of devices that are gone.

@@ -40,10 +40,14 @@ type Server struct {
 	up     *upstreams
 	log    *slog.Logger
 
-	mu      sync.Mutex
+	mu      sync.Mutex // guards servers
 	servers []*dns.Server
-	recent  []Query
-	next    int
+
+	// The query log has its own lock: handlers append to it while a
+	// shutdown (which holds mu and waits for handlers) is in progress.
+	recMu  sync.Mutex
+	recent []Query
+	next   int
 
 	// loopbackClients makes loopback sources subject to policy (tests).
 	loopbackClients bool
@@ -141,8 +145,8 @@ func (s *Server) Close() {
 
 // Recent returns the query log, oldest first, optionally for one device.
 func (s *Server) Recent(mac string) []Query {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.recMu.Lock()
+	defer s.recMu.Unlock()
 	out := make([]Query, 0, len(s.recent))
 	for i := 0; i < len(s.recent); i++ {
 		q := s.recent[(s.next+i)%len(s.recent)]
@@ -154,8 +158,8 @@ func (s *Server) Recent(mac string) []Query {
 }
 
 func (s *Server) record(q Query) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.recMu.Lock()
+	defer s.recMu.Unlock()
 	if len(s.recent) < recentSize {
 		s.recent = append(s.recent, q)
 		return

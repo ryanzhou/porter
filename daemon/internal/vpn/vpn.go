@@ -119,7 +119,7 @@ func (m *Manager) Apply(vpns []config.VPN) {
 	for _, v := range want {
 		m.mu.Lock()
 		t := m.tunnels[v.ID]
-		same := t != nil && sameWG(t.cfg, v) && t.st.State != "error"
+		same := t != nil && sameWG(t.cfg, v) // a failed tunnel is retried by poll()
 		if t != nil {
 			t.cfg.KillSwitch, t.cfg.Name = v.KillSwitch, v.Name
 		}
