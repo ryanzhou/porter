@@ -257,3 +257,50 @@ func TestIPSetup(t *testing.T) {
 		t.Errorf("/31: %v", err)
 	}
 }
+
+func TestMPQUICProfile(t *testing.T) {
+	base := func(m MPQUIC) *Config {
+		c := Default()
+		c.System.Country, c.AP.SSID, c.AP.Passphrase = "AU", "net", "password1"
+		c.VPNs = []VPN{{ID: "mq", Name: "Multi", Enabled: true, Type: "MPQUIC", MPQUIC: m}}
+		c.Normalize()
+		return c
+	}
+	c := base(MPQUIC{Servers: []string{" 203.0.113.10 ", "relay.example.net:9000", "[2001:db8::1]:8388", ""}, Password: "long-random-password", Up: "19Mbit"})
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a correct profile was refused: %v", err)
+	}
+	m := c.VPNs[0].MPQUIC
+	if c.VPNs[0].Type != VPNMPQUIC || len(m.Servers) != 3 || m.Port != DefaultMPQUICPort || len(m.DNS) != 2 || m.Up != "19mbit" {
+		t.Errorf("normalised: %+v", c.VPNs[0])
+	}
+	// No WireGuard section is needed for it.
+	if c.VPNs[0].WireGuard.PrivateKey != "" {
+		t.Error("unexpected WireGuard settings")
+	}
+	for name, bad := range map[string]MPQUIC{
+		"no servers":     {Password: "long-random-password"},
+		"short password": {Servers: []string{"a.example"}, Password: "short"},
+		"bad host":       {Servers: []string{"not a host"}, Password: "long-random-password"},
+		"bad port":       {Servers: []string{"a.example:99999"}, Password: "long-random-password"},
+		"empty port":     {Servers: []string{"a.example:"}, Password: "long-random-password"},
+		"bad rate":       {Servers: []string{"a.example"}, Password: "long-random-password", Down: "fast"},
+		"bad DNS":        {Servers: []string{"a.example"}, Password: "long-random-password", DNS: []string{"dns.example"}},
+		"too many paths": {Servers: []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}, Password: "long-random-password"},
+	} {
+		if err := base(bad).Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// A profile saved before there were types is WireGuard.
+	c = Default()
+	c.VPNs = []VPN{{ID: "wg", Name: "Old"}}
+	c.Normalize()
+	if c.VPNs[0].Type != VPNWireGuard {
+		t.Errorf("type of an old profile: %q", c.VPNs[0].Type)
+	}
+	c.VPNs[0].Type = "openvpn"
+	if err := c.Validate(); err == nil {
+		t.Error("an unknown type was accepted")
+	}
+}

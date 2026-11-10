@@ -65,6 +65,31 @@ func (c *Config) Normalize() {
 	if c.WAN.EthMAC.Mode == MACRandom && c.WAN.EthMAC.Address == "" {
 		c.WAN.EthMAC.Address = RandomMAC()
 	}
+	for i := range c.VPNs {
+		v := &c.VPNs[i]
+		v.Type = strings.ToLower(strings.TrimSpace(v.Type))
+		if v.Type == "" {
+			v.Type = VPNWireGuard
+		}
+		if v.Type != VPNMPQUIC {
+			continue
+		}
+		m := &v.MPQUIC
+		servers := []string{}
+		for _, s := range m.Servers {
+			if s = strings.TrimSpace(s); s != "" {
+				servers = append(servers, s)
+			}
+		}
+		m.Servers = servers
+		if m.Port == 0 {
+			m.Port = DefaultMPQUICPort
+		}
+		if len(m.DNS) == 0 {
+			m.DNS = []string{"1.1.1.1", "1.0.0.1"}
+		}
+		m.Up, m.Down = strings.ToLower(strings.TrimSpace(m.Up)), strings.ToLower(strings.TrimSpace(m.Down))
+	}
 	for i := range c.Ethernet {
 		c.Ethernet[i].IP.normalize()
 	}
@@ -588,6 +613,49 @@ func validWGKey(s string) bool {
 	return err == nil && len(b) == 32
 }
 
+var reRate = regexp.MustCompile(`^[0-9]+(\.[0-9]+)? ?[kmg]?(bit|bits|bps)?(/s)?$`)
+
+func (m MPQUIC) validate(name string) error {
+	if len(m.Servers) == 0 || len(m.Servers) > 8 {
+		return fmt.Errorf("VPN %q: needs 1-8 server addresses", name)
+	}
+	for _, s := range m.Servers {
+		host := s
+		if h, port, err := net.SplitHostPort(s); err == nil {
+			host = h
+			if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("VPN %q: bad port in %q", name, s)
+			}
+		} else if strings.Count(s, ":") == 1 {
+			return fmt.Errorf("VPN %q: bad server address %q", name, s)
+		}
+		host = strings.Trim(host, "[]")
+		if _, err := netip.ParseAddr(host); err != nil && !validDomain(strings.ToLower(host)) {
+			return fmt.Errorf("VPN %q: bad server address %q", name, s)
+		}
+	}
+	if m.Port < 1 || m.Port > 65535 {
+		return fmt.Errorf("VPN %q: bad port", name)
+	}
+	if len(m.Password) < 8 || len(m.Password) > 256 || !printable(m.Password) {
+		return fmt.Errorf("VPN %q: the password needs 8 to 256 characters", name)
+	}
+	if len(m.DNS) > 4 {
+		return fmt.Errorf("VPN %q: too many DNS servers", name)
+	}
+	for _, d := range m.DNS {
+		if _, err := netip.ParseAddr(d); err != nil {
+			return fmt.Errorf("VPN %q: DNS server %q is not an IP address", name, d)
+		}
+	}
+	for _, r := range []string{m.Up, m.Down} {
+		if r != "" && !reRate.MatchString(r) {
+			return fmt.Errorf("VPN %q: a rate looks like 20mbit, not %q", name, r)
+		}
+	}
+	return nil
+}
+
 func (c *Config) validateVPNs() error {
 	if len(c.VPNs) > 8 {
 		return fmt.Errorf("at most 8 VPN profiles")
@@ -603,6 +671,15 @@ func (c *Config) validateVPNs() error {
 		seen[v.ID] = true
 		if v.Name == "" || len(v.Name) > 40 || !printable(v.Name) {
 			return fmt.Errorf("VPN name must be 1-40 characters")
+		}
+		if v.Type == VPNMPQUIC {
+			if err := v.MPQUIC.validate(v.Name); err != nil {
+				return err
+			}
+			continue
+		}
+		if v.Type != VPNWireGuard && v.Type != "" {
+			return fmt.Errorf("VPN %q: unknown type %q", v.Name, v.Type)
 		}
 		w := v.WireGuard
 		if !validWGKey(w.PrivateKey) {

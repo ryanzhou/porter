@@ -28,6 +28,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/fw"
 	"github.com/ryanzhou/porter/daemon/internal/geoip"
 	"github.com/ryanzhou/porter/daemon/internal/lan"
+	"github.com/ryanzhou/porter/daemon/internal/mpquic"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
 	"github.com/ryanzhou/porter/daemon/internal/speedtest"
@@ -52,7 +53,10 @@ type Options struct {
 	// GeoIPPath is the country database; a missing file only disables
 	// country rules and country display.
 	GeoIPPath string
-	Version   string
+	// MPQUIC lists where the mpquic program may be, in order of
+	// preference.
+	MPQUIC  []string
+	Version string
 	// Update installs new versions; nil where that is not possible.
 	// UpdateURL is where the newest release's files are, ending in a
 	// slash. UpdateSettle is how long a new version has to run before it
@@ -89,6 +93,7 @@ type Core struct {
 	lan  *lan.Manager
 	wan  *wan.Manager
 	vpn  *vpn.Manager
+	mpq  *mpquic.Manager
 	devs *devices.Table
 
 	geo *geoip.DB
@@ -217,7 +222,14 @@ func New(opt Options) (*Core, error) {
 	c.dns = dnsfwd.New(dnsfwd.Hooks{LookupMAC: c.devs.LookupMAC, Learn: c.fwm.Learn, AdBlocked: c.ads.Blocked}, c.log)
 	c.lan = &lan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.LeaseHook}
 	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, OnChange: c.Kick}
+	c.mpq = &mpquic.Manager{Log: c.log, RunDir: opt.RunDir, Binaries: opt.MPQUIC, OnChange: c.Kick}
 	c.vpn = &vpn.Manager{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace, Resolve: c.resolveDirect}
+	c.vpn.Carrying = func(id string) (bool, string) {
+		if paths, managed := c.mpq.Health(id); managed && paths == 0 {
+			return false, "No path to the server"
+		}
+		return true, ""
+	}
 	lan.IsAPInterface = func(name string) bool {
 		// Only this package's goroutine mutates aps, but the bridge sync
 		// runs on it too, so no locking is needed.
@@ -319,6 +331,7 @@ func (c *Core) shutdown() {
 	}
 	c.wan.Stop()
 	c.vpn.Stop()
+	c.mpq.Stop()
 	c.lan.Stop()
 	c.dns.Close()
 	// The firewall table is left in place on purpose: a router whose
@@ -756,14 +769,20 @@ func (c *Core) reconcile() {
 	c.lanApplied = true
 
 	// Tunnels.
-	c.vpn.Apply(cfg.VPNs)
+	// From here on the VPN profiles are seen as they run: an MPQUIC
+	// profile as the WireGuard hop to its mpquic. The stored
+	// configuration is left as it is.
+	c.mpq.Apply(cfg.VPNs)
+	running := *cfg
+	running.VPNs = c.mpq.Effective(cfg.VPNs)
+	c.vpn.Apply(running.VPNs)
 
 	// Firewall and routing.
 	var wanIfs []string
 	for _, u := range uplinks {
 		wanIfs = append(wanIfs, u.If)
 	}
-	plan := fw.BuildPlan(cfg, fw.Runtime{WANIfs: wanIfs, PortalDevs: portalDevs, Geo: c.geo.Ranges, GeoVersion: c.geo.Version()})
+	plan := fw.BuildPlan(&running, fw.Runtime{WANIfs: wanIfs, PortalDevs: portalDevs, Geo: c.geo.Ranges, GeoVersion: c.geo.Version()})
 	flush := false
 	if key := fw.Fingerprint(plan); key != c.planKey {
 		if err := c.fwm.Apply(plan); err != nil {
@@ -780,7 +799,7 @@ func (c *Core) reconcile() {
 		netx.Sysctl("net/netfilter/nf_conntrack_acct", "1")
 		c.acctEnabled = true
 	}
-	routes := c.vpn.Routes(cfg.VPNs)
+	routes := c.vpn.Routes(running.VPNs)
 	if key := fmt.Sprintf("%+v", routes); key != c.routeKey {
 		if err := fw.SyncRouting(routes); err != nil {
 			c.log.Error("policy routing", "err", err)
@@ -799,7 +818,7 @@ func (c *Core) reconcile() {
 		}
 	}
 
-	c.applyDNS(cfg, states, active, portalDevs, routerAddr)
+	c.applyDNS(&running, states, active, portalDevs, routerAddr)
 	c.applySystem(cfg)
 
 	if changedCfg {

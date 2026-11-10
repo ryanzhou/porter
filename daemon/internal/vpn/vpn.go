@@ -61,6 +61,11 @@ type Manager struct {
 	// UserspaceImpl, when set, is a wireguard-go binary used instead of
 	// the kernel module (for tests on kernels without WireGuard).
 	UserspaceImpl string
+	// Carrying, when set, has the last word on whether a tunnel whose
+	// WireGuard side is up can carry traffic. A tunnel that ends in a
+	// local proxy completes its handshake whether or not the proxy has a
+	// way out; this is where that is asked. why is for the user.
+	Carrying func(id string) (ok bool, why string)
 
 	mu      sync.Mutex
 	tunnels map[string]*tunnel
@@ -380,6 +385,12 @@ func (m *Manager) poll() {
 		state := "connecting"
 		if !last.IsZero() && now.Sub(last) < handshakeFresh {
 			state = "up"
+		}
+		t.st.Error = ""
+		if state == "up" && m.Carrying != nil {
+			if ok, why := m.Carrying(t.cfg.ID); !ok {
+				state, t.st.Error = "connecting", why
+			}
 		}
 		if state != t.st.State {
 			changed = true

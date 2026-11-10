@@ -32,8 +32,9 @@ it, and the router refreshes it.
 
 The SD card image
 
-An image built by image/build.sh contains Debian and Raspberry Pi
-packages, among them the Linux kernel, BlueZ, dnsmasq and nftables (GPL),
+An image built by image/build.sh contains the mpquic program
+(https://github.com/ryanzhou/mpquic), downloaded from its releases, and
+Debian and Raspberry Pi packages, among them the Linux kernel, BlueZ, dnsmasq and nftables (GPL),
 hostapd and wpa_supplicant (BSD), and radio firmware under its vendors'
 redistribution terms. Those remain under their own licences, which this
 repository's licence does not change; whoever distributes an image is

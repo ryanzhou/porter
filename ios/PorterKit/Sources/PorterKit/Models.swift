@@ -188,7 +188,11 @@ public struct VPNProfile: Codable, Equatable, Identifiable {
     public var name: String
     public var enabled: Bool
     public var killSwitch: Bool
+    /// "wireguard" (also when absent) or "mpquic": which of the two
+    /// sections describes the tunnel.
+    public var type: String?
     public var wireguard: WireGuardConfig
+    public var mpquic: MPQUICConfig?
 
     public init(id: String, name: String, enabled: Bool, killSwitch: Bool, wireguard: WireGuardConfig) {
         self.id = id
@@ -197,6 +201,19 @@ public struct VPNProfile: Codable, Equatable, Identifiable {
         self.killSwitch = killSwitch
         self.wireguard = wireguard
     }
+
+    /// An MPQUIC profile.
+    public init(id: String, name: String, enabled: Bool, killSwitch: Bool, mpquic: MPQUICConfig) {
+        self.id = id
+        self.name = name
+        self.enabled = enabled
+        self.killSwitch = killSwitch
+        self.type = "mpquic"
+        self.wireguard = WireGuardConfig()
+        self.mpquic = mpquic
+    }
+
+    public var isMPQUIC: Bool { type == "mpquic" }
 }
 
 public struct WireGuardConfig: Codable, Equatable {
@@ -205,6 +222,38 @@ public struct WireGuardConfig: Codable, Equatable {
     public var dns: [String]
     public var mtu: Int
     public var peers: [WireGuardPeer]
+
+    public init(privateKey: String = "", addresses: [String] = [], dns: [String] = [], mtu: Int = 0, peers: [WireGuardPeer] = []) {
+        self.privateKey = privateKey
+        self.addresses = addresses
+        self.dns = dns
+        self.mtu = mtu
+        self.peers = peers
+    }
+}
+
+/// A multipath QUIC tunnel to an "mpquic remote".
+public struct MPQUICConfig: Codable, Equatable {
+    /// The paths to the remote: its own address, then any relays.
+    public var servers: [String]
+    /// Used for servers given without a port.
+    public var port: Int
+    public var password: String
+    public var dns: [String]
+    /// The line's rates if known, like "19mbit"; empty to measure.
+    public var up: String
+    public var down: String
+    public var reliableUdp: Bool
+
+    public init(servers: [String] = [], port: Int = 8388, password: String = "", dns: [String] = [], up: String = "", down: String = "", reliableUdp: Bool = false) {
+        self.servers = servers
+        self.port = port
+        self.password = password
+        self.dns = dns
+        self.up = up
+        self.down = down
+        self.reliableUdp = reliableUdp
+    }
 }
 
 public struct WireGuardPeer: Codable, Equatable {
@@ -425,11 +474,17 @@ public struct VPNStatus: Codable, Equatable, Identifiable {
     public var handshake: Int64?
     public var rx: Int64
     public var tx: Int64
+    public var type: String?
+    /// For an MPQUIC tunnel: how many of its paths work, and of how many.
+    public var paths: Int?
+    public var of: Int?
 
     enum CodingKeys: String, CodingKey {
         case iface = "if"
-        case id, name, state, error, endpoint, handshake, rx, tx
+        case id, name, state, error, endpoint, handshake, rx, tx, type, paths, of
     }
+
+    public var isMPQUIC: Bool { type == "mpquic" }
 }
 
 public struct ActivityEvent: Codable, Equatable, Identifiable {

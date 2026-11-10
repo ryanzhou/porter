@@ -42,6 +42,16 @@ mkdir -p "$WORK/bin"
   go test -c -o "$WORK/bin/fw.test" ./internal/fw/
   go test -c -tags e2e -o "$WORK/bin/e2e.test" ./e2e/ )
 
+# The mpquic the image ships, for this machine's architecture.
+. "$REPO/image/mpquic.pin"
+ARCH=$(cd "$REPO/daemon" && go env GOARCH)
+eval "MPQUIC_SHA256=\${MPQUIC_SHA256_$ARCH:-}"
+if [ -n "$MPQUIC_SHA256" ]; then
+    curl -fsSL -o "$WORK/bin/mpquic" "https://github.com/ryanzhou/mpquic/releases/download/$MPQUIC_VERSION/mpquic-linux-$ARCH"
+    echo "$MPQUIC_SHA256  $WORK/bin/mpquic" | sha256sum -c --quiet - || { echo "mpquic $MPQUIC_VERSION does not have the hash in image/mpquic.pin" >&2; exit 1; }
+    chmod 755 "$WORK/bin/mpquic"
+fi
+
 echo "==> root file system from image/packages"
 # Ubuntu's copy of the Debian keyring is often too old for the current
 # release, so take the keyring from Debian itself.
@@ -89,9 +99,12 @@ if [ -n "${PORTER_WG_USERSPACE:-}" ]; then
     WG=/opt/porter-test/wireguard
 fi
 
+MPQ=
+[ -x "$ROOT/opt/porter-test/mpquic" ] && MPQ=/opt/porter-test/mpquic
+
 inside() {
     chroot "$ROOT" /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root \
-        PORTER_E2E_BIN=/opt/porter-test/porterd PORTER_WG_USERSPACE="$WG" "$@"
+        PORTER_E2E_BIN=/opt/porter-test/porterd PORTER_WG_USERSPACE="$WG" PORTER_MPQUIC="$MPQ" "$@"
 }
 
 echo "==> firewall and policy routing"
@@ -101,7 +114,7 @@ inside sh -c 'cd /tmp && /opt/porter-test/e2e.test -test.count=1 -test.v -test.t
 
 # A test that skipped itself here did so because the image lacks something
 # it needs, which is exactly what this run exists to find.
-if grep -E '^--- SKIP: (TestRender|TestRouter)\b' "$WORK/fw.log" "$WORK/e2e.log"; then
+if grep -E '^(--- SKIP: (TestRender|TestRouter)\b|    --- SKIP: TestRouter/MPQUIC\b)' "$WORK/fw.log" "$WORK/e2e.log"; then
     echo "a test that must run inside the image's userland was skipped" >&2
     exit 1
 fi

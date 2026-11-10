@@ -22,8 +22,9 @@ and can send some or all of your traffic through your VPN.
   cloud service: the router and the app are the only two parts.
 - **Sign-in pages handled once.** One device signs in to the venue's
   network; every device behind the router is then online.
-- **VPN with rules.** WireGuard, with a kill switch. Send everything
-  through it, or only certain devices, sites, countries or ports.
+- **VPN with rules.** WireGuard or MPQUIC, with a kill switch. Send
+  everything through it, or only certain devices, sites, countries or
+  ports.
 - **See and manage what is connected.** Per-device traffic, live
   connections, pause a device, block ads for the whole network, run a
   speed test.
@@ -155,6 +156,13 @@ to reorder, swipe a rule right to turn it off.
 **Kill switch** (per VPN, on by default): if the tunnel is down, traffic
 meant for it is stopped rather than sent out unprotected.
 
+**MPQUIC.** Instead of WireGuard, a profile can be a tunnel to your own
+[mpquic](https://github.com/ryanzhou/mpquic) server, which spreads
+traffic over several paths at once. Choose **MPQUIC** when adding a VPN
+and enter the server, any relays (one path each) and the password of
+your `mpquic remote`, which has to run with `-u`. Everything above works
+the same for it; the profile shows how many of its paths are up.
+
 DNS lookups follow the traffic: a device routed through a VPN uses that
 VPN's DNS server.
 
@@ -282,6 +290,10 @@ settings and pairings. Re-flashing the card does the same.
   only a handful of simultaneous clients with its default firmware.
   [The developer notes](docs/DEVELOPMENT.md#built-in-radio-client-limit)
   describe the alternative firmware.
+- **MPQUIC versions.** The image carries one mpquic release, and the
+  two ends of a tunnel have to speak the same protocol version. To use a
+  newer mpquic without waiting for a new image, enable SSH and copy the
+  `mpquic-linux-arm64` binary to `/data/porter/bin/mpquic` on the router.
 - **Not included:** OpenVPN, a VPN server, enterprise (username and
   password) Wi-Fi as the uplink, intrusion detection, load balancing
   across several uplinks.

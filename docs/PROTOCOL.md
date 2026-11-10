@@ -146,7 +146,8 @@ portal     {captive url device}
 aps[]      {radio iface state band channel mode error}
 stas[]     {radio iface state ssid bssid freq signal failed fail_reason}
 lan        {address ula clients}
-vpns[]     {id name if state error endpoint handshake rx tx}
+vpns[]     {id name type if state error endpoint handshake rx tx paths? of?}
+           type "wireguard" | "mpquic"; paths of an MPQUIC tunnel working, of how many
 geoip      {available date}   country database for country rules and flows
 adblock    {enabled domains blocked lists[{url domains updated error}]}
 ```

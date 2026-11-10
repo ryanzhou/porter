@@ -283,6 +283,11 @@ type LANStatus struct {
 type VPNStatus struct {
 	vpn.Status
 	Name string `json:"name"`
+	// Type is the profile's kind. For an MPQUIC tunnel, Paths is how many
+	// of its paths work and Of how many it has.
+	Type  string `json:"type"`
+	Paths int    `json:"paths,omitempty"`
+	Of    int    `json:"of,omitempty"`
 }
 
 // status must run on the control loop.
@@ -331,7 +336,20 @@ func (c *Core) status() Status {
 		if !ok {
 			s = vpn.Status{ID: v.ID, State: "off"}
 		}
-		st.VPNs = append(st.VPNs, VPNStatus{Status: s, Name: v.Name})
+		entry := VPNStatus{Status: s, Name: v.Name, Type: v.Type}
+		if v.Type == config.VPNMPQUIC {
+			// The endpoint of the hop inside the router means nothing
+			// to anyone; the server does.
+			entry.Endpoint, entry.Of = "", len(v.MPQUIC.Servers)
+			if len(v.MPQUIC.Servers) > 0 {
+				entry.Endpoint = v.MPQUIC.Servers[0]
+			}
+			entry.Paths, _ = c.mpq.Health(v.ID)
+			if v.Enabled && c.mpq.Binary() == "" {
+				entry.State, entry.Error = "error", "The mpquic program is not installed"
+			}
+		}
+		st.VPNs = append(st.VPNs, entry)
 	}
 	return st
 }

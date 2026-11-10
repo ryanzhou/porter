@@ -83,6 +83,15 @@ if ! { [ -r "$DEBKEYS" ] && curl -fsS "https://deb.debian.org/debian/dists/$SUIT
 fi
 cat "$DEBKEYS" "$WORK/rpi.gpg" > "$WORK/keys.gpg"
 
+# The mpquic program, for MPQUIC tunnels: a pinned release, checked
+# against the hash recorded with the pin. Fetched before the slow stages
+# so that a failure shows at once.
+echo "==> mpquic"
+. "$HERE/mpquic.pin"
+curl -fsSL -o "$WORK/mpquic" "https://github.com/ryanzhou/mpquic/releases/download/$MPQUIC_VERSION/mpquic-linux-arm64"
+echo "$MPQUIC_SHA256_arm64  $WORK/mpquic" | sha256sum -c --quiet - || { echo "mpquic $MPQUIC_VERSION does not have the hash in image/mpquic.pin" >&2; exit 1; }
+echo "    mpquic $MPQUIC_VERSION"
+
 # Country database for country rules and the flow list. It is baked in
 # because the router itself never downloads anything. DB-IP publishes a
 # new file each month; early in a month the previous one may be all there
@@ -130,6 +139,7 @@ chown -R 0:0 "$ROOT/etc/systemd" "$ROOT/usr/lib/porter" "$ROOT/etc/bluetooth" "$
     "$ROOT/etc/sysctl.d" "$ROOT/etc/tmpfiles.d" "$ROOT/etc/fstab" "$ROOT/etc/hostname" "$ROOT/etc/hosts"
 install -m 755 "$WORK/bin/porterd" "$ROOT/usr/sbin/porterd"
 install -m 755 "$WORK/bin/porterctl" "$ROOT/usr/sbin/porterctl"
+install -m 755 "$WORK/mpquic" "$ROOT/usr/lib/porter/mpquic"
 mkdir -p "$ROOT/data" "$ROOT/boot/firmware"
 printf 'PORTER_VERSION=%s\nPORTER_BUILD_TIME=%s\n' "$VERSION" "$BUILD_TIME" > "$ROOT/etc/porter-release"
 # With a key here, the router installs only updates signed with it.

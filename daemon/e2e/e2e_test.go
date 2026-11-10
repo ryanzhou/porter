@@ -175,6 +175,9 @@ type status struct {
 	VPNs []struct {
 		ID    string `json:"id"`
 		State string `json:"state"`
+		Type  string `json:"type"`
+		Paths int    `json:"paths"`
+		Of    int    `json:"of"`
 	} `json:"vpns"`
 	LAN struct {
 		Clients int `json:"clients"`
@@ -929,6 +932,95 @@ func TestRouter(t *testing.T) {
 		if got := geoip.ReadDate(filepath.Join(dir, "data", "geoip.csv.gz")); got != month {
 			t.Errorf("stored database date: %q, want %q", got, month)
 		}
+	})
+
+	t.Run("MPQUIC", func(t *testing.T) {
+		// The daemon runs the mpquic program named by PORTER_MPQUIC; the
+		// same program is the remote end here.
+		bin := os.Getenv("PORTER_MPQUIC")
+		if bin == "" {
+			t.Skip("PORTER_MPQUIC does not name an mpquic program")
+		}
+		if !haveVPN {
+			t.Skip("no WireGuard implementation available")
+		}
+		const password = "a-long-password-for-the-test"
+		remote := func() *exec.Cmd {
+			return start("mpquic remote", "mpquic-remote.log", "ip", "netns", "exec", nsISP, bin, "remote", "-s", "0.0.0.0", "-p", "8388", "-k", password, "-u")
+		}
+		srv := remote()
+		var before config.Config
+		if err := c.Call("config.get", nil, &before); err != nil {
+			t.Fatal(err)
+		}
+		editConfig(func(cfg *config.Config) {
+			cfg.VPNs = append(cfg.VPNs, config.VPN{ID: "mq", Name: "Multipath", Enabled: true, KillSwitch: true, Type: config.VPNMPQUIC,
+				MPQUIC: config.MPQUIC{Servers: []string{ispIP}, Password: password, DNS: []string{ispIP}}})
+			cfg.Devices = []config.Device{{MAC: mac2, Name: "Two", Route: "vpn:mq"}}
+		})
+		tunnel := func() (state string, paths int) {
+			for _, v := range getStatus().VPNs {
+				if v.ID == "mq" {
+					return v.State, v.Paths
+				}
+			}
+			return "", 0
+		}
+		eventually(t, "mpquic tunnel up with its path", 60*time.Second, func() bool {
+			state, paths := tunnel()
+			return state == "up" && paths == 1
+		})
+		// Device two leaves through the remote, which sits beside the
+		// site and so reaches it from the site's own address; device one
+		// still goes out directly.
+		eventually(t, "device two through mpquic", 20*time.Second, func() bool {
+			got, err := httpGet(nsC2, "http://"+siteA+"/ip")
+			return err == nil && got != "" && got != wanIP
+		})
+		if got, err := httpGet(nsC1, "http://"+siteA+"/ip"); err != nil || got != wanIP {
+			t.Errorf("device one should be direct: %q %v", got, err)
+		}
+		// UDP goes through as well: device two's lookups are sent to the
+		// tunnel's DNS server.
+		eventually(t, "a lookup through mpquic", 20*time.Second, func() bool {
+			a, _, err := lookup(nsC2, router, "portal.test")
+			return err == nil && a == ispIP
+		})
+
+		// The remote goes away. WireGuard to the local mpquic is still
+		// fine, but there is no path: the tunnel must be reported down
+		// and, with the kill switch, device two cut off.
+		srv.Process.Kill()
+		srv.Wait()
+		eventually(t, "tunnel reported down without a path", 60*time.Second, func() bool {
+			state, paths := tunnel()
+			return state != "up" && paths == 0
+		})
+		eventually(t, "kill switch cutting device two off", 20*time.Second, func() bool {
+			_, err := httpGet(nsC2, "http://"+siteA+"/ip")
+			return err != nil
+		})
+		if got, err := httpGet(nsC1, "http://"+siteA+"/ip"); err != nil || got != wanIP {
+			t.Errorf("device one should be unaffected: %q %v", got, err)
+		}
+		// And comes back.
+		remote()
+		eventually(t, "tunnel back up", 90*time.Second, func() bool {
+			state, paths := tunnel()
+			return state == "up" && paths == 1
+		})
+		eventually(t, "device two through mpquic again", 20*time.Second, func() bool {
+			got, err := httpGet(nsC2, "http://"+siteA+"/ip")
+			return err == nil && got != "" && got != wanIP
+		})
+
+		editConfig(func(cfg *config.Config) {
+			cfg.VPNs, cfg.Devices = before.VPNs, before.Devices
+		})
+		eventually(t, "device two direct again", 20*time.Second, func() bool {
+			got, err := httpGet(nsC2, "http://"+siteA+"/ip")
+			return err == nil && got == wanIP
+		})
 	})
 
 	t.Run("StaticUplink", func(t *testing.T) {

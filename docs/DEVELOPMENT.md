@@ -48,6 +48,15 @@ every subsystem against it and against what the network is doing.
 - **IPv6.** The LAN gets a ULA /64; the uplink takes whatever RA or
   DHCPv6 offers; traffic is masqueraded (NAT66). No prefix delegation is
   needed.
+- **MPQUIC.** A VPN profile of this type runs the `mpquic` program as it
+  is released (`mpquic local`), with only its WireGuard listener on, bound
+  to a loopback port. The rest of the router is given an ordinary
+  WireGuard profile pointing at that port (`internal/mpquic`), with keys
+  made at each start, so policy routing, the kill switch and per-path DNS
+  need to know nothing about it. The tunnel counts as up only while
+  mpquic reports at least one working path. The release is pinned, with
+  its hash, in `image/mpquic.pin`; a copy at `/data/porter/bin/mpquic`
+  takes precedence on a router.
 - **Uplink addresses.** dhcpcd configures an uplink (DHCP, router
   advertisements, DHCPv6) unless a family is set by hand, per wired port
   or per saved Wi-Fi network. A fixed address and its default route are

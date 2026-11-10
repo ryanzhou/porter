@@ -37,6 +37,17 @@ var (
 	releases = "https://github.com/ryanzhou/porter/releases/latest/download/"
 )
 
+// mpquicPrograms lists where the mpquic program is looked for. A copy on
+// the data partition comes first: that is how a newer mpquic is tried
+// without a new image.
+func mpquicPrograms(dataDir string) []string {
+	list := []string{filepath.Join(dataDir, "bin", "mpquic"), "/usr/lib/porter/mpquic"}
+	if p := os.Getenv("PORTER_MPQUIC"); p != "" {
+		list = append([]string{p}, list...)
+	}
+	return list
+}
+
 func releaseURL() string {
 	if u := os.Getenv("PORTER_UPDATE_URL"); u != "" {
 		return u
@@ -116,7 +127,8 @@ func main() {
 		DHCPHook: hooks[dhcpHook], LeaseHook: hooks[leaseHook],
 		WGUserspace: *wgImpl, GeoIPPath: *geoPath, Version: version, BuildTime: time.Unix(bt, 0),
 		Update: updater, UpdateURL: releaseURL(), UpdateSettle: 45 * time.Second,
-		Log: log, Logs: ring,
+		MPQUIC: mpquicPrograms(*dataDir),
+		Log:    log, Logs: ring,
 	})
 	if err != nil {
 		log.Error("startup", "err", err)

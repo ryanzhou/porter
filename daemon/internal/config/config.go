@@ -240,9 +240,42 @@ type VPN struct {
 	Enabled bool   `json:"enabled"`
 	// KillSwitch drops traffic assigned to this VPN while the tunnel is
 	// down instead of letting it leave directly.
-	KillSwitch bool      `json:"kill_switch"`
-	WireGuard  WireGuard `json:"wireguard"`
+	KillSwitch bool `json:"kill_switch"`
+	// Type says which of the two sections below describes the tunnel:
+	// VPNWireGuard (also when empty) or VPNMPQUIC.
+	Type      string    `json:"type"`
+	WireGuard WireGuard `json:"wireguard"`
+	MPQUIC    MPQUIC    `json:"mpquic"`
 }
+
+const (
+	VPNWireGuard = "wireguard"
+	VPNMPQUIC    = "mpquic"
+)
+
+// MPQUIC is a multipath QUIC tunnel to an "mpquic remote". The router
+// runs "mpquic local" for it and reaches that over a WireGuard interface
+// of its own, so that rules, the kill switch and DNS work as they do for
+// any other VPN.
+type MPQUIC struct {
+	// Servers are the paths to the remote: its own address and any
+	// relays, each host or host:port.
+	Servers []string `json:"servers"`
+	// Port is used for servers given without one.
+	Port     int    `json:"port"`
+	Password string `json:"password"`
+	// DNS servers to use through the tunnel.
+	DNS []string `json:"dns"`
+	// Up and Down are the rates of the line the router is on, if known,
+	// such as "19mbit". Empty lets mpquic measure.
+	Up   string `json:"up"`
+	Down string `json:"down"`
+	// ReliableUDP carries UDP over streams instead of datagrams.
+	ReliableUDP bool `json:"reliable_udp"`
+}
+
+// DefaultMPQUICPort is mpquic's (and Shadowsocks') usual port.
+const DefaultMPQUICPort = 8388
 
 type WireGuard struct {
 	PrivateKey string   `json:"private_key"`

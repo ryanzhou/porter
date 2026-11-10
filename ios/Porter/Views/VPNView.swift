@@ -71,6 +71,9 @@ private struct VPNProfileRow: View {
     private var detail: String {
         guard let status else { return "Off" }
         var parts: [String] = [vpnStateLabel(status)]
+        if status.isMPQUIC, let total = status.of, total > 0 {
+            parts.append("\(status.paths ?? 0)/\(total) paths")
+        }
         if status.state == "up" {
             parts.append("↓ " + formatBytes(UInt64(clamping: status.rx)))
             parts.append("↑ " + formatBytes(UInt64(clamping: status.tx)))
@@ -143,7 +146,11 @@ struct VPNDetailView: View {
                     Text("The kill switch stops this VPN's traffic while the tunnel is down.")
                 }
                 VPNLiveSection(status: model.status?.vpns.first(where: { $0.id == profileID }))
-                WireGuardSummarySection(wireguard: profile.wireguard)
+                if profile.isMPQUIC {
+                    MPQUICSummarySection(profileID: profileID, mpquic: profile.mpquic ?? MPQUICConfig())
+                } else {
+                    WireGuardSummarySection(wireguard: profile.wireguard)
+                }
                 Section {
                     ConfirmedButton(
                         title: "Delete VPN",
@@ -223,11 +230,15 @@ private struct VPNLiveSection: View {
                     Spacer()
                 }
                 .padding(.vertical, 4)
-                if let endpoint = status.endpoint, !endpoint.isEmpty {
-                    LabeledContent("Endpoint", value: endpoint)
-                }
-                if let handshake = status.handshake, handshake > 0 {
-                    LabeledContent("Handshake", value: relativeTime(handshake))
+                if status.isMPQUIC {
+                    LabeledContent("Paths", value: "\(status.paths ?? 0) of \(status.of ?? 0)")
+                } else {
+                    if let endpoint = status.endpoint, !endpoint.isEmpty {
+                        LabeledContent("Endpoint", value: endpoint)
+                    }
+                    if let handshake = status.handshake, handshake > 0 {
+                        LabeledContent("Handshake", value: relativeTime(handshake))
+                    }
                 }
             }
         }
@@ -253,12 +264,134 @@ private struct WireGuardSummarySection: View {
     }
 }
 
+/// What an MPQUIC profile is made of, as form sections. Used when adding
+/// one and when changing one.
+private struct MPQUICFields: View {
+    @Binding var config: MPQUICConfig
+
+    var body: some View {
+        StringListEditor(
+            title: "Servers",
+            items: $config.servers,
+            placeholder: "server.example.com:8388",
+            keyboard: .URL,
+            footer: "The server, then any relays. One path each."
+        )
+        Section("Password") {
+            TextField("Password", text: $config.password)
+                .font(.body.monospaced())
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        }
+        Section {
+            RateField(label: "Download", text: $config.down, example: "95mbit")
+            RateField(label: "Upload", text: $config.up, example: "19mbit")
+        } header: {
+            Text("This line")
+        } footer: {
+            Text("A little under the real rates. Empty measures them.")
+        }
+        Section {
+            Toggle("Reliable UDP", isOn: $config.reliableUdp)
+        }
+    }
+}
+
+private struct RateField: View {
+    let label: String
+    @Binding var text: String
+    let example: String
+
+    var body: some View {
+        LabeledContent(label) {
+            TextField(label, text: $text, prompt: Text(verbatim: example))
+                .multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        }
+    }
+}
+
+private func usable(_ config: MPQUICConfig) -> Bool {
+    !config.servers.isEmpty && config.password.count >= 8
+}
+
+/// An MPQUIC profile's settings, with a way to change them.
+private struct MPQUICSummarySection: View {
+    let profileID: String
+    let mpquic: MPQUICConfig
+
+    var body: some View {
+        Section("MPQUIC") {
+            ForEach(Array(mpquic.servers.enumerated()), id: \.offset) { item in
+                LabeledContent(item.offset == 0 ? "Server" : "Relay", value: item.element)
+            }
+            if !mpquic.down.isEmpty || !mpquic.up.isEmpty {
+                LabeledContent("Line", value: "↓ " + (mpquic.down.isEmpty ? "–" : mpquic.down) + "  ↑ " + (mpquic.up.isEmpty ? "–" : mpquic.up))
+            }
+            NavigationLink("Change") {
+                MPQUICEditPage(profileID: profileID, initial: mpquic)
+            }
+        }
+    }
+}
+
+private struct MPQUICEditPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let profileID: String
+    let initial: MPQUICConfig
+
+    @State private var draft = MPQUICConfig()
+    @State private var loaded = false
+    @State private var saving = false
+
+    var body: some View {
+        Form {
+            MPQUICFields(config: $draft)
+        }
+        .navigationTitle("MPQUIC")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") { save() }
+                    .disabled(!loaded || saving || draft == initial || !usable(draft))
+            }
+        }
+        .onAppear {
+            if !loaded {
+                loaded = true
+                draft = initial
+            }
+        }
+    }
+
+    private func save() {
+        let id = profileID
+        let next = draft
+        saving = true
+        Task {
+            let ok = await model.update { cfg in
+                if let index = cfg.vpns.firstIndex(where: { $0.id == id }) {
+                    cfg.vpns[index].mpquic = next
+                }
+            }
+            saving = false
+            if ok {
+                dismiss()
+            }
+        }
+    }
+}
+
 private struct AddVPNSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
+    @State private var kind: String = "wireguard"
     @State private var name: String = ""
     @State private var conf: String = ""
+    @State private var mpquic = MPQUICConfig()
     @State private var importing = false
     @State private var importProblem: String = ""
     @State private var working = false
@@ -266,14 +399,50 @@ private struct AddVPNSheet: View {
     private var cleanName: String { name.trimmingCharacters(in: .whitespaces) }
 
     private var canAdd: Bool {
-        !working && !cleanName.isEmpty && !conf.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !working, !cleanName.isEmpty else { return false }
+        if kind == "mpquic" { return usable(mpquic) }
+        return !conf.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
         Form {
+            Section {
+                Picker("Kind", selection: $kind) {
+                    Text("WireGuard").tag("wireguard")
+                    Text("MPQUIC").tag("mpquic")
+                }
+                .pickerStyle(.segmented)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+            }
             Section("Name") {
                 TextField("Name", text: $name)
             }
+            if kind == "mpquic" {
+                MPQUICFields(config: $mpquic)
+            } else {
+                wireguardSection
+            }
+        }
+        .navigationTitle("Add VPN")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") { dismiss() }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Add") { add() }
+                    .disabled(!canAdd)
+            }
+        }
+        .fileImporter(
+            isPresented: $importing,
+            allowedContentTypes: [UTType.data, UTType.text],
+            onCompletion: { result in handleImport(result) }
+        )
+    }
+
+    private var wireguardSection: some View {
             Section {
                 TextEditor(text: $conf)
                     .font(.footnote.monospaced())
@@ -303,23 +472,6 @@ private struct AddVPNSheet: View {
             } header: {
                 Text("WireGuard .conf")
             }
-        }
-        .navigationTitle("Add VPN")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }
-            }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Add") { add() }
-                    .disabled(!canAdd)
-            }
-        }
-        .fileImporter(
-            isPresented: $importing,
-            allowedContentTypes: [UTType.data, UTType.text],
-            onCompletion: { result in handleImport(result) }
-        )
     }
 
     private func handleImport(_ result: Result<URL, Error>) {
@@ -347,6 +499,19 @@ private struct AddVPNSheet: View {
         let text = conf
         let profileName = cleanName
         working = true
+        if kind == "mpquic" {
+            let profile = VPNProfile(id: AppModel.newID(), name: profileName, enabled: true, killSwitch: true, mpquic: mpquic)
+            Task {
+                let ok = await model.update { cfg in
+                    cfg.vpns.append(profile)
+                }
+                working = false
+                if ok {
+                    dismiss()
+                }
+            }
+            return
+        }
         Task {
             let parsed: WireGuardConfig? = await model.fetch { try await $0.parseWireGuard(conf: text) }
             guard let wireguard = parsed else {
