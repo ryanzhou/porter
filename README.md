@@ -157,8 +157,18 @@ With a Pi 5, a suggested order, each step building on the last:
    which path each connection took.
 
 If the app cannot reach the router, everything the app does can also be
-done from the debug shell: `porterctl config` prints the configuration
-and `porterctl call config.set '{"config": ...}'` writes it.
+done from the debug shell. First-time setup, for example:
+
+```bash
+porterctl config | sed -e 's/"country": ""/"country": "AU"/' -e 's/"ssid": ""/"ssid": "PorterTest"/' -e 's/"passphrase": ""/"passphrase": "choose-a-password"/' > /tmp/c.json
+```
+
+```bash
+porterctl call config.set "{\"config\": $(cat /tmp/c.json)}"
+```
+
+In general `porterctl config` prints the configuration, and writing an
+edited copy back with `config.set` applies it.
 
 ## Build
 
