@@ -47,6 +47,17 @@ func (c *Config) Normalize() {
 	for i := range c.DNS.Blocked {
 		c.DNS.Blocked[i] = NormalizeDomain(c.DNS.Blocked[i])
 	}
+	for i := range c.DNS.Adblock.Allow {
+		c.DNS.Adblock.Allow[i] = NormalizeDomain(c.DNS.Adblock.Allow[i])
+	}
+	for i := range c.DNS.Adblock.Lists {
+		c.DNS.Adblock.Lists[i] = strings.TrimSpace(c.DNS.Adblock.Lists[i])
+	}
+	// Switching ad blocking on should just work: there is always a list
+	// to start from.
+	if len(c.DNS.Adblock.Lists) == 0 && !c.DNS.Adblock.Enabled {
+		c.DNS.Adblock.Lists = []string{DefaultBlockList}
+	}
 	if c.WAN.WifiMAC.Mode == MACRandom && c.WAN.WifiMAC.Address == "" {
 		c.WAN.WifiMAC.Address = RandomMAC()
 	}
@@ -416,6 +427,32 @@ func (c *Config) validateDNS() error {
 	for _, d := range c.DNS.Blocked {
 		if !validDomain(d) {
 			return fmt.Errorf("blocked domain %q is not valid", d)
+		}
+	}
+	ab := c.DNS.Adblock
+	if ab.Enabled && len(ab.Lists) == 0 {
+		return fmt.Errorf("ad blocking needs at least one block list")
+	}
+	if len(ab.Lists) > 16 {
+		return fmt.Errorf("at most 16 block lists")
+	}
+	seen := map[string]bool{}
+	for _, raw := range ab.Lists {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || len(raw) > 512 || !printable(raw) {
+			return fmt.Errorf("block list %q is not an http:// or https:// URL", raw)
+		}
+		if seen[raw] {
+			return fmt.Errorf("block list %q is listed twice", raw)
+		}
+		seen[raw] = true
+	}
+	if len(ab.Allow) > 1000 {
+		return fmt.Errorf("too many allowed domains")
+	}
+	for _, d := range ab.Allow {
+		if !validDomain(d) {
+			return fmt.Errorf("allowed domain %q is not valid", d)
 		}
 	}
 	return nil

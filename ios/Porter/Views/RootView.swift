@@ -71,6 +71,8 @@ struct DemoScreen: View {
             NavigationStack { FlowsView(mac: "") }
         case "speedtest":
             NavigationStack { SpeedTestView() }
+        case "adblock":
+            NavigationStack { AdblockPage() }
         case "device":
             NavigationStack { DeviceDetailView(mac: model.devices.first?.mac ?? "") }
         default:

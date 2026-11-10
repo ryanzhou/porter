@@ -199,6 +199,9 @@ struct DeviceDetailView: View {
         Section {
             TextField(device.hostname ?? "Name", text: $name)
             Toggle("Pause internet", isOn: pausedBinding)
+            if model.config?.dns.adblock.enabled == true {
+                Toggle("Skip ad blocking", isOn: noAdblockBinding)
+            }
             Picker("Route", selection: routeBinding) {
                 Text(defaultRouteLabel).tag("")
                 ForEach(model.availableActions, id: \.self) { action in
@@ -261,6 +264,13 @@ struct DeviceDetailView: View {
         )
     }
 
+    private var noAdblockBinding: Binding<Bool> {
+        Binding(
+            get: { device?.noAdblock ?? false },
+            set: { value in applyNow { $0.noAdblock = value } }
+        )
+    }
+
     private var routeBinding: Binding<String> {
         Binding(
             get: { device?.route ?? "" },
@@ -296,7 +306,8 @@ struct DeviceDetailView: View {
             name: newName,
             route: current.route,
             paused: current.paused,
-            ip: newIP.isEmpty ? nil : newIP
+            ip: newIP.isEmpty ? nil : newIP,
+            noAdblock: current.noAdblock
         )
         Task { await model.setDevice(settings) }
     }

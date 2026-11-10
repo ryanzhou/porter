@@ -57,7 +57,7 @@ func render(p *Plan, full bool) string {
 			}
 			// The sets always exist so the rules can refer to them; without
 			// a country database they are simply empty and match nothing.
-			w("\t# countries: %s", strings.Join(r.Countries, " "))
+			w("\t# countries: %s (database %s)", strings.Join(r.Countries, " "), p.GeoVersion)
 			w("\tset %s { type ipv4_addr; flags interval; auto-merge; %s}", SetGeo(r.ID, false), elems(g4))
 			w("\tset %s { type ipv6_addr; flags interval; auto-merge; %s}", SetGeo(r.ID, true), elems(g6))
 		}

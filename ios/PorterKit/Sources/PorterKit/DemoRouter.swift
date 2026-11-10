@@ -106,7 +106,8 @@ public enum DemoRouter {
             "prefer_wifi":false,
             "probe":{"url":"http://captive.apple.com/hotspot-detect.html","expect":"Success"}},
      "lan":{"address":"10.83.0.1/24","auto_renumber":true,"lease_minutes":720,"domain":"lan","ipv6":true,"ula_prefix":"fd4c:91a7:20be:1::/64"},
-     "dns":{"upstreams":["tls://9.9.9.9#dns.quad9.net"],"intercept":true,"blocked":["ads.example.net"]},
+     "dns":{"upstreams":["tls://9.9.9.9#dns.quad9.net"],"intercept":true,"blocked":["ads.example.net"],
+            "adblock":{"enabled":true,"lists":["https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"],"allow":["links.example.com"]}},
      "vpns":[{"id":"home","name":"Home","enabled":true,"kill_switch":true,
               "wireguard":{"private_key":"YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=","addresses":["10.8.0.2/32","fd08::2/128"],"dns":["10.8.0.1"],"mtu":0,
                            "peers":[{"public_key":"MDEyMzQ1Njc4OWFiY2RlZmdoaWprbG1ub3BxcnN0dXY=","endpoint":"home.example.net:51820","allowed_ips":["0.0.0.0/0","::/0"],"keepalive":25}]}},
@@ -120,9 +121,9 @@ public enum DemoRouter {
          "dst":{"domains":[],"cidrs":[],"countries":["JP"],"proto":"","ports":[]},"action":"vpn:home"},
         {"id":"smtp","name":"No outgoing mail","enabled":true,"src":{"devices":[],"cidrs":[]},
          "dst":{"domains":[],"cidrs":[],"countries":[],"proto":"tcp","ports":["25"]},"action":"block"}]},
-     "devices":[{"mac":"3c:22:fb:18:7a:c4","name":"Work laptop","route":"vpn:home","paused":false},
-                {"mac":"98:b6:e9:52:1c:d0","name":"Games console","route":"","paused":true},
-                {"mac":"a6:3c:11:5e:90:21","name":"","route":"","paused":false}],
+     "devices":[{"mac":"3c:22:fb:18:7a:c4","name":"Work laptop","route":"vpn:home","paused":false,"no_adblock":true},
+                {"mac":"98:b6:e9:52:1c:d0","name":"Games console","route":"","paused":true,"no_adblock":false},
+                {"mac":"a6:3c:11:5e:90:21","name":"","route":"","paused":false,"no_adblock":false}],
      "speedtest":{"download_url":"https://speed.cloudflare.com/__down?bytes=50000000","upload_url":"https://speed.cloudflare.com/__up"}}
     """
 
@@ -140,17 +141,19 @@ public enum DemoRouter {
          "lan":{"address":"10.83.0.1/24","ula":"fd4c:91a7:20be:1::/64","clients":4},
          "vpns":[{"id":"home","name":"Home","if":"wg-home","state":"up","endpoint":"203.0.113.24:51820","handshake":\(now - 47),"rx":1843200512,"tx":211812352},
                  {"id":"us","name":"Streaming (US)","state":"off","rx":0,"tx":0}],
-         "geoip":{"available":true,"date":"2026-11"}}
+         "geoip":{"available":true,"date":"2026-11"},
+         "adblock":{"enabled":true,"domains":78215,"blocked":1284,
+                    "lists":[{"url":"https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts","domains":78215,"updated":\(now - 21_600)}]}}
         """
     }
 
     static func devices(now: Int64) -> String {
         """
-        [{"mac":"\(phone)","hostname":"iPhone","ipv4":"10.83.0.52","ipv6":["fd4c:91a7:20be:1:1c3a:77ff:fe20:9b01"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_400),"link":"wlan0","signal":-47,"up":412300288,"down":3865470566,"name":"","route":"","paused":false},
-         {"mac":"\(laptop)","hostname":"MacBook-Pro","ipv4":"10.83.0.57","ipv6":["fd4c:91a7:20be:1:8d2:41ff:fe7a:c4e2"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_100),"link":"wlan0","signal":-53,"up":1288490188,"down":9126805504,"name":"Work laptop","route":"vpn:home","paused":false},
-         {"mac":"\(tablet)","hostname":"iPad","ipv4":"10.83.0.61","first_seen":\(now - 12 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 2_700),"link":"wlan0","signal":-61,"up":96468992,"down":2254857830,"name":"","route":"","paused":false},
-         {"mac":"\(reader)","hostname":"kindle","ipv4":"10.83.0.66","first_seen":\(now - 9 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 900),"link":"wlan0","signal":-70,"up":1258291,"down":48234496,"name":"","route":"","paused":false},
-         {"mac":"\(console)","hostname":"Switch","first_seen":\(now - 30 * 86_400),"last_seen":\(now - 3 * 86_400),"online":false,"up":734003200,"down":18146236006,"name":"Games console","route":"","paused":true}]
+        [{"mac":"\(phone)","hostname":"iPhone","ipv4":"10.83.0.52","ipv6":["fd4c:91a7:20be:1:1c3a:77ff:fe20:9b01"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_400),"link":"wlan0","signal":-47,"up":412300288,"down":3865470566,"name":"","route":"","paused":false,"no_adblock":false},
+         {"mac":"\(laptop)","hostname":"MacBook-Pro","ipv4":"10.83.0.57","ipv6":["fd4c:91a7:20be:1:8d2:41ff:fe7a:c4e2"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_100),"link":"wlan0","signal":-53,"up":1288490188,"down":9126805504,"name":"Work laptop","route":"vpn:home","paused":false,"no_adblock":true},
+         {"mac":"\(tablet)","hostname":"iPad","ipv4":"10.83.0.61","first_seen":\(now - 12 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 2_700),"link":"wlan0","signal":-61,"up":96468992,"down":2254857830,"name":"","route":"","paused":false,"no_adblock":false},
+         {"mac":"\(reader)","hostname":"kindle","ipv4":"10.83.0.66","first_seen":\(now - 9 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 900),"link":"wlan0","signal":-70,"up":1258291,"down":48234496,"name":"","route":"","paused":false,"no_adblock":false},
+         {"mac":"\(console)","hostname":"Switch","first_seen":\(now - 30 * 86_400),"last_seen":\(now - 3 * 86_400),"online":false,"up":734003200,"down":18146236006,"name":"Games console","route":"","paused":true,"no_adblock":false}]
         """
     }
 
@@ -225,6 +228,7 @@ public enum DemoRouter {
         [{"t":\(now - 300),"mac":"\(phone)","name":"mybank.example.com","type":"A","path":"direct"},
          {"t":\(now - 240),"mac":"\(phone)","name":"video.cdn.example.net","type":"AAAA","path":"direct"},
          {"t":\(now - 120),"mac":"\(phone)","name":"ads.example.net","type":"A","path":"block"},
+         {"t":\(now - 90),"mac":"\(phone)","name":"metrics.tracker.example","type":"A","path":"adblock"},
          {"t":\(now - 60),"mac":"\(phone)","name":"photos.example.com","type":"A","path":"direct"}]
         """
     }

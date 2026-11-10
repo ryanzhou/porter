@@ -57,8 +57,10 @@ type Plan struct {
 	DefaultMark uint32
 	// Learned holds addresses resolved for domain rules, per set name.
 	Learned map[string][]Elem
-	// Geo returns a country's address ranges in nftables notation.
-	Geo func(country string) (v4, v6 []string)
+	// Geo returns a country's address ranges in nftables notation, and
+	// GeoVersion identifies the database they come from.
+	Geo        func(country string) (v4, v6 []string)
+	GeoVersion string
 }
 
 type PlanVPN struct {
@@ -126,6 +128,7 @@ type Runtime struct {
 	PortalDevs []string
 	Learned    map[string][]Elem
 	Geo        func(country string) (v4, v6 []string)
+	GeoVersion string
 }
 
 // BuildPlan compiles the configuration into a Plan.
@@ -139,6 +142,7 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 		DefaultMark: MarkFor(c, c.Policy.Default),
 		Learned:     rt.Learned,
 		Geo:         rt.Geo,
+		GeoVersion:  rt.GeoVersion,
 	}
 	sort.Strings(p.WANIfs)
 	sort.Strings(p.PortalDevs)

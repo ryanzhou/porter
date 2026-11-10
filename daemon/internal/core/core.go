@@ -10,14 +10,17 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ryanzhou/porter/daemon/internal/adblock"
 	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/devices"
 	"github.com/ryanzhou/porter/daemon/internal/dnsfwd"
@@ -78,9 +81,12 @@ type Core struct {
 	vpn  *vpn.Manager
 	devs *devices.Table
 
-	geo   *geoip.DB
-	flows *flows.Tracker
-	stats *stats.Store
+	geo *geoip.DB
+	ads *adblock.Manager
+	// geoCheck asks the updater to look for a newer country database now.
+	geoCheck chan struct{}
+	flows    *flows.Tracker
+	stats    *stats.Store
 
 	speedMu      sync.Mutex // held while a speed test runs
 	speedHistMu  sync.Mutex
@@ -155,14 +161,15 @@ func New(opt Options) (*Core, error) {
 	if c.pairings, err = proto.LoadPairings(filepath.Join(opt.DataDir, "pairings.json")); err != nil {
 		return nil, fmt.Errorf("pairings: %w", err)
 	}
-	if opt.GeoIPPath != "" {
-		if db, err := geoip.Load(opt.GeoIPPath); err != nil {
-			c.log.Warn("country database not available; country rules will match nothing", "err", err)
-		} else {
-			c.geo = db
-			c.log.Info("country database loaded", "date", db.Date)
-		}
+	// The country database comes with the image and is refreshed into
+	// the data partition; use whichever is newer.
+	if c.geo = geoip.Newest(opt.GeoIPPath, c.geoDataPath()); c.geo == nil {
+		c.log.Warn("no country database yet; country rules match nothing until one is downloaded")
+	} else {
+		c.log.Info("country database loaded", "date", c.geo.Date)
 	}
+	c.geoCheck = make(chan struct{}, 1)
+	c.ads = &adblock.Manager{Log: c.log, Dir: filepath.Join(opt.DataDir, "blocklists")}
 	c.stats = stats.Load(filepath.Join(opt.DataDir, "stats.json"))
 	c.devs = devices.Load(filepath.Join(opt.DataDir, "devices.json"))
 	c.devs.OnTraffic = func(mac string, up, down uint64) { c.stats.Add(mac, up, down, time.Now()) }
@@ -193,7 +200,7 @@ func New(opt Options) (*Core, error) {
 		c.addEvent("device", "New device joined", e.MAC)
 		c.Kick()
 	}
-	c.dns = dnsfwd.New(dnsfwd.Hooks{LookupMAC: c.devs.LookupMAC, Learn: c.fwm.Learn}, c.log)
+	c.dns = dnsfwd.New(dnsfwd.Hooks{LookupMAC: c.devs.LookupMAC, Learn: c.fwm.Learn, AdBlocked: c.ads.Blocked}, c.log)
 	c.lan = &lan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.LeaseHook}
 	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, OnChange: c.Kick}
 	c.vpn = &vpn.Manager{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace, Resolve: c.resolveDirect}
@@ -262,6 +269,8 @@ func (c *Core) Run(ctx context.Context) error {
 	})
 
 	c.reconcile()
+	go c.ads.Run(ctx, c.online)
+	go c.runGeoUpdates(ctx)
 	system.Notify("READY=1")
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
@@ -690,7 +699,7 @@ func (c *Core) reconcile() {
 	for _, u := range uplinks {
 		wanIfs = append(wanIfs, u.If)
 	}
-	plan := fw.BuildPlan(cfg, fw.Runtime{WANIfs: wanIfs, PortalDevs: portalDevs, Geo: c.geo.Ranges})
+	plan := fw.BuildPlan(cfg, fw.Runtime{WANIfs: wanIfs, PortalDevs: portalDevs, Geo: c.geo.Ranges, GeoVersion: c.geo.Version()})
 	flush := false
 	if key := fw.Fingerprint(plan); key != c.planKey {
 		if err := c.fwm.Apply(plan); err != nil {
@@ -744,6 +753,9 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 		Reverse:     map[netip.Addr]string{},
 		Blocked:     dnsfwd.NewSuffixSet(cfg.DNS.Blocked),
 		Rules:       dnsfwd.RulesFrom(cfg),
+		Adblock:     cfg.DNS.Adblock.Enabled,
+		AdAllow:     dnsfwd.NewSuffixSet(cfg.DNS.Adblock.Allow),
+		AdExempt:    map[string]bool{},
 		Paused:      map[string]bool{},
 		DeviceRoute: map[string]string{},
 		Default:     cfg.Policy.Default,
@@ -781,7 +793,11 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 		if d.Route != "" {
 			pol.DeviceRoute[d.MAC] = d.Route
 		}
+		if d.NoAdblock {
+			pol.AdExempt[d.MAC] = true
+		}
 	}
+	c.ads.Configure(cfg.DNS.Adblock.Enabled, cfg.DNS.Adblock.Lists)
 	for _, m := range portalDevs {
 		pol.PortalDevs[m] = true
 	}
@@ -838,6 +854,62 @@ func (c *Core) applySystem(cfg *config.Config) {
 	c.sysKey = key
 	if err := system.SetSSH(c.opt.DataDir, cfg.System.SSH.Enabled, cfg.System.SSH.AuthorizedKeys); err != nil {
 		c.log.Warn("SSH setup", "err", err)
+	}
+}
+
+func (c *Core) geoDataPath() string { return filepath.Join(c.opt.DataDir, "geoip.csv.gz") }
+
+// online reports whether the active uplink reaches the internet. Safe
+// from any goroutine.
+func (c *Core) online() bool {
+	a := wan.Active(c.wan.States())
+	return a != nil && a.Internet == wan.StOnline
+}
+
+// runGeoUpdates keeps the country database current. DB-IP publishes one
+// per month; the router looks for the current month's once it is online,
+// checks that the download is a complete database, and swaps it in.
+func (c *Core) runGeoUpdates(ctx context.Context) {
+	urlTemplate := geoip.URLTemplate
+	minRanges := geoip.MinRanges
+	// Overridable so tests can serve a small database locally.
+	if v := os.Getenv("PORTER_GEOIP_URL"); v != "" {
+		urlTemplate = v
+	}
+	if v, err := strconv.Atoi(os.Getenv("PORTER_GEOIP_MIN")); err == nil {
+		minRanges = v
+	}
+	client := &http.Client{}
+	var lastTry time.Time
+	tick := time.NewTicker(10 * time.Minute)
+	defer tick.Stop()
+	for {
+		forced := false
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		case <-c.geoCheck:
+			forced = true
+		}
+		month := geoip.Month(time.Now())
+		var have string
+		c.do(func() { have = c.geo.Version() })
+		if have >= month || !c.online() || (!forced && time.Since(lastTry) < 12*time.Hour) {
+			continue
+		}
+		lastTry = time.Now()
+		db, notFound, err := geoip.Download(ctx, client, urlTemplate, month, c.geoDataPath(), minRanges)
+		switch {
+		case notFound:
+			c.log.Debug("this month's country database is not published yet", "month", month)
+		case err != nil:
+			c.log.Warn("country database update failed", "err", err)
+		default:
+			c.do(func() { c.geo = db })
+			c.addEvent("update", "Country database updated to "+month, "")
+			c.Kick() // country rules are re-applied with the new ranges
+		}
 	}
 }
 

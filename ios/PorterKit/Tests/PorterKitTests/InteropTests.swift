@@ -129,6 +129,9 @@ final class InteropTests: XCTestCase {
             action: RouteAction.direct.raw)]
         config.wan.wifiMac = MACPolicy(mode: .random, address: nil)
         config.speedtest.uploadUrl = "https://speed.example.net/upload"
+        XCTAssertFalse(config.dns.adblock.enabled)
+        XCTAssertEqual(config.dns.adblock.lists.count, 1) // a default list is ready
+        config.dns.adblock.allow = ["Links.Example.com"]
         let rev = try await router.setConfig(config)
         XCTAssertGreaterThan(rev, config.rev)
 
@@ -140,6 +143,9 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(stored.policy.rules.first?.dst.domains, ["video.example"])
         XCTAssertEqual(stored.policy.rules.first?.dst.countries, ["JP"])
         XCTAssertTrue(stored.speedtest.downloadUrl.hasPrefix("https://"))
+        XCTAssertEqual(stored.dns.adblock.allow, ["links.example.com"])
+        XCTAssertFalse(status.adblock.enabled)
+        try await router.checkForUpdates()
         XCTAssertEqual(stored.vpns.first?.wireguard, wg)
         XCTAssertEqual(stored.wan.wifiMac.mode, .random)
         XCTAssertNotNil(stored.wan.wifiMac.address) // the router picked one
@@ -162,9 +168,9 @@ final class InteropTests: XCTestCase {
         }
 
         // Device settings and events.
-        try await router.setDevice(DeviceSettings(mac: "02:aa:00:00:00:02", name: "Phone", paused: true))
+        try await router.setDevice(DeviceSettings(mac: "02:aa:00:00:00:02", name: "Phone", paused: true, noAdblock: true))
         let devices = try await router.devices()
-        XCTAssertTrue(devices.contains { $0.mac == "02:aa:00:00:00:02" && $0.paused && $0.displayName == "Phone" })
+        XCTAssertTrue(devices.contains { $0.mac == "02:aa:00:00:00:02" && $0.paused && $0.noAdblock && $0.displayName == "Phone" })
 
         var sawStatus = false
         let deadline = Date().addingTimeInterval(10)

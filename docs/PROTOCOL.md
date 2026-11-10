@@ -142,6 +142,7 @@ stas[]     {radio iface state ssid bssid freq signal failed fail_reason}
 lan        {address ula clients}
 vpns[]     {id name if state error endpoint handshake rx tx}
 geoip      {available date}   country database for country rules and flows
+adblock    {enabled domains blocked lists[{url domains updated error}]}
 ```
 
 ### Radios and upstream Wi-Fi
@@ -164,7 +165,7 @@ the network that was refused.
 | Method | Params | Result |
 |--------|--------|--------|
 | `devices.list` | – | `[{mac,hostname,ipv4,ipv6[],first_seen,last_seen,online,online_since,link,signal,up,down,name,route,paused,ip,portal}]` |
-| `device.set` | `{mac,name,route,paused,ip}` | `{}` – replaces the device's settings |
+| `device.set` | `{mac,name,route,paused,ip,no_adblock}` | `{}` – replaces the device's settings |
 | `device.forget` | `{mac}` | `{}` |
 | `device.queries` | `{mac}` | `[{t,mac,name,type,path,failed}]` recent DNS queries |
 
@@ -214,6 +215,7 @@ Profiles are part of the configuration. Helpers:
 | `system.logs` | – | `[string]` |
 | `system.reboot` / `system.poweroff` | – | `{}` |
 | `system.factory_reset` | – | `{}` – erases settings, pairings and the router's key |
+| `updates.check` | – | `{}` – look for newer block lists and a newer country database now |
 
 The app sends `system.set_time` at the start of every session: the Pi has
 no battery-backed clock.

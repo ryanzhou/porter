@@ -13,6 +13,7 @@
 package e2e
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/client"
 	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/fw"
+	"github.com/ryanzhou/porter/daemon/internal/geoip"
 	"github.com/ryanzhou/porter/daemon/internal/vpn"
 )
 
@@ -285,6 +287,7 @@ func TestRouter(t *testing.T) {
 		"dhcp-option=option:dns-server," + ispIP, "dhcp-leasefile=" + filepath.Join(dir, "isp.leases"),
 		"address=/probe.test/" + siteA, "address=/direct.test/" + siteA, "address=/tunnel.test/" + siteB,
 		"address=/dnspath.test/203.0.113.1", "address=/portal.test/" + ispIP,
+		"address=/ads.blocked.test/" + siteA, "address=/tracker.test/" + siteA,
 	}
 	if v6 {
 		// Addresses by router advertisement only.
@@ -311,6 +314,13 @@ func TestRouter(t *testing.T) {
 			}
 		case "/up": // speed test upload
 			io.Copy(io.Discard, r.Body)
+		case "/lists/ads.txt": // a block list, in two of the usual formats
+			fmt.Fprint(w, "# test list\n0.0.0.0 ads.blocked.test\n||tracker.test^\n")
+		case "/geoip/dbip-country-lite-" + geoip.Month(time.Now()) + ".csv.gz":
+			// This month's country database: the second site has "moved".
+			gz := gzip.NewWriter(w)
+			fmt.Fprint(gz, "198.51.100.0,198.51.100.15,AU\n198.51.100.16,198.51.100.31,NZ\n")
+			gz.Close()
 		default:
 			fmt.Fprint(w, host)
 		}
@@ -374,8 +384,11 @@ func TestRouter(t *testing.T) {
 	// "countries".
 	geoFile := filepath.Join(dir, "geoip.csv")
 	os.WriteFile(geoFile, []byte("198.51.100.0,198.51.100.15,AU\n198.51.100.16,198.51.100.31,JP\n2001:db8:200::,2001:db8:200:ffff:ffff:ffff:ffff:ffff,NZ\n"), 0o644)
-	os.WriteFile(geoFile+".date", []byte("2026-11\n"), 0o644)
+	// Dated long ago, so that whatever the updater is offered is newer.
+	os.WriteFile(geoFile+".date", []byte("2000-01\n"), 0o644)
 	os.Setenv("PORTER_SPEEDTEST_DURATION", "1500ms")
+	os.Setenv("PORTER_GEOIP_URL", "http://"+siteA+"/geoip/dbip-country-lite-%s.csv.gz")
+	os.Setenv("PORTER_GEOIP_MIN", "1")
 	args := []string{"netns", "exec", nsRtr, bin, "-data", filepath.Join(dir, "data"), "-run", run, "-no-ble", "-debug", "-geoip", geoFile}
 	if !kernelWG && wgUser != "" {
 		args = append(args, "-wg-userspace", wgUser)
@@ -585,6 +598,69 @@ func TestRouter(t *testing.T) {
 		}
 	})
 
+	t.Run("AdBlocking", func(t *testing.T) {
+		type adStatus struct {
+			Adblock struct {
+				Enabled bool   `json:"enabled"`
+				Domains int    `json:"domains"`
+				Blocked uint64 `json:"blocked"`
+				Lists   []struct {
+					Domains int    `json:"domains"`
+					Error   string `json:"error"`
+				} `json:"lists"`
+			} `json:"adblock"`
+		}
+		// Off by default: nothing is filtered.
+		if a, _, err := lookup(nsC1, router, "ads.blocked.test"); err != nil || a != siteA {
+			t.Fatalf("before enabling: %q %v", a, err)
+		}
+		editConfig(func(cfg *config.Config) {
+			cfg.DNS.Adblock = config.Adblock{Enabled: true, Lists: []string{"http://" + siteA + "/lists/ads.txt"}}
+		})
+		// The router downloads the list by itself and starts blocking.
+		eventually(t, "block list downloaded and in effect", 30*time.Second, func() bool {
+			_, rcode, err := lookup(nsC1, router, "ads.blocked.test")
+			return err == nil && rcode == dns.RcodeNameError
+		})
+		if _, rcode, _ := lookup(nsC1, router, "deep.sub.tracker.test"); rcode != dns.RcodeNameError {
+			t.Errorf("subdomain of an Adblock-style entry not blocked: rcode %d", rcode)
+		}
+		if a, _, err := lookup(nsC1, router, "direct.test"); err != nil || a != siteA {
+			t.Errorf("unlisted name affected: %q %v", a, err)
+		}
+		var st adStatus
+		if err := c.Call("status.get", nil, &st); err != nil || !st.Adblock.Enabled || st.Adblock.Domains != 2 || st.Adblock.Blocked < 2 ||
+			len(st.Adblock.Lists) != 1 || st.Adblock.Lists[0].Domains != 2 || st.Adblock.Lists[0].Error != "" {
+			t.Errorf("ad blocking status: %+v %v", st, err)
+		}
+		// The allow list wins over the block lists.
+		editConfig(func(cfg *config.Config) { cfg.DNS.Adblock.Allow = []string{"tracker.test"} })
+		eventually(t, "allowed domain resolving again", 10*time.Second, func() bool {
+			a, _, err := lookup(nsC1, router, "deep.sub.tracker.test")
+			return err == nil && a == siteA
+		})
+		// A device can be exempted; others stay filtered.
+		if err := c.Call("device.set", config.Device{MAC: mac2, NoAdblock: true}, nil); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "exempt device unfiltered", 10*time.Second, func() bool {
+			a, _, err := lookup(nsC2, router, "ads.blocked.test")
+			return err == nil && a == siteA
+		})
+		if _, rcode, _ := lookup(nsC1, router, "ads.blocked.test"); rcode != dns.RcodeNameError {
+			t.Errorf("other device no longer filtered: rcode %d", rcode)
+		}
+		// Back to the defaults for the tests that follow.
+		if err := c.Call("device.set", config.Device{MAC: mac2}, nil); err != nil {
+			t.Fatal(err)
+		}
+		editConfig(func(cfg *config.Config) { cfg.DNS.Adblock.Enabled, cfg.DNS.Adblock.Allow = false, nil })
+		eventually(t, "filtering off again", 10*time.Second, func() bool {
+			a, _, err := lookup(nsC1, router, "ads.blocked.test")
+			return err == nil && a == siteA
+		})
+	})
+
 	type speedResult struct {
 		Via       string  `json:"via"`
 		LatencyMs float64 `json:"latency_ms"`
@@ -713,7 +789,7 @@ func TestRouter(t *testing.T) {
 				Date      string `json:"date"`
 			} `json:"geoip"`
 		}
-		if err := c.Call("status.get", nil, &st0); err != nil || !st0.GeoIP.Available || st0.GeoIP.Date != "2026-11" {
+		if err := c.Call("status.get", nil, &st0); err != nil || !st0.GeoIP.Available || st0.GeoIP.Date != "2000-01" {
 			t.Errorf("country database status: %+v %v", st0, err)
 		}
 		editConfig(func(cfg *config.Config) {
@@ -826,6 +902,34 @@ func TestRouter(t *testing.T) {
 			got, err := httpGet(nsC2, "http://"+siteA+"/ip")
 			return err == nil && got == wanIP
 		})
+	})
+
+	t.Run("CountryDatabaseUpdate", func(t *testing.T) {
+		month := geoip.Month(time.Now())
+		type geoStatus struct {
+			GeoIP struct {
+				Date string `json:"date"`
+			} `json:"geoip"`
+		}
+		if err := c.Call("updates.check", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "this month's country database fetched and in use", 30*time.Second, func() bool {
+			var st geoStatus
+			c.Call("status.get", nil, &st)
+			return st.GeoIP.Date == month
+		})
+		// The new data is what is used from here on: the second site is
+		// now attributed to its new country.
+		eventually(t, "new connections labelled from the new database", 30*time.Second, func() bool {
+			httpGet(nsC1, "http://"+siteB+"/ip")
+			_, ok := findFlow(mac1, siteB, func(f flow) bool { return f.Country == "NZ" })
+			return ok
+		})
+		// And it was stored, so it survives a restart.
+		if got := geoip.ReadDate(filepath.Join(dir, "data", "geoip.csv.gz")); got != month {
+			t.Errorf("stored database date: %q, want %q", got, month)
+		}
 	})
 
 	t.Run("Events", func(t *testing.T) {

@@ -44,6 +44,7 @@ func TestRender(t *testing.T) {
 	p := BuildPlan(c, Runtime{
 		WANIfs:     []string{"eth0", "wlan1"},
 		PortalDevs: []string{"02:00:00:00:00:09"},
+		GeoVersion: "2026-11",
 		Geo: func(cc string) ([]string, []string) {
 			switch cc {
 			case "JP":
@@ -83,7 +84,7 @@ func TestRender(t *testing.T) {
 	// The fingerprint names the countries but carries none of their ranges,
 	// and changes when the countries do.
 	fp := Fingerprint(p)
-	if strings.Contains(fp, "198.51.100.0-") || !strings.Contains(fp, "# countries: JP NZ") {
+	if strings.Contains(fp, "198.51.100.0-") || !strings.Contains(fp, "# countries: JP NZ (database 2026-11)") {
 		t.Errorf("fingerprint wrong:\n%s", fp)
 	}
 	if strings.Contains(out, "r_r4") {

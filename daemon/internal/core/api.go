@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanzhou/porter/daemon/internal/adblock"
 	"github.com/ryanzhou/porter/daemon/internal/ble"
 	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/devices"
@@ -258,6 +259,7 @@ type Status struct {
 	LAN      LANStatus        `json:"lan"`
 	VPNs     []VPNStatus      `json:"vpns"`
 	GeoIP    GeoIPStatus      `json:"geoip"`
+	Adblock  adblock.Status   `json:"adblock"`
 }
 
 // GeoIPStatus says whether country rules and country display can work.
@@ -300,6 +302,7 @@ func (c *Core) status() Status {
 	if c.geo != nil {
 		st.GeoIP = GeoIPStatus{Available: true, Date: c.geo.Date}
 	}
+	st.Adblock = c.ads.Status()
 	if a := wan.Active(states); a != nil {
 		st.Internet, st.Active = a.Internet, a.If
 		if a.Internet == wan.StCaptive {
@@ -339,6 +342,7 @@ func (c *Core) publishStatus() {
 	st := c.status()
 	stable := st
 	stable.Time, stable.Uptime, stable.Temp = 0, 0, 0
+	stable.Adblock.Blocked = 0
 	stable.VPNs = append([]VPNStatus(nil), st.VPNs...)
 	for i := range stable.VPNs {
 		stable.VPNs[i].Rx, stable.VPNs[i].Tx, stable.VPNs[i].Handshake = 0, 0, 0
@@ -378,6 +382,8 @@ type DeviceView struct {
 	Paused bool   `json:"paused"`
 	IP     string `json:"ip,omitempty"` // reserved address
 	Portal bool   `json:"portal,omitempty"`
+	// NoAdblock: the device is exempt from ad blocking.
+	NoAdblock bool `json:"no_adblock"`
 }
 
 // RadioView is a radio's hardware description and configured role.
@@ -595,13 +601,13 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 				seen[e.MAC] = true
 				v := DeviceView{Entry: e, Portal: e.MAC == c.portalDev}
 				if d := c.cfg.Device(e.MAC); d != nil {
-					v.Name, v.Route, v.Paused, v.IP = d.Name, d.Route, d.Paused, d.IP
+					v.Name, v.Route, v.Paused, v.IP, v.NoAdblock = d.Name, d.Route, d.Paused, d.IP, d.NoAdblock
 				}
 				out = append(out, v)
 			}
 			for _, d := range c.cfg.Devices {
 				if !seen[d.MAC] {
-					out = append(out, DeviceView{Entry: devices.Entry{MAC: d.MAC}, Name: d.Name, Route: d.Route, Paused: d.Paused, IP: d.IP})
+					out = append(out, DeviceView{Entry: devices.Entry{MAC: d.MAC}, Name: d.Name, Route: d.Route, Paused: d.Paused, IP: d.IP, NoAdblock: d.NoAdblock})
 				}
 			}
 		})
@@ -617,7 +623,7 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		}
 		p.MAC = strings.ToLower(p.MAC)
 		return nil, c.edit(func(cfg *config.Config) error {
-			empty := p.Name == "" && p.Route == "" && !p.Paused && p.IP == ""
+			empty := p.Name == "" && p.Route == "" && !p.Paused && p.IP == "" && !p.NoAdblock
 			for i := range cfg.Devices {
 				if cfg.Devices[i].MAC == p.MAC {
 					if empty {
@@ -861,6 +867,16 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 			}
 		}
 		c.sessMu.Unlock()
+		return nil, nil
+
+	case "updates.check":
+		// Looks for newer block lists and a newer country database now,
+		// instead of at the next scheduled check.
+		c.ads.RefreshNow()
+		select {
+		case c.geoCheck <- struct{}{}:
+		default:
+		}
 		return nil, nil
 
 	case "events.list":

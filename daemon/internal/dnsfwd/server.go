@@ -21,6 +21,8 @@ type Hooks struct {
 	// Learn installs resolved addresses for a domain rule before the
 	// answer is released.
 	Learn func(ruleID string, addrs []netip.Addr, ttl time.Duration) error
+	// AdBlocked reports whether a name is on the ad block lists.
+	AdBlocked func(name string) bool
 }
 
 // Query is one entry of the recent-queries log.
@@ -29,7 +31,7 @@ type Query struct {
 	MAC    string `json:"mac"`
 	Name   string `json:"name"`
 	Type   string `json:"type"`
-	Path   string `json:"path"` // "direct", "wan", "vpn:<id>", "block", "local", "refuse"
+	Path   string `json:"path"` // "direct", "wan", "vpn:<id>", "block", "adblock", "local", "refuse"
 	Failed bool   `json:"failed,omitempty"`
 }
 
@@ -243,6 +245,15 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	}
 	if p.Blocked.Match(name) {
 		entry.Path = "block"
+		reply(w, req, dns.RcodeNameError)
+		return
+	}
+	// Ad blocking applies to client devices only: not to the router's
+	// own lookups, not to a device signing in to a captive portal (portals
+	// lean on domains that block lists carry), not to exempted devices.
+	if p.Adblock && !own && s.hooks.AdBlocked != nil && !p.PortalDevs[mac] && !p.AdExempt[mac] &&
+		!p.AdAllow.Match(name) && s.hooks.AdBlocked(name) {
+		entry.Path = "adblock"
 		reply(w, req, dns.RcodeNameError)
 		return
 	}

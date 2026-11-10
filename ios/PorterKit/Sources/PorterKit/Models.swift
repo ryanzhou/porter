@@ -132,6 +132,16 @@ public struct DNSConfig: Codable, Equatable {
     public var upstreams: [String]
     public var intercept: Bool
     public var blocked: [String]
+    public var adblock: AdblockConfig
+}
+
+/// DNS-level ad and tracker blocking from downloadable block lists.
+public struct AdblockConfig: Codable, Equatable {
+    public var enabled: Bool
+    /// URLs of block lists (hosts, plain-domain or Adblock format).
+    public var lists: [String]
+    /// Domains that are never blocked, whatever the lists say.
+    public var allow: [String]
 }
 
 public struct VPNProfile: Codable, Equatable, Identifiable {
@@ -245,14 +255,17 @@ public struct DeviceSettings: Codable, Equatable, Identifiable {
     public var route: String
     public var paused: Bool
     public var ip: String?
+    /// Exempts the device from ad blocking.
+    public var noAdblock: Bool
     public var id: String { mac }
 
-    public init(mac: String, name: String = "", route: String = "", paused: Bool = false, ip: String? = nil) {
+    public init(mac: String, name: String = "", route: String = "", paused: Bool = false, ip: String? = nil, noAdblock: Bool = false) {
         self.mac = mac
         self.name = name
         self.route = route
         self.paused = paused
         self.ip = ip
+        self.noAdblock = noAdblock
     }
 }
 
@@ -277,6 +290,25 @@ public struct RouterStatus: Codable, Equatable {
     public var lan: LANStatus
     public var vpns: [VPNStatus]
     public var geoip: GeoIPStatus
+    public var adblock: AdblockStatus
+}
+
+public struct AdblockStatus: Codable, Equatable {
+    public var enabled: Bool
+    /// Domains on the block lists in use.
+    public var domains: Int
+    /// Lookups blocked since the router started.
+    public var blocked: UInt64
+    public var lists: [BlockListStatus]
+}
+
+public struct BlockListStatus: Codable, Equatable, Identifiable {
+    public var url: String
+    public var domains: Int
+    /// When the copy in use was last downloaded or confirmed current.
+    public var updated: Int64?
+    public var error: String?
+    public var id: String { url }
 }
 
 /// The country database country rules and flow listings rely on.
@@ -451,6 +483,7 @@ public struct DeviceInfo: Codable, Equatable, Identifiable {
     public var paused: Bool
     public var ip: String?
     public var portal: Bool?
+    public var noAdblock: Bool
     public var id: String { mac }
 
     /// The name to show: the user's, else the device's own, else its MAC.
@@ -461,7 +494,7 @@ public struct DeviceInfo: Codable, Equatable, Identifiable {
     }
 
     public var settings: DeviceSettings {
-        DeviceSettings(mac: mac, name: name, route: route, paused: paused, ip: ip)
+        DeviceSettings(mac: mac, name: name, route: route, paused: paused, ip: ip, noAdblock: noAdblock)
     }
 }
 
@@ -609,6 +642,9 @@ public extension RouterConnection {
     /// Runs a speed test from the router; takes about 20 seconds.
     func runSpeedTest(via: String = "direct") async throws -> SpeedTestResult { try await call("speedtest.run", ["via": via]) }
     func speedTestHistory() async throws -> [SpeedTestResult] { try await call("speedtest.history") }
+
+    /// Looks for newer block lists and a newer country database now.
+    func checkForUpdates() async throws { try await run("updates.check") }
 
     func activity() async throws -> [ActivityEvent] { try await call("events.list") }
     func logs() async throws -> [String] { try await call("system.logs") }

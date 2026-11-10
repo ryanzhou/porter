@@ -20,7 +20,12 @@ type Policy struct {
 	Reverse map[netip.Addr]string
 
 	Blocked SuffixSet
-	Rules   []Rule
+	// Adblock turns on block-list filtering (Hooks.AdBlocked), except for
+	// names in AdAllow and devices in AdExempt.
+	Adblock  bool
+	AdAllow  SuffixSet
+	AdExempt map[string]bool
+	Rules    []Rule
 	// Paused devices are refused outright.
 	Paused map[string]bool
 	// DeviceRoute holds per-device actions; Default applies otherwise.

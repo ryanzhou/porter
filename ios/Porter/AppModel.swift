@@ -318,7 +318,9 @@ final class AppModel: ObservableObject {
         case .direct: return "Direct"
         case .block: return "Blocked"
         case .vpn(let id): return vpnName(id)
-        case nil: return raw.isEmpty ? "Default" : raw
+        case nil:
+            if raw == "adblock" { return "Ad blocked" }
+            return raw.isEmpty ? "Default" : raw
         }
     }
 

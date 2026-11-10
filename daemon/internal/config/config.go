@@ -182,7 +182,23 @@ type DNS struct {
 	Intercept bool `json:"intercept"`
 	// Blocked domains (and their subdomains) resolve to nothing.
 	Blocked []string `json:"blocked"`
+	Adblock Adblock  `json:"adblock"`
 }
+
+// Adblock blocks advertising and tracking domains using block lists the
+// router downloads and keeps up to date.
+type Adblock struct {
+	Enabled bool `json:"enabled"`
+	// Lists are URLs of block lists in hosts, plain-domain or Adblock
+	// format.
+	Lists []string `json:"lists"`
+	// Allow lists domains (with their subdomains) that are never blocked,
+	// whatever the lists say.
+	Allow []string `json:"allow"`
+}
+
+// DefaultBlockList is used until the user chooses otherwise.
+const DefaultBlockList = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
 
 type VPN struct {
 	ID      string `json:"id"`
@@ -278,6 +294,8 @@ type Device struct {
 	Paused bool `json:"paused"`
 	// IP reserves a fixed IPv4 address inside the LAN subnet.
 	IP string `json:"ip,omitempty"`
+	// NoAdblock exempts the device from ad blocking.
+	NoAdblock bool `json:"no_adblock"`
 }
 
 // Default returns the configuration of a freshly flashed router: wired WAN,
@@ -308,7 +326,7 @@ func Default() *Config {
 			IPv6:         true,
 			ULAPrefix:    randomULA(),
 		},
-		DNS:       DNS{Intercept: true},
+		DNS:       DNS{Intercept: true, Adblock: Adblock{Lists: []string{DefaultBlockList}}},
 		Policy:    Policy{Default: ActDirect},
 		SpeedTest: DefaultSpeedTest(),
 	}

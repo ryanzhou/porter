@@ -53,6 +53,11 @@ private struct RouterSettingsSection: View {
             }
             NavigationLink("DNS") { DNSPage() }
             NavigationLink {
+                AdblockPage()
+            } label: {
+                LabeledContent("Ad blocking", value: model.config?.dns.adblock.enabled == true ? "On" : "Off")
+            }
+            NavigationLink {
                 SSHPage()
             } label: {
                 LabeledContent("SSH", value: model.config?.system.ssh.enabled == true ? "On" : "Off")

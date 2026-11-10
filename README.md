@@ -67,12 +67,14 @@ plane, no account, no central management and no automatic updates.
 - **Speed test** from the router, directly or through a chosen VPN.
 - **DNS**: forwarding to the upstream network's resolvers or your own
   over plain DNS, DNS-over-TLS or DNS-over-HTTPS; interception of
-  hard-coded resolvers; a block list.
+  hard-coded resolvers; your own blocked domains.
+- **Ad blocking** at the DNS level from downloadable block lists (hosts,
+  plain-domain and Adblock formats), refreshed daily, with an allow list
+  and a per-device opt-out.
 
 Not included (compared with Firewalla's feature set): intrusion
-detection, curated ad/content block lists (they need an online feed),
-OpenVPN/AnyConnect clients, a VPN server, multi-WAN load balancing, and
-WPA-Enterprise upstream networks.
+detection, OpenVPN/AnyConnect clients, a VPN server, multi-WAN load
+balancing, and WPA-Enterprise upstream networks.
 
 ## Install
 
@@ -203,13 +205,21 @@ place if the daemon restarts.
 - **Connectivity check.** To tell a captive portal from a working uplink
   the router fetches one small page every so often (Apple's
   `captive.apple.com`, the same one an iPhone asks).
-- **Country database.** The image build downloads DB-IP's free "IP to
-  Country Lite" database (CC BY 4.0, attribution in the app's About
-  page) and bakes it in; the router never fetches it. It is as old as
-  the image: rebuild to refresh it, or build with `PORTER_NO_GEOIP=1` to
-  leave it out (country rules then match nothing and the app says so).
-  Country data is approximate, and anycast services such as public DNS
-  resolvers are attributed to a single country.
+- **What the router fetches by itself.** Besides NTP and the
+  connectivity check: block lists daily, when ad blocking is on (from
+  the URLs you chose), and DB-IP's free "IP to Country Lite" database
+  monthly (CC BY 4.0, attribution in the app's About page). Each
+  download is checked before it replaces the copy in use, and is kept on
+  the data partition, so both keep working offline and across reboots.
+  The image carries a copy of the country database from build time as
+  the starting point (`PORTER_NO_GEOIP=1` builds without one). The
+  router's own software is never updated this way: that takes a new
+  image.
+- **Country data is approximate**, and anycast services such as public
+  DNS resolvers are attributed to a single country.
+- **Ad blocking is DNS-level.** It stops lookups of listed names; it
+  cannot remove ads served from the same host as the content, and a
+  device using its own encrypted DNS bypasses it.
 - **Speed test.** A speed test has to exchange data with a server on the
   internet. It runs only when started from the app, against the URLs
   under *Settings → Speed test server* (Cloudflare's by default). It
