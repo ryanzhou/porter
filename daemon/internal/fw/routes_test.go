@@ -1,0 +1,115 @@
+package fw
+
+import (
+	"net/netip"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
+)
+
+// inNetns runs the test body inside a fresh network namespace.
+func inNetns(t *testing.T) {
+	t.Helper()
+	if os.Getuid() != 0 {
+		t.Skip("needs root")
+	}
+	runtime.LockOSThread()
+	orig, err := netns.Get()
+	if err != nil {
+		t.Skip("no netns support:", err)
+	}
+	ns, err := netns.New()
+	if err != nil {
+		t.Skip("cannot create netns:", err)
+	}
+	t.Cleanup(func() {
+		netns.Set(orig)
+		ns.Close()
+		orig.Close()
+		runtime.UnlockOSThread()
+	})
+}
+
+func ipOut(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("ip", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ip %v: %v: %s", args, err, out)
+	}
+	return string(out)
+}
+
+func TestSyncRouting(t *testing.T) {
+	inNetns(t)
+	// A veth end stands in for the WireGuard interface.
+	veth := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "wg-home"}, PeerName: "peer0"}
+	if err := netlink.LinkAdd(veth); err != nil {
+		t.Skip("cannot create test link:", err)
+	}
+	for _, n := range []string{"wg-home", "peer0"} {
+		l, _ := netlink.LinkByName(n)
+		if err := netlink.LinkSetUp(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v4only := []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}
+
+	// Tunnel up, IPv4 only, no kill switch: IPv6 must still be backstopped.
+	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: true, Allowed: v4only}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ipOut(t, "route", "show", "table", "110"); !strings.Contains(got, "default dev wg-home") || strings.Contains(got, "unreachable") {
+		t.Errorf("v4 table: %q", got)
+	}
+	v6 := HaveIPv6()
+	ip6 := func() string {
+		if !v6 {
+			return ""
+		}
+		return ipOut(t, "-6", "route", "show", "table", "110")
+	}
+	if got := ip6(); v6 && !strings.Contains(got, "unreachable default") {
+		t.Errorf("v6 table lacks backstop: %q", got)
+	}
+	rules := ipOut(t, "rule", "show")
+	if !strings.Contains(rules, "100:\tfrom all lookup main suppress_prefixlength 0") || !strings.Contains(rules, "110:\tfrom all fwmark 0x10/0xff lookup 110") {
+		t.Errorf("rules: %q", rules)
+	}
+
+	// Tunnel down, no kill switch: table empty so traffic falls back.
+	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: false, Allowed: v4only}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ipOut(t, "route", "show", "table", "110") + ip6(); strings.TrimSpace(got) != "" {
+		t.Errorf("tables should be empty: %q", got)
+	}
+
+	// Kill switch: backstop present up or down, in both families.
+	for _, up := range []bool{false, true} {
+		if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: up, KillSwitch: true, Allowed: v4only}}); err != nil {
+			t.Fatal(err)
+		}
+		v4 := ipOut(t, "route", "show", "table", "110")
+		if !strings.Contains(v4, "unreachable default") || (v6 && !strings.Contains(ip6(), "unreachable default")) {
+			t.Errorf("up=%v: missing backstop: %q %q", up, v4, ip6())
+		}
+		if up != strings.Contains(v4, "default dev wg-home") {
+			t.Errorf("up=%v: tunnel route presence wrong: %q", up, v4)
+		}
+	}
+
+	// Removing the profile removes its rule; idempotent on repeat.
+	for i := 0; i < 2; i++ {
+		if err := SyncRouting(nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rules := ipOut(t, "rule", "show"); strings.Contains(rules, "fwmark") {
+		t.Errorf("stale rule: %q", rules)
+	}
+}

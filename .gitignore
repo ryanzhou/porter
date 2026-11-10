@@ -1,0 +1,10 @@
+/build/
+/daemon/bin/
+*.img
+*.img.xz
+.DS_Store
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.build/
+.swiftpm/
