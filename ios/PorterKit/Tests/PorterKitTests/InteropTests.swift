@@ -115,9 +115,14 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(wg.peers.first?.allowedIps, ["0.0.0.0/0", "::/0"])
         config.system.name = "Swift Test"
         config.system.country = "AU"
-        config.ap.ssid = "Porter Tést"
-        config.ap.passphrase = "correct horse battery"
-        config.ap.security = .wpa2wpa3
+        config.wifi[0].ssid = "Porter Tést"
+        config.wifi[0].passphrase = "correct horse battery"
+        config.wifi[0].security = .wpa2wpa3
+        // A second network with a Wi-Fi name of its own; the router picks
+        // its addresses.
+        config.networks.append(NetworkConfig(id: "guest", name: "Guest", isolated: true, route: RouteAction.direct.raw))
+        config.wifi.append(WifiNetworkConfig(id: "guest", ssid: "Porter Guests", passphrase: "welcome aboard", network: "guest"))
+        config.wan.order = [RouterConfig.uplinkPhone, RouterConfig.uplinkWifi]
         config.dns.upstreams = ["tls://9.9.9.9#dns.quad9.net"]
         config.dns.blocked = ["Ads.Example.com"]
         config.vpns = [VPNProfile(id: "home", name: "Home", enabled: false, killSwitch: true, wireguard: wg)]
@@ -126,18 +131,37 @@ final class InteropTests: XCTestCase {
             id: "r1", name: "Streaming direct",
             src: RuleSource(devices: ["02:aa:00:00:00:01"]),
             dst: RuleDestination(domains: ["*.video.example"], countries: ["jp"], proto: "tcp", ports: ["443", "8000-8100"]),
-            action: RouteAction.direct.raw)]
+            action: RouteAction.direct.raw),
+            PolicyRule(id: "r2", name: "Guests", src: RuleSource(networks: ["guest"]), dst: RuleDestination(ports: ["25"]), action: RouteAction.block.raw)]
         config.wan.wifiMac = MACPolicy(mode: .random, address: nil)
         config.speedtest.uploadUrl = "https://speed.example.net/upload"
         XCTAssertFalse(config.dns.adblock.enabled)
         XCTAssertEqual(config.dns.adblock.lists.count, 1) // a default list is ready
         config.dns.adblock.allow = ["Links.Example.com"]
+        // Asking first what the change would do changes nothing.
+        let check = try await router.checkConfig(config)
+        XCTAssertNil(check.error)
+        let untouched = try await router.config()
+        XCTAssertEqual(untouched.rev, config.rev)
+        XCTAssertEqual(untouched.networks.count, 1)
+        var overlapping = config
+        overlapping.networks[1].address = "10.83.0.129/25"
+        let refused = try await router.checkConfig(overlapping)
+        XCTAssertNotNil(refused.error)
+
         let rev = try await router.setConfig(config)
         XCTAssertGreaterThan(rev, config.rev)
 
         let stored = try await router.config()
         XCTAssertEqual(stored.system.name, "Swift Test")
-        XCTAssertEqual(stored.ap.ssid, "Porter Tést")
+        XCTAssertEqual(stored.wifi.map(\.ssid), ["Porter Tést", "Porter Guests"])
+        XCTAssertEqual(stored.networks.map(\.id), ["lan", "guest"])
+        XCTAssertEqual(stored.networks[1].address, "10.84.0.1/24") // chosen by the router
+        XCTAssertFalse(stored.networks[1].ulaPrefix.isEmpty)
+        XCTAssertEqual(stored.policy.rules.last?.src.networks, ["guest"])
+        // The order asked for, completed by the router with its wired ports.
+        XCTAssertEqual(Array(stored.wan.order.prefix(1)), [RouterConfig.uplinkPhone])
+        XCTAssertTrue(stored.wan.order.contains(RouterConfig.uplinkWifi))
         XCTAssertEqual(stored.dns.blocked, ["ads.example.com"]) // normalised by the router
         XCTAssertEqual(stored.devices.first?.mac, "02:aa:00:00:00:01")
         XCTAssertEqual(stored.policy.rules.first?.dst.domains, ["video.example"])
@@ -158,7 +182,7 @@ final class InteropTests: XCTestCase {
             XCTAssertEqual(error.code, RouterError.conflict)
         }
         var invalid = stored
-        invalid.ap.passphrase = "short"
+        invalid.wifi[0].passphrase = "short"
         do {
             _ = try await router.setConfig(invalid)
             XCTFail("invalid configuration accepted")

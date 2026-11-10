@@ -13,9 +13,13 @@ public struct RouterConfig: Codable, Equatable {
     public var system: SystemConfig
     public var radios: [RadioConfig]
     public var ethernet: [EthernetPort]
-    public var ap: AccessPointConfig
+    /// The Wi-Fi networks the router broadcasts; the first is the main one.
+    public var wifi: [WifiNetworkConfig]
     public var wan: WANConfig
+    /// What all of the router's own networks have in common.
     public var lan: LANConfig
+    /// The router's own networks; the first is the main one.
+    public var networks: [NetworkConfig]
     public var dns: DNSConfig
     public var vpns: [VPNProfile]
     public var policy: PolicyConfig
@@ -66,6 +70,8 @@ public struct EthernetPort: Codable, Equatable, Identifiable {
     /// How the port gets its addresses as an uplink; nil from a router
     /// too old to say, which means automatic.
     public var ip: IPSetup?
+    /// The network a local port belongs to.
+    public var network: String
     public var id: String { name }
 }
 
@@ -109,12 +115,70 @@ public enum WifiSecurity: String, Codable, CaseIterable, Identifiable {
     public var id: String { rawValue }
 }
 
-public struct AccessPointConfig: Codable, Equatable {
+/// One Wi-Fi network the router broadcasts.
+public struct WifiNetworkConfig: Codable, Equatable, Identifiable {
+    public var id: String
     public var ssid: String
     public var passphrase: String
     public var security: WifiSecurity
     public var hidden: Bool
     public var isolate: Bool
+    /// The id of the network its devices join.
+    public var network: String
+    public var enabled: Bool
+
+    public init(id: String, ssid: String = "", passphrase: String = "", security: WifiSecurity = .wpa2, hidden: Bool = false, isolate: Bool = false, network: String = RouterConfig.mainNetwork, enabled: Bool = true) {
+        self.id = id
+        self.ssid = ssid
+        self.passphrase = passphrase
+        self.security = security
+        self.hidden = hidden
+        self.isolate = isolate
+        self.network = network
+        self.enabled = enabled
+    }
+}
+
+/// One of the router's own networks: an address range of its own, reached
+/// through the Wi-Fi networks and wired ports assigned to it.
+public struct NetworkConfig: Codable, Equatable, Identifiable {
+    public var id: String
+    public var name: String
+    /// The router's address with prefix, like 10.83.0.1/24. Left empty
+    /// for a new network, the router chooses one.
+    public var address: String
+    public var ulaPrefix: String
+    /// Its devices cannot open connections to the other networks.
+    public var isolated: Bool
+    /// "", "direct", "block" or "vpn:<id>": where its devices' traffic
+    /// goes unless a rule or the device says otherwise.
+    public var route: String
+
+    public init(id: String, name: String, address: String = "", ulaPrefix: String = "", isolated: Bool = false, route: String = "") {
+        self.id = id
+        self.name = name
+        self.address = address
+        self.ulaPrefix = ulaPrefix
+        self.isolated = isolated
+        self.route = route
+    }
+}
+
+public extension RouterConfig {
+    /// Ids of the Wi-Fi network and the network that always exist.
+    static let mainWifi = "main"
+    static let mainNetwork = "lan"
+    /// How many of each the router accepts.
+    static let maxWifiNetworks = 4
+    static let maxNetworks = 4
+
+    /// Uplink keys, as used in `wan.order`.
+    static let uplinkWifi = "wifi"
+    static let uplinkPhone = "phone"
+    static func uplinkEthernet(_ port: String) -> String { "eth:" + port }
+
+    func network(_ id: String) -> NetworkConfig? { networks.first { $0.id == id } }
+    func networkName(_ id: String) -> String { network(id)?.name ?? id }
 }
 
 public enum MACMode: String, Codable, CaseIterable, Identifiable {
@@ -154,17 +218,17 @@ public struct WANConfig: Codable, Equatable {
     public var networks: [SavedNetwork]
     public var wifiMac: MACPolicy
     public var ethMac: MACPolicy
-    public var preferWifi: Bool
+    /// The uplinks, best first: "eth:<port>", "wifi", "phone". The router
+    /// uses the first that works.
+    public var order: [String]
     public var probe: ProbeConfig
 }
 
 public struct LANConfig: Codable, Equatable {
-    public var address: String
     public var autoRenumber: Bool
     public var leaseMinutes: Int
     public var domain: String
     public var ipv6: Bool
-    public var ulaPrefix: String
 }
 
 public struct DNSConfig: Codable, Equatable {
@@ -315,9 +379,12 @@ public struct PolicyRule: Codable, Equatable, Identifiable {
 public struct RuleSource: Codable, Equatable {
     public var devices: [String]
     public var cidrs: [String]
-    public init(devices: [String] = [], cidrs: [String] = []) {
+    /// Ids of networks: every device on them.
+    public var networks: [String]
+    public init(devices: [String] = [], cidrs: [String] = [], networks: [String] = []) {
         self.devices = devices
         self.cidrs = cidrs
+        self.networks = networks
     }
 }
 
@@ -375,6 +442,11 @@ public struct RouterStatus: Codable, Equatable {
     public var portal: PortalStatus
     public var aps: [AccessPointStatus]
     public var stas: [StationStatus]
+    /// Ids of the Wi-Fi networks that are switched on but that no radio
+    /// is able to carry.
+    public var offAir: [String]
+    /// The wired interfaces that are plugged in, uplinks or not.
+    public var ports: [PortStatus]
     public var lan: LANStatus
     public var vpns: [VPNStatus]
     public var geoip: GeoIPStatus
@@ -406,10 +478,26 @@ public struct GeoIPStatus: Codable, Equatable {
     public var date: String?
 }
 
+/// A wired interface that is plugged in.
+public struct PortStatus: Codable, Equatable, Identifiable {
+    public var name: String
+    /// What a USB device calls itself.
+    public var label: String?
+    /// A phone sharing its connection over USB.
+    public var phone: Bool
+    public var carrier: Bool
+    public var id: String { name }
+}
+
 public struct UplinkStatus: Codable, Equatable, Identifiable {
     public var iface: String
+    /// "eth", "wifi" or "phone".
     public var kind: String
+    /// Its entry in `wan.order`.
+    public var key: String
+    public var label: String?
     public var metric: Int
+    public var rank: Int
     public var carrier: Bool
     public var internet: String
     public var ipv4: String?
@@ -424,7 +512,7 @@ public struct UplinkStatus: Codable, Equatable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case iface = "if"
-        case kind, metric, carrier, internet, ipv4, gateway, ipv6, hasV6, dns, portalUrl, captiveApi, mac
+        case kind, key, label, metric, rank, carrier, internet, ipv4, gateway, ipv6, hasV6, dns, portalUrl, captiveApi, mac
     }
 }
 
@@ -442,12 +530,16 @@ public struct AccessPointStatus: Codable, Equatable, Identifiable {
     public var channel: Int
     public var mode: String?
     public var error: String?
+    /// Ids of the Wi-Fi networks this radio carries.
+    public var ssids: [String]
     public var id: String { radio }
 }
 
 public struct StationStatus: Codable, Equatable, Identifiable {
     public var radio: String
     public var iface: String
+    /// "connected", "connecting" (joining a particular network),
+    /// "scanning" (looking for one it knows) or "disconnected".
     public var state: String
     public var ssid: String?
     public var bssid: String?
@@ -462,6 +554,8 @@ public struct LANStatus: Codable, Equatable {
     public var address: String
     public var ula: String?
     public var clients: Int
+    /// Devices online in each network, by network id.
+    public var networks: [String: Int]
 }
 
 public struct VPNStatus: Codable, Equatable, Identifiable {
@@ -546,8 +640,28 @@ public struct RadioInfo: Codable, Equatable, Identifiable {
     public var ap: Bool
     public var sta: Bool
     public var apSta: Bool
+    /// How many Wi-Fi networks it can broadcast at once, and how many
+    /// while it also joins an upstream network.
+    public var maxAp: Int
+    public var maxApSta: Int
     public var present: Bool
     public var role: RadioRole
+}
+
+/// What applying a configuration would do; the answer to `checkConfig`.
+public struct ConfigCheck: Codable, Equatable {
+    /// Why the router would refuse it; nil when it would not.
+    public var error: String?
+    /// What the hardware cannot do of what is asked.
+    public var notes: [String]
+    /// What people using the router will notice.
+    public var effects: [String]
+
+    public init(error: String? = nil, notes: [String] = [], effects: [String] = []) {
+        self.error = error
+        self.notes = notes
+        self.effects = effects
+    }
 }
 
 public struct ScanResult: Codable, Equatable, Identifiable {
@@ -569,6 +683,8 @@ public struct DeviceInfo: Codable, Equatable, Identifiable {
     public var online: Bool
     public var onlineSince: Int64?
     public var link: String?
+    /// The id of the network the device is on, while it is online.
+    public var network: String?
     public var signal: Int?
     public var up: UInt64
     public var down: UInt64
@@ -736,8 +852,19 @@ public extension RouterConnection {
         return r.rev
     }
 
+    /// Asks what applying a configuration would do, without applying it.
+    func checkConfig(_ config: RouterConfig) async throws -> ConfigCheck {
+        struct Params: Encodable { let config: RouterConfig }
+        return try await call("config.check", Params(config: config))
+    }
+
     func radios() async throws -> [RadioInfo] { try await call("radios.list") }
-    func scanWifi() async throws -> [ScanResult] { try await call("wifi.scan") }
+    /// Upstream networks in range. With `quick`, what the last scan found
+    /// comes back at once and a new scan starts behind it.
+    func scanWifi(quick: Bool = false) async throws -> [ScanResult] { try await call("wifi.scan", ["quick": quick]) }
+    /// Chooses the radio that joins upstream Wi-Fi networks ("" for none);
+    /// the router rearranges the other radios around it.
+    func setWifiUplink(radio: String) async throws { try await run("wifi.uplink", ["radio": radio]) }
     func connectWifi(_ network: SavedNetwork) async throws { try await run("wifi.connect", network) }
     func forgetWifi(ssid: String) async throws { try await run("wifi.forget", ["ssid": ssid]) }
     func newMAC(kind: String) async throws { try await run("wan.new_mac", ["kind": kind]) }

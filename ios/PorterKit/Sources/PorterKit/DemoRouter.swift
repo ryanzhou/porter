@@ -39,6 +39,31 @@ public enum DemoRouter {
                 return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name).utf8)
             case "devices.list":
                 return Data(DemoRouter.devices(now: now).utf8)
+            case "config.check":
+                // The demo has the built-in radio carry the network, which
+                // broadcasts one Wi-Fi network at a time.
+                struct Params: Decodable { let config: RouterConfig }
+                let next = try RouterConnection.makeDecoder().decode(Params.self, from: params).config
+                var check = ConfigCheck()
+                let extra = next.wifi.dropFirst().filter(\.enabled)
+                if let first = extra.first {
+                    check.notes = ["“\(first.ssid)” will not be on air: this radio broadcasts one network at a time. A USB Wi-Fi adapter that can carry several, or a second radio for it, would."]
+                }
+                if next.wifi != config.wifi || next.radios != config.radios {
+                    check.effects = ["Your Wi-Fi restarts. Devices reconnect by themselves within a few seconds."]
+                }
+                return try RouterConnection.makeEncoder().encode(check)
+            case "wifi.uplink":
+                struct Params: Decodable { let radio: String }
+                let radio = try RouterConnection.makeDecoder().decode(Params.self, from: params).radio
+                for index in config.radios.indices {
+                    config.radios[index].role = config.radios[index].id == radio ? .wan : .ap
+                }
+                if !radio.isEmpty, config.radios.count == 1 {
+                    config.radios[0].role = .apWan
+                }
+                config.rev += 1
+                return Data("{}".utf8)
             case "radios.list":
                 return Data(DemoRouter.radiosJSON.utf8)
             case "wifi.scan":
@@ -97,19 +122,22 @@ public enum DemoRouter {
     static let console = "98:b6:e9:52:1c:d0"
 
     static let configJSON = """
-    {"version":1,"rev":12,
+    {"version":2,"rev":12,
      "system":{"name":"Porter","country":"AU","ssh":{"enabled":false,"authorized_keys":[]}},
      "radios":[{"id":"builtin","role":"ap","band":"5","channel":0,"width":0},
                {"id":"usb:9c:ef:d5:12:34:56","role":"wan","band":"","channel":0,"width":0}],
-     "ethernet":[{"name":"eth0","role":"wan"}],
-     "ap":{"ssid":"Porter","passphrase":"correct horse battery","security":"wpa2","hidden":false,"isolate":false},
+     "ethernet":[{"name":"end0","role":"wan","network":"lan"}],
+     "wifi":[{"id":"main","ssid":"Porter","passphrase":"correct horse battery","security":"wpa2","hidden":false,"isolate":false,"network":"lan","enabled":true},
+             {"id":"guest","ssid":"Porter Guest","passphrase":"welcome aboard","security":"wpa2","hidden":false,"isolate":true,"network":"guest","enabled":true}],
      "wan":{"networks":[{"ssid":"Harbour Hotel Guest","psk":"","hidden":false,"priority":3},
                         {"ssid":"Home","psk":"not-a-real-password","hidden":false,"priority":2},
                         {"ssid":"Airport Free WiFi","psk":"","hidden":false,"priority":1}],
             "wifi_mac":{"mode":"random","address":"06:5a:91:c3:7e:12"},"eth_mac":{"mode":"hardware"},
-            "prefer_wifi":false,
+            "order":["eth:end0","wifi","phone"],
             "probe":{"url":"http://captive.apple.com/hotspot-detect.html","expect":"Success"}},
-     "lan":{"address":"10.83.0.1/24","auto_renumber":true,"lease_minutes":720,"domain":"lan","ipv6":true,"ula_prefix":"fd4c:91a7:20be:1::/64"},
+     "lan":{"auto_renumber":true,"lease_minutes":720,"domain":"lan","ipv6":true},
+     "networks":[{"id":"lan","name":"Main","address":"10.83.0.1/24","ula_prefix":"fd4c:91a7:20be:1::/64","isolated":false,"route":""},
+                 {"id":"guest","name":"Guest","address":"10.84.0.1/24","ula_prefix":"fd4c:91a7:20be:2::/64","isolated":true,"route":""}],
      "dns":{"upstreams":["tls://9.9.9.9#dns.quad9.net"],"intercept":true,"blocked":["ads.example.net"],
             "adblock":{"enabled":true,"lists":["https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"],"allow":["links.example.com"]}},
      "vpns":[{"id":"home","name":"Home","enabled":true,"kill_switch":true,
@@ -119,11 +147,11 @@ public enum DemoRouter {
               "wireguard":{"private_key":"enl4d3Z1dHNycXBvbm1sa2ppaGdmZWRjYmE5ODc2NTQ=","addresses":["10.64.0.7/32"],"dns":["10.64.0.1"],"mtu":0,
                            "peers":[{"public_key":"dnV0c3JxcG9ubWxramloZ2ZlZGNiYTk4NzY1NDMyMTA=","endpoint":"us-east.vpn.example.com:51820","allowed_ips":["0.0.0.0/0"],"keepalive":25}]}}],
      "policy":{"default":"direct","rules":[
-        {"id":"bank","name":"Banking stays direct","enabled":true,"src":{"devices":[],"cidrs":[]},
+        {"id":"bank","name":"Banking stays direct","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[]},
          "dst":{"domains":["mybank.example.com","payments.example.org"],"cidrs":[],"countries":[],"proto":"","ports":[]},"action":"direct"},
-        {"id":"jp","name":"Japan through Home","enabled":true,"src":{"devices":[],"cidrs":[]},
+        {"id":"jp","name":"Japan through Home","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[]},
          "dst":{"domains":[],"cidrs":[],"countries":["JP"],"proto":"","ports":[]},"action":"vpn:home"},
-        {"id":"smtp","name":"No outgoing mail","enabled":true,"src":{"devices":[],"cidrs":[]},
+        {"id":"smtp","name":"No outgoing mail","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[]},
          "dst":{"domains":[],"cidrs":[],"countries":[],"proto":"tcp","ports":["25"]},"action":"block"}]},
      "devices":[{"mac":"3c:22:fb:18:7a:c4","name":"Work laptop","route":"vpn:home","paused":false,"no_adblock":true},
                 {"mac":"98:b6:e9:52:1c:d0","name":"Games console","route":"","paused":true,"no_adblock":false},
@@ -136,13 +164,17 @@ public enum DemoRouter {
         return """
         {"name":"\(safeName)","id":"3fa9c210","version":"v1.0.0","time":\(now),"uptime":93784,"temp":51.3,"ready":true,"rev":\(rev),"pairing":false,
          "internet":"online","active":"wlan1",
-         "wan":[{"if":"eth0","kind":"eth","metric":100,"carrier":false,"internet":"down","has_v6":false,"mac":"2c:cf:67:1a:44:90"},
-                {"if":"wlan1","kind":"wifi","metric":200,"carrier":true,"internet":"online","ipv4":"172.20.14.87/22","gateway":"172.20.12.1",
-                 "ipv6":["2001:db8:41:7::9c2f/64"],"has_v6":true,"dns":["172.20.12.1"],"mac":"06:5a:91:c3:7e:12"}],
+         "wan":[{"if":"end0","kind":"eth","key":"eth:end0","metric":100,"rank":0,"carrier":false,"internet":"down","has_v6":false,"mac":"2c:cf:67:1a:44:90"},
+                {"if":"wlan1","kind":"wifi","key":"wifi","metric":200,"rank":1,"carrier":true,"internet":"online","ipv4":"172.20.14.87/22","gateway":"172.20.12.1",
+                 "ipv6":["2001:db8:41:7::9c2f/64"],"has_v6":true,"dns":["172.20.12.1"],"mac":"06:5a:91:c3:7e:12"},
+                {"if":"enx3a1f0c2299d4","kind":"phone","key":"phone","label":"iPhone","metric":300,"rank":2,"carrier":true,"internet":"online","ipv4":"172.20.10.2/28","gateway":"172.20.10.1",
+                 "has_v6":false,"dns":["172.20.10.1"]}],
          "portal":{"captive":false},
-         "aps":[{"radio":"builtin","iface":"wlan0","state":"up","band":"5","channel":36,"mode":"ac/80MHz"}],
+         "aps":[{"radio":"builtin","iface":"wlan0","state":"up","band":"5","channel":36,"mode":"ac/80MHz","ssids":["main"]}],
          "stas":[{"radio":"usb:9c:ef:d5:12:34:56","iface":"wlan1","state":"connected","ssid":"Harbour Hotel Guest","bssid":"7c:10:c9:2b:55:e0","freq":5220,"signal":-58}],
-         "lan":{"address":"10.83.0.1/24","ula":"fd4c:91a7:20be:1::/64","clients":4},
+         "off_air":["guest"],
+         "ports":[{"name":"end0","phone":false,"carrier":false},{"name":"enx3a1f0c2299d4","label":"iPhone","phone":true,"carrier":true}],
+         "lan":{"address":"10.83.0.1/24","ula":"fd4c:91a7:20be:1::/64","clients":4,"networks":{"lan":4}},
          "vpns":[{"id":"home","name":"Home","if":"wg-home","state":"up","endpoint":"203.0.113.24:51820","handshake":\(now - 47),"rx":1843200512,"tx":211812352},
                  {"id":"us","name":"Streaming (US)","state":"off","rx":0,"tx":0}],
          "geoip":{"available":true,"date":"2026-11"},
@@ -153,10 +185,10 @@ public enum DemoRouter {
 
     static func devices(now: Int64) -> String {
         """
-        [{"mac":"\(phone)","hostname":"iPhone","ipv4":"10.83.0.52","ipv6":["fd4c:91a7:20be:1:1c3a:77ff:fe20:9b01"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_400),"link":"wlan0","signal":-47,"up":412300288,"down":3865470566,"name":"","route":"","paused":false,"no_adblock":false},
-         {"mac":"\(laptop)","hostname":"MacBook-Pro","ipv4":"10.83.0.57","ipv6":["fd4c:91a7:20be:1:8d2:41ff:fe7a:c4e2"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_100),"link":"wlan0","signal":-53,"up":1288490188,"down":9126805504,"name":"Work laptop","route":"vpn:home","paused":false,"no_adblock":true},
-         {"mac":"\(tablet)","hostname":"iPad","ipv4":"10.83.0.61","first_seen":\(now - 12 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 2_700),"link":"wlan0","signal":-61,"up":96468992,"down":2254857830,"name":"","route":"","paused":false,"no_adblock":false},
-         {"mac":"\(reader)","hostname":"kindle","ipv4":"10.83.0.66","first_seen":\(now - 9 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 900),"link":"wlan0","signal":-70,"up":1258291,"down":48234496,"name":"","route":"","paused":false,"no_adblock":false},
+        [{"mac":"\(phone)","hostname":"iPhone","ipv4":"10.83.0.52","ipv6":["fd4c:91a7:20be:1:1c3a:77ff:fe20:9b01"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_400),"link":"wlan0","network":"lan","signal":-47,"up":412300288,"down":3865470566,"name":"","route":"","paused":false,"no_adblock":false},
+         {"mac":"\(laptop)","hostname":"MacBook-Pro","ipv4":"10.83.0.57","ipv6":["fd4c:91a7:20be:1:8d2:41ff:fe7a:c4e2"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_100),"link":"wlan0","network":"lan","signal":-53,"up":1288490188,"down":9126805504,"name":"Work laptop","route":"vpn:home","paused":false,"no_adblock":true},
+         {"mac":"\(tablet)","hostname":"iPad","ipv4":"10.83.0.61","first_seen":\(now - 12 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 2_700),"link":"wlan0","network":"lan","signal":-61,"up":96468992,"down":2254857830,"name":"","route":"","paused":false,"no_adblock":false},
+         {"mac":"\(reader)","hostname":"kindle","ipv4":"10.83.0.66","first_seen":\(now - 9 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 900),"link":"wlan0","network":"lan","signal":-70,"up":1258291,"down":48234496,"name":"","route":"","paused":false,"no_adblock":false},
          {"mac":"\(console)","hostname":"Switch","first_seen":\(now - 30 * 86_400),"last_seen":\(now - 3 * 86_400),"online":false,"up":734003200,"down":18146236006,"name":"Games console","route":"","paused":true,"no_adblock":false}]
         """
     }
@@ -166,8 +198,8 @@ public enum DemoRouter {
         let ch5 = [36, 40, 44, 48, 149, 153, 157, 161].map { "{\"num\":\($0),\"freq\":\(5000 + 5 * $0)}" }.joined(separator: ",")
         let bands = "[{\"name\":\"2.4\",\"channels\":[\(ch24)],\"ht\":true,\"vht\":false,\"he\":false},{\"name\":\"5\",\"channels\":[\(ch5)],\"ht\":true,\"vht\":true,\"he\":false}]"
         return """
-        [{"id":"builtin","phy":"phy0","iface":"wlan0","driver":"brcmfmac","bus":"sdio","product":"Built-in Wi-Fi","mac":"2c:cf:67:1a:44:91","bands":\(bands),"ap":true,"sta":true,"ap_sta":true,"present":true,"role":"ap"},
-         {"id":"usb:9c:ef:d5:12:34:56","phy":"phy1","iface":"wlan1","driver":"mt7921u","bus":"usb","product":"Wireless_Device","mac":"9c:ef:d5:12:34:56","bands":\(bands),"ap":true,"sta":true,"ap_sta":true,"present":true,"role":"wan"}]
+        [{"id":"builtin","phy":"phy0","iface":"wlan0","driver":"brcmfmac","bus":"sdio","product":"Built-in Wi-Fi","mac":"2c:cf:67:1a:44:91","bands":\(bands),"ap":true,"sta":true,"ap_sta":true,"max_ap":1,"max_ap_sta":1,"present":true,"role":"ap"},
+         {"id":"usb:9c:ef:d5:12:34:56","phy":"phy1","iface":"wlan1","driver":"mt7921u","bus":"usb","product":"Wireless_Device","mac":"9c:ef:d5:12:34:56","bands":\(bands),"ap":true,"sta":true,"ap_sta":true,"max_ap":4,"max_ap_sta":3,"present":true,"role":"wan"}]
         """
     }()
 

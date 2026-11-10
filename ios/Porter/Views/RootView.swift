@@ -77,6 +77,8 @@ struct DemoScreen: View {
             NavigationStack { DeviceDetailView(mac: model.devices.first?.mac ?? "") }
         case "software":
             NavigationStack { SoftwarePage() }
+        case "networks":
+            NavigationStack { NetworkSetupPage() }
         case "setup":
             NavigationStack { SetupView() }
         case "connect":

@@ -102,6 +102,9 @@ private struct DeviceRow: View {
                     Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if model.hasSeveralNetworks, let network = device.network, !network.isEmpty, network != RouterConfig.mainNetwork {
+                        Badge(text: model.networkName(network))
+                    }
                     if !device.route.isEmpty {
                         Badge(text: model.actionLabel(device.route), color: Color.blue)
                     }
@@ -148,8 +151,14 @@ struct DeviceDetailView: View {
         return cleanName != original.name || cleanIP != (original.ip ?? "")
     }
 
+    /// Where the device's traffic goes when it has no route of its own:
+    /// its network's route, or else the default.
     private var defaultRouteLabel: String {
-        "Default (" + model.actionLabel(model.config?.policy.`default` ?? "direct") + ")"
+        var action: String = model.config?.policy.`default` ?? "direct"
+        if let id = device?.network, let route = model.config?.network(id)?.route, !route.isEmpty {
+            action = route
+        }
+        return "Default (" + model.actionLabel(action) + ")"
     }
 
     var body: some View {
@@ -339,6 +348,7 @@ struct DeviceDetailView: View {
 }
 
 private struct DeviceFactsSection: View {
+    @EnvironmentObject private var model: AppModel
     let device: DeviceInfo
 
     private var addresses6: [String] { device.ipv6 ?? [] }
@@ -356,6 +366,9 @@ private struct DeviceFactsSection: View {
             }
             .padding(.vertical, 4)
             LabeledContent("MAC", value: device.mac.uppercased())
+            if model.hasSeveralNetworks, let network = device.network, !network.isEmpty {
+                LabeledContent("Network", value: model.networkName(network))
+            }
             if let address = device.ipv4, !address.isEmpty {
                 LabeledContent("IPv4", value: address)
             }

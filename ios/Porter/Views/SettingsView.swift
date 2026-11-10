@@ -36,9 +36,8 @@ private struct RouterSettingsSection: View {
 
     var body: some View {
         Section {
-            SettingsLink(symbol: "wifi", title: "Wi-Fi", value: model.config?.ap.ssid ?? "") { AccessPointPage() }
+            SettingsLink(symbol: "wifi", title: "Wi-Fi & networks", value: model.config?.wifi.first?.ssid ?? "") { NetworkSetupPage() }
             SettingsLink(symbol: "hand.raised.fill", title: "Ad blocking", value: onOff(model.config?.dns.adblock.enabled)) { AdblockPage() }
-            SettingsLink(symbol: "network", title: "Local network", value: model.config?.lan.address ?? "") { LANPage() }
             SettingsLink(symbol: "server.rack", title: "DNS") { DNSPage() }
         }
         Section {
@@ -180,69 +179,6 @@ private struct RouterNameFields: View {
     }
 }
 
-// MARK: - Wi-Fi network
-
-private func securityLabel(_ security: WifiSecurity) -> String {
-    switch security {
-    case .wpa2: return "WPA2"
-    case .wpa2wpa3: return "WPA2+WPA3"
-    case .wpa3: return "WPA3"
-    }
-}
-
-private struct AccessPointPage: View {
-    var body: some View {
-        ConfigEditor(
-            "Wi-Fi",
-            \RouterConfig.ap,
-            valid: { (ap: AccessPointConfig) -> Bool in validNetworkName(ap.ssid) && validPassphrase(ap.passphrase) }
-        ) { (ap: Binding<AccessPointConfig>) in
-            AccessPointFields(ap: ap)
-        }
-    }
-}
-
-private struct AccessPointFields: View {
-    @Binding var ap: AccessPointConfig
-    @State private var showPassword = false
-
-    var body: some View {
-        Section {
-            TextField("Network name", text: $ap.ssid)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            HStack {
-                if showPassword {
-                    TextField("Password", text: $ap.passphrase)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                } else {
-                    SecureField("Password", text: $ap.passphrase)
-                }
-                Button {
-                    showPassword.toggle()
-                } label: {
-                    Image(systemName: showPassword ? "eye.slash" : "eye")
-                }
-                .buttonStyle(.borderless)
-            }
-            Picker("Security", selection: $ap.security) {
-                ForEach(WifiSecurity.allCases) { option in
-                    Text(securityLabel(option)).tag(option)
-                }
-            }
-        } footer: {
-            Text("Password: 8 to 63 characters.")
-        }
-        Section {
-            Toggle("Hidden", isOn: $ap.hidden)
-            Toggle("Isolate devices from each other", isOn: $ap.isolate)
-        } footer: {
-            Text("Saving reconnects every device.")
-        }
-    }
-}
-
 // MARK: - Country
 
 private struct CountryPage: View {
@@ -265,76 +201,6 @@ private struct CountryFields: View {
             CountryPicker(selection: $country)
         } footer: {
             Text("Sets the legal Wi-Fi channels.")
-        }
-    }
-}
-
-// MARK: - Local network
-
-private func leaseLabel(_ minutes: Int) -> String {
-    if minutes % 1440 == 0 {
-        let days = minutes / 1440
-        return days == 1 ? "1 day" : "\(days) days"
-    }
-    if minutes % 60 == 0 {
-        let hours = minutes / 60
-        return hours == 1 ? "1 hour" : "\(hours) hours"
-    }
-    return "\(minutes) minutes"
-}
-
-private struct LANPage: View {
-    var body: some View {
-        ConfigEditor(
-            "Local network",
-            \RouterConfig.lan,
-            valid: { (lan: LANConfig) -> Bool in !lan.address.isEmpty && !lan.domain.isEmpty }
-        ) { (lan: Binding<LANConfig>) in
-            LANFields(lan: lan)
-        }
-    }
-}
-
-private struct LANFields: View {
-    @Binding var lan: LANConfig
-
-    private var leaseOptions: [Int] {
-        var options: [Int] = [30, 60, 120, 360, 720, 1440, 2880, 10080]
-        if !options.contains(lan.leaseMinutes) {
-            options.append(lan.leaseMinutes)
-            options.sort()
-        }
-        return options
-    }
-
-    var body: some View {
-        Section {
-            LabeledContent("Address") {
-                TextField("10.83.0.1/24", text: $lan.address)
-                    .multilineTextAlignment(.trailing)
-                    .keyboardType(.numbersAndPunctuation)
-                    .autocorrectionDisabled()
-            }
-            LabeledContent("Domain") {
-                TextField("lan", text: $lan.domain)
-                    .multilineTextAlignment(.trailing)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-            }
-            Picker("Lease", selection: $lan.leaseMinutes) {
-                ForEach(leaseOptions, id: \.self) { minutes in
-                    Text(leaseLabel(minutes)).tag(minutes)
-                }
-            }
-        } footer: {
-            Text("A private address, /16 to /28.")
-        }
-        Section {
-            Toggle("Move if upstream uses the same range", isOn: $lan.autoRenumber)
-        }
-        Section {
-            Toggle("IPv6", isOn: $lan.ipv6)
-            LabeledContent("Prefix", value: lan.ulaPrefix)
         }
     }
 }

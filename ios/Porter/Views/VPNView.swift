@@ -682,7 +682,8 @@ private struct RuleRow: View {
 
     /// Who: "All", one device's name, or the first of several.
     private var source: String {
-        var names: [String] = rule.src.devices.map { model.deviceName($0) }
+        var names: [String] = rule.src.networks.map { model.networkName($0) }
+        names.append(contentsOf: rule.src.devices.map { model.deviceName($0) })
         names.append(contentsOf: rule.src.cidrs)
         guard let first = names.first else { return "All" }
         return names.count == 1 ? first : first + " +\(names.count - 1)"
@@ -770,6 +771,9 @@ struct RuleEditorView: View {
     var body: some View {
         Form {
             generalSection
+            if model.hasSeveralNetworks || !draft.src.networks.isEmpty {
+                sourceNetworksSection
+            }
             sourceDevicesSection
             StringListEditor(
                 title: "From addresses",
@@ -826,6 +830,29 @@ struct RuleEditorView: View {
         }
     }
 
+    /// Whole networks as the source: every device on them.
+    private var sourceNetworksSection: some View {
+        Section {
+            ForEach(model.config?.networks ?? []) { network in
+                Button {
+                    toggleNetwork(network.id)
+                } label: {
+                    HStack {
+                        Text(network.name)
+                        Spacer()
+                        if draft.src.networks.contains(network.id) {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.tint)
+                        }
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+        } header: {
+            Text("From networks")
+        }
+    }
+
     private var sourceDevicesSection: some View {
         Section {
             if deviceChoices.isEmpty {
@@ -850,7 +877,7 @@ struct RuleEditorView: View {
         } header: {
             Text("From devices")
         } footer: {
-            Text("None ticked means all.")
+            Text("Nothing ticked means all.")
         }
     }
 
@@ -887,6 +914,14 @@ struct RuleEditorView: View {
                 Text("UDP").tag("udp")
             }
             .pickerStyle(.segmented)
+        }
+    }
+
+    private func toggleNetwork(_ id: String) {
+        if let index = draft.src.networks.firstIndex(of: id) {
+            draft.src.networks.remove(at: index)
+        } else {
+            draft.src.networks.append(id)
         }
     }
 

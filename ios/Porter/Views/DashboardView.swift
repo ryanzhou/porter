@@ -81,6 +81,10 @@ private struct PathCard: View {
             if let ssid = station?.ssid, !ssid.isEmpty { return ssid }
             return "Wi-Fi"
         }
+        if uplink.kind == "phone" {
+            if let label = uplink.label, !label.isEmpty { return label }
+            return "Phone"
+        }
         return "Ethernet"
     }
 
@@ -342,7 +346,16 @@ private struct WifiCard: View {
     let aps: [AccessPointStatus]
     @Binding var sharing: Bool
 
-    private var ssid: String { model.config?.ap.ssid ?? "" }
+    private var ssid: String { model.config?.wifi.first?.ssid ?? "" }
+
+    /// The other Wi-Fi networks that are switched on, and whether each is
+    /// actually being broadcast.
+    private var others: [WifiNetworkConfig] {
+        let all: [WifiNetworkConfig] = model.config?.wifi ?? []
+        return all.dropFirst().filter { $0.enabled }
+    }
+
+    private var offAir: [String] { model.status?.offAir ?? [] }
 
     private var color: Color {
         if aps.contains(where: { $0.state == "up" }) { return Color.green }
@@ -373,6 +386,17 @@ private struct WifiCard: View {
                                 .foregroundStyle(.red)
                         }
                     }
+                    ForEach(others) { other in
+                        HStack(spacing: 6) {
+                            Text(other.ssid)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            if offAir.contains(other.id) {
+                                Badge(text: "Off air", color: Color.orange)
+                            }
+                        }
+                    }
                 }
                 Spacer()
                 Button {
@@ -394,7 +418,18 @@ struct WifiShareSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
-    private var ap: AccessPointConfig? { model.config?.ap }
+    /// The Wi-Fi network being shared: the main one until another is
+    /// picked.
+    @State private var selected: String = RouterConfig.mainWifi
+
+    private var choices: [WifiNetworkConfig] {
+        let all: [WifiNetworkConfig] = model.config?.wifi ?? []
+        return all.filter { $0.enabled && !$0.ssid.isEmpty }
+    }
+
+    private var ap: WifiNetworkConfig? {
+        choices.first(where: { $0.id == selected }) ?? choices.first
+    }
 
     private var code: UIImage? {
         guard let ap else { return nil }
@@ -404,6 +439,14 @@ struct WifiShareSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
+                if choices.count > 1 {
+                    Picker("Wi-Fi network", selection: $selected) {
+                        ForEach(choices) { choice in
+                            Text(choice.ssid).tag(choice.id)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
                 Spacer()
                 if let code {
                     Image(uiImage: code)

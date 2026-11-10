@@ -1,26 +1,77 @@
 import PorterKit
 import SwiftUI
 
-/// Uplinks, upstream Wi-Fi, and what each radio and wired port is used for.
+/// Where the internet comes from: the sources in the order the router
+/// tries them, and the upstream Wi-Fi networks to join.
 struct InternetView: View {
     @EnvironmentObject private var model: AppModel
     @State private var joinTarget: JoinTarget?
+    @State private var results: [ScanResult] = []
+    @State private var scanning = false
+    @State private var switching = false
+
+    /// The radio that joins upstream networks, if one is set to.
+    private var uplinkRadio: RadioInfo? {
+        model.radios.first(where: { $0.present && ($0.role == .wan || $0.role == .apWan) })
+    }
+
+    /// The radio that would join, were Wi-Fi turned on as a source: a
+    /// spare one, else an adapter rather than the built-in radio.
+    private var candidate: RadioInfo? {
+        let able: [RadioInfo] = model.radios.filter { $0.present && $0.sta }
+        if let spare = able.first(where: { $0.role == .off }) { return spare }
+        if let adapter = able.first(where: { $0.id != "builtin" }) { return adapter }
+        return able.first
+    }
+
+    private var offNote: String {
+        guard let radio = candidate else { return "No Wi-Fi radio." }
+        let others: [RadioInfo] = model.radios.filter { $0.present && $0.id != radio.id && $0.role == .ap }
+        if let other = others.first {
+            return "\(radioTitle(radio)) joins; your own network stays on \(radioTitle(other))."
+        }
+        return "\(radioTitle(radio)) does both. Your own network moves to the channel of the one it joins."
+    }
+
+    private var stations: [StationStatus] { model.status?.stas ?? [] }
+
+    private var savedNames: [String] {
+        let networks: [SavedNetwork] = model.config?.wan.networks ?? []
+        return networks.map { $0.ssid }
+    }
+
+    private func note(for result: ScanResult) -> String {
+        if result.security == "enterprise" { return "Enterprise: not supported" }
+        if result.security == "wep" { return "WEP: not supported" }
+        if stations.contains(where: { $0.state == "connected" && $0.ssid == result.ssid }) { return "Connected" }
+        if stations.contains(where: { $0.state == "connecting" && $0.ssid == result.ssid }) { return "Joining" }
+        if let refused = stations.first(where: { $0.failed == result.ssid }) { return joinFailureLabel(refused.failReason) }
+        return savedNames.contains(result.ssid) ? "Saved" : ""
+    }
 
     var body: some View {
         List {
-            UplinksSection()
-            WifiScanSection(joinTarget: $joinTarget)
-            SavedNetworksSection()
-            RadiosSection()
-            WiredPortsSection()
+            SourcesSection()
+            if uplinkRadio != nil {
+                nearbySection
+                SavedNetworksSection()
+                Section {
+                    NavigationLink("Wi-Fi uplink") { WifiUplinkPage() }
+                }
+            } else {
+                offSection
+            }
             Section {
-                Toggle("Prefer Wi-Fi over wired", isOn: model.binding(\.wan.preferWifi, fallback: false))
                 NavigationLink("Hardware addresses") { UpstreamIdentityPage() }
             }
         }
         .navigationTitle("Internet")
-        .refreshable { await model.refresh() }
-        .task { await loadRadios() }
+        .toolbar { EditButton() }
+        .refreshable {
+            await model.refresh()
+            await scan(quick: false)
+        }
+        .task(id: uplinkRadio?.id) { await firstScan() }
         .sheet(item: $joinTarget) { target in
             NavigationStack {
                 JoinNetworkSheet(target: target)
@@ -30,166 +81,97 @@ struct InternetView: View {
         }
     }
 
-    private func loadRadios() async {
-        _ = await model.attempt { _ in try await model.refreshRadios() }
-    }
-}
-
-/// The network the join sheet is asking about.
-private struct JoinTarget: Identifiable {
-    let id = UUID()
-    var ssid: String
-    var secured: Bool
-    /// The name is typed in rather than picked from a scan.
-    var other: Bool
-}
-
-// MARK: - Uplinks
-
-private struct UplinksSection: View {
-    @EnvironmentObject private var model: AppModel
-
-    private var uplinks: [UplinkStatus] { model.status?.wan ?? [] }
-
-    private func station(_ uplink: UplinkStatus) -> StationStatus? {
-        guard uplink.kind == "wifi" else { return nil }
-        let stations: [StationStatus] = model.status?.stas ?? []
-        return stations.first(where: { $0.iface == uplink.iface })
-    }
-
-    var body: some View {
+    private var nearbySection: some View {
         Section {
-            if uplinks.isEmpty {
-                Text("No uplink")
+            ForEach(results) { result in
+                ScanResultRow(result: result, note: note(for: result)) {
+                    joinTarget = JoinTarget(ssid: result.ssid, secured: result.security != "open", other: false)
+                }
+            }
+            if results.isEmpty {
+                Text(scanning ? "Looking" : "Nothing in range")
                     .foregroundStyle(.secondary)
             }
-            ForEach(uplinks) { uplink in
-                UplinkRow(uplink: uplink, station: station(uplink), active: uplink.iface == model.status?.active)
-            }
-        }
-    }
-}
-
-/// One way out. The one in use has the filled icon.
-private struct UplinkRow: View {
-    let uplink: UplinkStatus
-    let station: StationStatus?
-    let active: Bool
-
-    private var title: String {
-        if uplink.kind == "wifi" {
-            if let network = station?.ssid, !network.isEmpty { return network }
-            return "Wi-Fi"
-        }
-        return "Ethernet"
-    }
-
-    private var detail: String {
-        if let address = uplink.ipv4, !address.isEmpty { return address }
-        return uplink.carrier ? "No address" : "No link"
-    }
-
-    /// Nothing plugged in is not a fault: grey, and no second label.
-    private var color: Color {
-        uplink.carrier ? internetColor(uplink.internet) : Color.gray
-    }
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Glyph(symbol: uplink.kind == "wifi" ? "wifi" : "cable.connector", color: color, filled: active)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .lineLimit(1)
-                HStack(spacing: 6) {
-                    Text(detail)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                    if uplink.hasV6 {
-                        Badge(text: "IPv6", color: Color.accentColor)
-                    }
-                    if let freq = station?.freq, freq > 0 {
-                        BandBadge(freq: freq)
-                    }
-                }
-            }
-            Spacer(minLength: 8)
-            if uplink.carrier {
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(internetLabel(uplink.internet))
-                        .font(.subheadline)
-                        .foregroundStyle(color)
-                    if station?.state == "connected", let signal = station?.signal {
-                        SignalBars(rssi: signal)
-                    }
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Upstream Wi-Fi
-
-private struct WifiScanSection: View {
-    @EnvironmentObject private var model: AppModel
-    @Binding var joinTarget: JoinTarget?
-
-    @State private var scanning = false
-    @State private var results: [ScanResult] = []
-
-    private var hasStation: Bool {
-        let radios: [RadioConfig] = model.config?.radios ?? []
-        return radios.contains(where: { $0.role == .wan || $0.role == .apWan })
-    }
-
-    private var savedNames: [String] {
-        let networks: [SavedNetwork] = model.config?.wan.networks ?? []
-        return networks.map { $0.ssid }
-    }
-
-    var body: some View {
-        Section {
-            if hasStation {
-                scanButton
-                ForEach(results) { result in
-                    ScanResultRow(result: result, saved: savedNames.contains(result.ssid)) {
-                        joinTarget = JoinTarget(ssid: result.ssid, secured: result.security != "open", other: false)
-                    }
-                }
-                Button("Other…") {
-                    joinTarget = JoinTarget(ssid: "", secured: true, other: true)
-                }
-            } else {
-                Text("No radio is set to Uplink")
-                    .foregroundStyle(.secondary)
+            Button("Other…") {
+                joinTarget = JoinTarget(ssid: "", secured: true, other: true)
             }
         } header: {
-            Text("Join Wi-Fi")
-        }
-    }
-
-    private var scanButton: some View {
-        Button {
-            scan()
-        } label: {
-            HStack(spacing: 12) {
-                Label(scanning ? "Scanning" : "Scan", systemImage: "antenna.radiowaves.left.and.right")
+            HStack {
+                Text("Networks")
                 Spacer()
                 if scanning {
                     ProgressView()
+                } else {
+                    Button("Scan") {
+                        Task { await scan(quick: false) }
+                    }
+                    .font(.footnote)
                 }
             }
         }
-        .disabled(scanning)
     }
 
-    private func scan() {
-        scanning = true
-        Task {
-            let found: [ScanResult]? = await model.fetch { try await $0.scanWifi() }
-            scanning = false
-            if let found {
-                results = strongestPerName(found)
+    /// Wi-Fi is not a source yet: one tap makes it one.
+    private var offSection: some View {
+        Section {
+            Button {
+                turnOn()
+            } label: {
+                HStack(spacing: 12) {
+                    Label("Join a Wi-Fi network", systemImage: "wifi")
+                    Spacer()
+                    if switching {
+                        ProgressView()
+                    }
+                }
             }
+            .disabled(switching || candidate == nil)
+        } footer: {
+            Text(offNote)
+        }
+    }
+
+    private func turnOn() {
+        guard let radio = candidate else { return }
+        switching = true
+        Task {
+            await model.setWifiUplink(radio: radio.id)
+            switching = false
+        }
+    }
+
+    /// What the router already knows is shown at once; a fresh scan
+    /// follows. A radio that has only just become the uplink needs a
+    /// moment before it answers at all.
+    private func firstScan() async {
+        if model.radios.isEmpty {
+            await model.quietly { _ in try await model.refreshRadios() }
+        }
+        guard uplinkRadio != nil else {
+            results = []
+            return
+        }
+        for attemptNumber in 0..<4 {
+            if attemptNumber > 0 {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+            if Task.isCancelled { return }
+            let found: [ScanResult]? = await model.fetchQuietly { try await $0.scanWifi(quick: true) }
+            if let found {
+                if !found.isEmpty { results = strongestPerName(found) }
+                break
+            }
+        }
+        await scan(quick: false)
+    }
+
+    private func scan(quick: Bool) async {
+        guard uplinkRadio != nil, !scanning else { return }
+        scanning = true
+        let found: [ScanResult]? = await model.fetchQuietly { try await $0.scanWifi(quick: quick) }
+        scanning = false
+        if let found {
+            results = strongestPerName(found)
         }
     }
 
@@ -203,19 +185,224 @@ private struct WifiScanSection: View {
     }
 }
 
+/// The network the join sheet is asking about.
+private struct JoinTarget: Identifiable {
+    let id = UUID()
+    var ssid: String
+    var secured: Bool
+    /// The name is typed in rather than picked from a scan.
+    var other: Bool
+}
+
+// MARK: - Sources
+
+/// One way to the internet, as it stands in the order.
+private struct Source: Identifiable {
+    var key: String
+    /// "eth", "wifi" or "phone".
+    var kind: String
+    var uplink: UplinkStatus?
+    /// The wired port, for "eth".
+    var port: String?
+    var id: String { key }
+}
+
+/// The ways to the internet in the order the router tries them. Dragging
+/// one changes the order at once.
+private struct SourcesSection: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var sources: [Source] {
+        guard let config = model.config else { return [] }
+        let uplinks: [UplinkStatus] = model.status?.wan ?? []
+        let ports: [PortStatus] = model.status?.ports ?? []
+        var out: [Source] = []
+        for key in config.wan.order {
+            let uplink: UplinkStatus? = uplinks.first(where: { $0.key == key })
+            if key == RouterConfig.uplinkWifi {
+                out.append(Source(key: key, kind: "wifi", uplink: uplink, port: nil))
+            } else if key == RouterConfig.uplinkPhone {
+                out.append(Source(key: key, kind: "phone", uplink: uplink, port: nil))
+            } else if key.hasPrefix("eth:") {
+                // A wired port counts while it is plugged into the router
+                // and set to be an uplink.
+                let name = String(key.dropFirst(4))
+                let isUplink: Bool = config.ethernet.contains(where: { $0.name == name && $0.role == .wan })
+                let present: Bool = ports.contains(where: { $0.name == name })
+                if isUplink && present {
+                    out.append(Source(key: key, kind: "eth", uplink: uplink, port: name))
+                }
+            }
+        }
+        return out
+    }
+
+    private func isActive(_ source: Source) -> Bool {
+        guard let uplink = source.uplink, let active = model.status?.active else { return false }
+        return uplink.iface == active
+    }
+
+    var body: some View {
+        Section {
+            ForEach(sources) { source in
+                if let port = source.port {
+                    NavigationLink {
+                        WiredSourcePage(port: port)
+                    } label: {
+                        SourceRow(source: source, active: isActive(source))
+                    }
+                } else {
+                    SourceRow(source: source, active: isActive(source))
+                }
+            }
+            .onMove { from, to in move(from, to) }
+        } footer: {
+            Text("The first one that works is used.")
+        }
+    }
+
+    private func move(_ from: IndexSet, _ to: Int) {
+        var keys: [String] = sources.map { $0.key }
+        keys.move(fromOffsets: from, toOffset: to)
+        // Sources that are not shown keep a place, after the ones that are.
+        let all: [String] = model.config?.wan.order ?? []
+        let hidden: [String] = all.filter { !keys.contains($0) }
+        let order: [String] = keys + hidden
+        Task {
+            await model.update { cfg in cfg.wan.order = order }
+        }
+    }
+}
+
+/// One way out. The one in use has the filled icon.
+private struct SourceRow: View {
+    @EnvironmentObject private var model: AppModel
+    let source: Source
+    let active: Bool
+
+    private var station: StationStatus? {
+        guard source.kind == "wifi" else { return nil }
+        let stations: [StationStatus] = model.status?.stas ?? []
+        if let uplink = source.uplink, let match = stations.first(where: { $0.iface == uplink.iface }) {
+            return match
+        }
+        return stations.first
+    }
+
+    private var uplink: UplinkStatus? { source.uplink }
+
+    private var linked: Bool { uplink?.carrier ?? false }
+
+    private var title: String {
+        switch source.kind {
+        case "wifi":
+            if let network = station?.ssid, !network.isEmpty { return network }
+            return "Wi-Fi"
+        case "phone":
+            if let label = uplink?.label, !label.isEmpty { return label }
+            return "Phone on USB"
+        default:
+            return "Ethernet"
+        }
+    }
+
+    /// The line under the name: the address, or what is missing.
+    private var detail: String {
+        if linked {
+            if let address = uplink?.ipv4, !address.isEmpty { return address }
+            return "No address"
+        }
+        switch source.kind {
+        case "wifi":
+            if let station {
+                if let failed = station.failed, !failed.isEmpty {
+                    return failed + ": " + joinFailureLabel(station.failReason)
+                }
+                switch station.state {
+                case "connecting": return "Joining"
+                case "scanning": return "Looking for a saved network"
+                default: return "No network joined"
+                }
+            }
+            return "Off"
+        case "phone":
+            if uplink == nil { return "Not plugged in" }
+            return "Turn on the phone's hotspot. On an iPhone, tap Trust."
+        default:
+            return "No cable"
+        }
+    }
+
+    /// Nothing plugged in is not a fault: grey, and no second label.
+    private var color: Color {
+        guard linked, let uplink else { return Color.gray }
+        return internetColor(uplink.internet)
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Glyph(symbol: uplinkSymbol(kind: source.kind), color: color, filled: active)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(detail)
+                        .font(linked ? Font.caption.monospaced() : Font.caption)
+                        .foregroundStyle(.secondary)
+                    if uplink?.hasV6 == true {
+                        Badge(text: "IPv6", color: Color.accentColor)
+                    }
+                    if linked, let freq = station?.freq, freq > 0 {
+                        BandBadge(freq: freq)
+                    }
+                }
+            }
+            Spacer(minLength: 8)
+            if linked, let uplink {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(internetLabel(uplink.internet))
+                        .font(.subheadline)
+                        .foregroundStyle(color)
+                    if station?.state == "connected", let signal = station?.signal {
+                        SignalBars(rssi: signal)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A wired uplink: how it gets its addresses.
+private struct WiredSourcePage: View {
+    @EnvironmentObject private var model: AppModel
+    let port: String
+
+    private var setup: IPSetup {
+        let ports: [EthernetPort] = model.config?.ethernet ?? []
+        return ports.first(where: { $0.name == port })?.ip ?? IPSetup()
+    }
+
+    var body: some View {
+        IPSetupPage(title: "Ethernet", initial: setup) { next in
+            let name = port
+            return await model.update { cfg in
+                if let index = cfg.ethernet.firstIndex(where: { $0.name == name }) {
+                    cfg.ethernet[index].ip = next
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Upstream Wi-Fi
+
 private struct ScanResultRow: View {
     let result: ScanResult
-    let saved: Bool
+    let note: String
     let onTap: () -> Void
 
     private var unsupported: Bool {
         result.security == "enterprise" || result.security == "wep"
-    }
-
-    private var note: String {
-        if result.security == "enterprise" { return "Enterprise: not supported" }
-        if result.security == "wep" { return "WEP: not supported" }
-        return saved ? "Saved" : ""
     }
 
     var body: some View {
@@ -232,6 +419,7 @@ private struct ScanResultRow: View {
                     }
                 }
                 Spacer()
+                BandBadge(freq: result.freq)
                 if result.security != "open" {
                     Image(systemName: "lock.fill")
                         .font(.caption)
@@ -242,6 +430,73 @@ private struct ScanResultRow: View {
         }
         .foregroundStyle(.primary)
         .disabled(unsupported)
+    }
+}
+
+/// Which radio joins upstream networks, and turning that off.
+private struct WifiUplinkPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var working = false
+
+    private var able: [RadioInfo] { model.radios.filter { $0.present && $0.sta } }
+
+    private var current: RadioInfo? {
+        able.first(where: { $0.role == .wan || $0.role == .apWan })
+    }
+
+    private var selection: Binding<String> {
+        Binding(
+            get: { current?.id ?? "" },
+            set: { id in choose(id) }
+        )
+    }
+
+    private var note: String {
+        guard let current else { return "" }
+        if current.role == .apWan {
+            return "This radio carries your own network too, which follows the uplink's channel. With a second radio the two stay apart, and both are faster."
+        }
+        return "Your own network is on the other radio."
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Radio", selection: selection) {
+                    ForEach(able) { radio in
+                        Text(radioTitle(radio)).tag(radio.id)
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } header: {
+                Text("Joins with")
+            } footer: {
+                Text(note)
+            }
+            Section("Hardware address") {
+                MACPolicyRows(title: "Address", kind: "wifi", policyPath: \.wan.wifiMac)
+            }
+            Section {
+                Button("Stop using Wi-Fi", role: .destructive) { choose("") }
+            }
+        }
+        .disabled(working)
+        .navigationTitle("Wi-Fi uplink")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func choose(_ id: String) {
+        guard id != (current?.id ?? "") else { return }
+        working = true
+        Task {
+            let ok = await model.setWifiUplink(radio: id)
+            working = false
+            if ok && id.isEmpty {
+                dismiss()
+            }
+        }
     }
 }
 
@@ -495,248 +750,6 @@ private struct JoinNetworkSheet: View {
             joining = false
             if ok {
                 dismiss()
-            }
-        }
-    }
-}
-
-// MARK: - Radios
-
-private func radioRoleLabel(_ role: RadioRole) -> String {
-    switch role {
-    case .off: return "Off"
-    case .ap: return "Network"
-    case .wan: return "Uplink"
-    case .apWan: return "Both"
-    }
-}
-
-private func bandLabel(_ band: String) -> String {
-    band.isEmpty ? "Auto" : band + " GHz"
-}
-
-private func channelLabel(_ channel: Int) -> String {
-    channel == 0 ? "Auto" : String(channel)
-}
-
-private func widthLabel(_ width: Int) -> String {
-    width == 0 ? "Auto" : "\(width) MHz"
-}
-
-/// One section for each radio: its name, what it is used for, and, when it
-/// carries the router's network, where on the air that network sits.
-private struct RadiosSection: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        if model.radios.isEmpty {
-            Section("Radios") {
-                Text("No Wi-Fi radio")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        ForEach(model.radios) { radio in
-            RadioRows(radio: radio)
-        }
-    }
-}
-
-private struct RadioRows: View {
-    @EnvironmentObject private var model: AppModel
-    let radio: RadioInfo
-
-    private var setting: RadioConfig? {
-        model.config?.radios.first(where: { $0.id == radio.id })
-    }
-
-    private var role: RadioRole { setting?.role ?? .off }
-
-    private var roleOptions: [RadioRole] {
-        var options: [RadioRole] = [.off]
-        if radio.ap { options.append(.ap) }
-        if radio.sta { options.append(.wan) }
-        if radio.apSta { options.append(.apWan) }
-        if !options.contains(role) { options.append(role) }
-        return options
-    }
-
-    private var bandOptions: [String] {
-        var options: [String] = [""]
-        for band in radio.bands where band.name == "2.4" || band.name == "5" {
-            options.append(band.name)
-        }
-        let current = setting?.band ?? ""
-        if !options.contains(current) { options.append(current) }
-        return options
-    }
-
-    private var channelOptions: [Int] {
-        var options: [Int] = [0]
-        let band = setting?.band ?? ""
-        if let match = radio.bands.first(where: { $0.name == band }) {
-            for channel in match.channels where channel.usable {
-                options.append(channel.num)
-            }
-        }
-        let current = setting?.channel ?? 0
-        if !options.contains(current) { options.append(current) }
-        return options
-    }
-
-    private var widthOptions: [Int] { [0, 20, 40, 80] }
-
-    private func edit(_ change: @escaping (inout RadioConfig) -> Void) {
-        let id = radio.id
-        Task {
-            await model.update { cfg in
-                if let index = cfg.radios.firstIndex(where: { $0.id == id }) {
-                    change(&cfg.radios[index])
-                }
-            }
-        }
-    }
-
-    private var roleBinding: Binding<RadioRole> {
-        Binding(
-            get: { role },
-            set: { value in edit { $0.role = value } }
-        )
-    }
-
-    private var bandBinding: Binding<String> {
-        Binding(
-            get: { setting?.band ?? "" },
-            set: { value in
-                edit { entry in
-                    entry.band = value
-                    entry.channel = 0
-                }
-            }
-        )
-    }
-
-    private var channelBinding: Binding<Int> {
-        Binding(
-            get: { setting?.channel ?? 0 },
-            set: { value in edit { $0.channel = value } }
-        )
-    }
-
-    private var widthBinding: Binding<Int> {
-        Binding(
-            get: { setting?.width ?? 0 },
-            set: { value in edit { $0.width = value } }
-        )
-    }
-
-    private var title: String {
-        let name: String = radio.product.isEmpty ? "Wi-Fi radio" : radio.product
-        return radio.present ? name : name + " · unplugged"
-    }
-
-    var body: some View {
-        Section {
-            Picker("Role", selection: roleBinding) {
-                ForEach(roleOptions) { option in
-                    Text(radioRoleLabel(option)).tag(option)
-                }
-            }
-            .pickerStyle(.segmented)
-            .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
-            if role == .ap {
-                Picker("Band", selection: bandBinding) {
-                    ForEach(bandOptions, id: \.self) { band in
-                        Text(bandLabel(band)).tag(band)
-                    }
-                }
-                Picker("Channel", selection: channelBinding) {
-                    ForEach(channelOptions, id: \.self) { channel in
-                        Text(channelLabel(channel)).tag(channel)
-                    }
-                }
-                Picker("Width", selection: widthBinding) {
-                    ForEach(widthOptions, id: \.self) { width in
-                        Text(widthLabel(width)).tag(width)
-                    }
-                }
-            }
-        } header: {
-            Text(title)
-        } footer: {
-            if role == .apWan {
-                Text("Your network follows the uplink's channel.")
-            }
-        }
-    }
-}
-
-// MARK: - Wired ports
-
-private func portRoleLabel(_ role: PortRole) -> String {
-    switch role {
-    case .wan: return "Uplink"
-    case .lan: return "Local"
-    case .off: return "Off"
-    }
-}
-
-private struct WiredPortsSection: View {
-    @EnvironmentObject private var model: AppModel
-
-    private var ports: [EthernetPort] { model.config?.ethernet ?? [] }
-
-    private func roleBinding(_ name: String) -> Binding<PortRole> {
-        Binding(
-            get: { ports.first(where: { $0.name == name })?.role ?? .off },
-            set: { value in
-                Task {
-                    await model.update { cfg in
-                        if let index = cfg.ethernet.firstIndex(where: { $0.name == name }) {
-                            cfg.ethernet[index].role = value
-                        }
-                    }
-                }
-            }
-        )
-    }
-
-    private func saveAddresses(_ name: String, _ setup: IPSetup) async -> Bool {
-        await model.update { cfg in
-            if let index = cfg.ethernet.firstIndex(where: { $0.name == name }) {
-                cfg.ethernet[index].ip = setup
-            }
-        }
-    }
-
-    var body: some View {
-        if !ports.isEmpty {
-            Section {
-                ForEach(ports) { port in
-                    HStack(spacing: 12) {
-                        Label(port.name, systemImage: "cable.connector")
-                            .font(.body.monospaced())
-                        Spacer()
-                        Picker(port.name, selection: roleBinding(port.name)) {
-                            ForEach(PortRole.allCases) { option in
-                                Text(portRoleLabel(option)).tag(option)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(maxWidth: 210)
-                    }
-                    if port.role == .wan {
-                        NavigationLink {
-                            IPSetupPage(title: port.name, initial: port.ip ?? IPSetup()) { setup in
-                                await saveAddresses(port.name, setup)
-                            }
-                        } label: {
-                            LabeledContent("Addresses", value: port.ip?.isAutomatic == false ? "Manual" : "Automatic")
-                        }
-                    }
-                }
-            } header: {
-                Text("Wired")
             }
         }
     }

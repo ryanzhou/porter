@@ -10,7 +10,18 @@ final class DemoTests: XCTestCase {
 
         let status = try await router.status()
         XCTAssertEqual(status.internet, "online")
-        XCTAssertEqual(status.wan.count, 2)
+        XCTAssertEqual(status.wan.map(\.key), ["eth:end0", "wifi", "phone"])
+        XCTAssertEqual(status.offAir, ["guest"])
+        // Looking at a change tells what it would do and changes nothing.
+        var draft = try await router.config()
+        draft.wifi[1].enabled = false
+        let quiet = try await router.checkConfig(draft)
+        XCTAssertNil(quiet.error)
+        XCTAssertTrue(quiet.notes.isEmpty)
+        let asIs = try await router.checkConfig(try await router.config())
+        XCTAssertEqual(asIs.notes.count, 1)
+        XCTAssertTrue(asIs.effects.isEmpty)
+        XCTAssertEqual(status.ports.filter(\.phone).count, 1)
         XCTAssertEqual(status.vpns.first?.state, "up")
         XCTAssertTrue(status.geoip.available)
 
@@ -19,11 +30,11 @@ final class DemoTests: XCTestCase {
         XCTAssertEqual(config.policy.rules.count, 3)
         XCTAssertEqual(config.policy.rules[1].dst.countries, ["JP"])
         // Edits are kept, as with a real router.
-        config.ap.ssid = "Renamed"
+        config.wifi[0].ssid = "Renamed"
         let rev = try await router.setConfig(config)
         XCTAssertEqual(rev, config.rev + 1)
         let stored = try await router.config()
-        XCTAssertEqual(stored.ap.ssid, "Renamed")
+        XCTAssertEqual(stored.wifi[0].ssid, "Renamed")
         XCTAssertEqual(stored.rev, rev)
 
         let devices = try await router.devices()

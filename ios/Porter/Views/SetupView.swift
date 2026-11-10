@@ -95,8 +95,8 @@ struct SetupView: View {
         loaded = true
         country = config.system.country.isEmpty ? CountryChoice.deviceDefault : config.system.country
         routerName = config.system.name
-        ssid = config.ap.ssid
-        passphrase = config.ap.passphrase
+        ssid = config.wifi.first?.ssid ?? ""
+        passphrase = config.wifi.first?.passphrase ?? ""
     }
 
     private func start() {
@@ -109,8 +109,10 @@ struct SetupView: View {
             await model.update { cfg in
                 cfg.system.country = newCountry
                 cfg.system.name = newName
-                cfg.ap.ssid = newSSID
-                cfg.ap.passphrase = newPassphrase
+                if !cfg.wifi.isEmpty {
+                    cfg.wifi[0].ssid = newSSID
+                    cfg.wifi[0].passphrase = newPassphrase
+                }
             }
             saving = false
         }

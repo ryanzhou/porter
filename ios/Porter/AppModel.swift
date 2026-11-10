@@ -182,7 +182,12 @@ final class AppModel: ObservableObject {
                 case .status(let status):
                     let revChanged = status.rev != self.config?.rev
                     self.status = status
-                    if revChanged { try? await self.reloadConfig() }
+                    if revChanged {
+                        try? await self.reloadConfig()
+                        // What each radio is used for is part of what
+                        // the radio list says.
+                        try? await self.refreshRadios()
+                    }
                 case .activity(let entry):
                     self.activity.append(entry)
                     if entry.kind == "device" { try? await self.refreshDevices() }
@@ -333,6 +338,27 @@ final class AppModel: ObservableObject {
         return ok
     }
 
+    /// Asks the router what a change would do, without making it. Nil
+    /// when the question could not be asked; that is not worth an alert,
+    /// the change itself will say what is wrong when it is applied.
+    func check(_ edit: @escaping (inout RouterConfig) -> Void) async -> ConfigCheck? {
+        guard let connection, var next = confirmedConfig else { return nil }
+        edit(&next)
+        return try? await connection.checkConfig(next)
+    }
+
+    /// Chooses the radio that joins upstream Wi-Fi networks ("" for none).
+    /// The router rearranges the other radios around it in the same step.
+    @discardableResult
+    func setWifiUplink(radio: String) async -> Bool {
+        await attempt { connection in
+            try await connection.setWifiUplink(radio: radio)
+            self.setConfirmed(try await connection.config())
+            self.radios = try await connection.radios()
+            self.status = try await connection.status()
+        }
+    }
+
     /// Runs a router operation, turning failures into `errorMessage`.
     @discardableResult
     func attempt(_ operation: @escaping (RouterConnection) async throws -> Void) async -> Bool {
@@ -343,6 +369,22 @@ final class AppModel: ObservableObject {
             errorMessage = describe(error)
             return false
         }
+    }
+
+    /// Like `attempt` and `fetch`, for what is done without being asked
+    /// (loading a list as a screen appears): a failure is not announced.
+    @discardableResult
+    func quietly(_ operation: @escaping (RouterConnection) async throws -> Void) async -> Bool {
+        do {
+            try await operation(try requireConnection())
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func fetchQuietly<T>(_ operation: @escaping (RouterConnection) async throws -> T) async -> T? {
+        try? await operation(try requireConnection())
     }
 
     /// Runs a router operation that returns a value; nil on failure.
@@ -399,6 +441,12 @@ final class AppModel: ObservableObject {
     func deviceName(_ mac: String) -> String { device(mac)?.displayName ?? mac.uppercased() }
 
     func vpnName(_ id: String) -> String { config?.vpns.first { $0.id == id }?.name ?? "Unknown VPN" }
+
+    func networkName(_ id: String) -> String { config?.networkName(id) ?? id }
+
+    /// More than one network exists, so it is worth saying which one
+    /// something belongs to.
+    var hasSeveralNetworks: Bool { (config?.networks.count ?? 0) > 1 }
 
     /// A readable label for an action string ("direct", "block", "vpn:<id>").
     func actionLabel(_ raw: String) -> String {

@@ -320,7 +320,23 @@ func uplinkLabel(kind: String, iface: String) -> String {
     switch kind {
     case "wifi": return "Wi-Fi (\(iface))"
     case "eth": return "Wired (\(iface))"
+    case "phone": return "Phone (\(iface))"
     default: return iface
+    }
+}
+
+/// What to call a radio.
+func radioTitle(_ radio: RadioInfo) -> String {
+    if radio.id == "builtin" { return "Built-in Wi-Fi" }
+    return radio.product.isEmpty ? "USB adapter" : radio.product
+}
+
+/// The picture for a kind of uplink.
+func uplinkSymbol(kind: String) -> String {
+    switch kind {
+    case "wifi": return "wifi"
+    case "phone": return "iphone"
+    default: return "cable.connector"
     }
 }
 
