@@ -33,7 +33,7 @@ DISK_ID=504f5254          # must match fstab, cmdline.txt, ensure-data and the u
 # every later version has to fit the partitions of a card flashed today.
 SELECT_MB=64
 BOOT_MB=128
-ROOT_SLOT_MB=1024
+ROOT_SLOT_MB=1280
 DATA_MB=256
 
 VERSION=${PORTER_VERSION:-$(git -C "$REPO" describe --tags --always --dirty 2>/dev/null || echo dev)}
