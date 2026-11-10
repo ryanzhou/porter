@@ -92,8 +92,8 @@ func Discover() []Radio {
 			if r.Product == "" {
 				r.Product = "Built-in Wi-Fi"
 			}
-		case r.Bus != "" && r.MAC != "":
-			r.ID = r.Bus + ":" + r.MAC
+		case r.MAC != "":
+			r.ID = busTag(r.Bus) + ":" + r.MAC
 		default:
 			continue
 		}
@@ -104,6 +104,26 @@ func Discover() []Radio {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// busTag reduces a sysfs bus name to the short tag used in radio ids
+// ("usb", "pci", ...), which must fit the id format the configuration
+// accepts.
+func busTag(bus string) string {
+	var b []byte
+	for i := 0; i < len(bus) && len(b) < 8; i++ {
+		c := bus[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			b = append(b, c)
+		}
+	}
+	if len(b) < 2 {
+		return "radio"
+	}
+	return string(b)
 }
 
 // baseIface returns the PHY's primary network interface: the one that is
@@ -219,10 +239,14 @@ var reGroup = regexp.MustCompile(`#\{([^}]*)\}\s*<=\s*(\d+)`)
 var reTotal = regexp.MustCompile(`total\s*<=\s*(\d+)`)
 
 // comboAllowsAPSTA checks one "valid interface combinations" entry for
-// simultaneous AP and managed interfaces.
+// simultaneous AP and managed interfaces. Each "#{ types } <= n" group
+// limits how many interfaces of those types may exist together, so the
+// two may sit in different groups, or share a group that allows two.
 func comboAllowsAPSTA(combo string) bool {
 	apGroup, staGroup := -1, -1
+	limits := map[int]int{}
 	for i, g := range reGroup.FindAllStringSubmatch(combo, -1) {
+		limits[i], _ = strconv.Atoi(g[2])
 		for _, t := range strings.Split(g[1], ",") {
 			switch strings.TrimSpace(t) {
 			case "AP":
@@ -236,7 +260,10 @@ func comboAllowsAPSTA(combo string) bool {
 			}
 		}
 	}
-	if apGroup < 0 || staGroup < 0 || apGroup == staGroup {
+	if apGroup < 0 || staGroup < 0 {
+		return false
+	}
+	if apGroup == staGroup && limits[apGroup] < 2 {
 		return false
 	}
 	if m := reTotal.FindStringSubmatch(combo); m != nil {

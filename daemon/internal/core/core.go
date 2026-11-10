@@ -383,10 +383,21 @@ func (c *Core) reconcile() {
 				band, channel := rc.Band, rc.Channel
 				if role == config.RoleAPWAN {
 					spec.Iface, spec.Virtual = wifi.VifPrefix+hw.Iface, true
-					// A shared radio has one channel: the uplink's.
+					// A shared radio has one channel, and the uplink decides
+					// it: the access point sits on the channel the station
+					// is using or, while it is not connected, on the channel
+					// of the saved network it is most likely to join. An
+					// access point parked elsewhere would stop the station
+					// from ever associating.
 					if sta := c.stas[rc.ID]; sta != nil {
+						freq := 0
 						if st := sta.Status(); st.State == "connected" && st.Freq != 0 {
-							band, channel = wifi.BandOfFreq(st.Freq), wifi.FreqToChannel(st.Freq)
+							freq = st.Freq
+						} else if f, ok := sta.KnownInRange(); ok {
+							freq = f
+						}
+						if freq != 0 && hw.Band(wifi.BandOfFreq(freq)) != nil {
+							band, channel = wifi.BandOfFreq(freq), wifi.FreqToChannel(freq)
 						}
 					}
 				}
@@ -428,6 +439,16 @@ func (c *Core) reconcile() {
 	if cfg.WAN.WifiMAC.Mode != config.MACHardware {
 		wifiMAC = cfg.WAN.WifiMAC.Address
 	}
+	apKey := func(spec wifi.APSpec) string {
+		return fmt.Sprintf("%s|%v|%s|%d|%d|%s|%+v", spec.Iface, spec.Virtual, spec.Band, spec.Channel, spec.Width, spec.Country, spec.AP)
+	}
+	// An access point that is about to change is stopped before stations
+	// start: when a radio changes role, its interface has to be free.
+	for id, spec := range wantAP {
+		if ap := c.aps[id]; ap != nil && c.apKeys[id] != apKey(spec) {
+			ap.Stop()
+		}
+	}
 	for id, spec := range wantSTA {
 		sta := c.stas[id]
 		cur, perm, _ := netx.HardwareAddr(spec.Iface)
@@ -452,7 +473,7 @@ func (c *Core) reconcile() {
 		}
 	}
 	for id, spec := range wantAP {
-		key := fmt.Sprintf("%s|%v|%s|%d|%d|%s|%+v", spec.Iface, spec.Virtual, spec.Band, spec.Channel, spec.Width, spec.Country, spec.AP)
+		key := apKey(spec)
 		if c.apKeys[id] == key {
 			continue
 		}

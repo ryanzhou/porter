@@ -77,6 +77,10 @@ func TestParsePhyInfo(t *testing.T) {
 	if comboAllowsAPSTA("#{ managed, AP, mesh point } <= 1, total <= 1, #channels <= 1") {
 		t.Error("single-interface combination misread")
 	}
+	// One group that allows several interfaces of either kind.
+	if !comboAllowsAPSTA("#{ managed, AP, mesh point } <= 2048, #{ P2P-device } <= 1, total <= 2048, #channels <= 1") {
+		t.Error("shared-group combination misread")
+	}
 
 	spec := APSpec{Radio: r, Iface: "wlan0", Bridge: "br-lan", Country: "US", Band: "5", Channel: 36,
 		AP: config.AP{SSID: "Tést \"net\"", Passphrase: "correct horse", Security: config.SecWPA2}}
@@ -100,6 +104,14 @@ func TestParsePhyInfo(t *testing.T) {
 	spec.Width = 20
 	if l = ladder(spec); l[0].String() != "n/20MHz" {
 		t.Errorf("width cap ignored: %v", l)
+	}
+}
+
+func TestBusTag(t *testing.T) {
+	for in, want := range map[string]string{"usb": "usb", "pci": "pci", "mac80211_hwsim": "mac80211", "": "radio", "x": "radio", "SDIO": "sdio"} {
+		if got := busTag(in); got != want {
+			t.Errorf("busTag(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

@@ -263,6 +263,7 @@ func Neighbors(name string) map[netip.Addr]string {
 	if err != nil {
 		return out
 	}
+	own := l.Attrs().HardwareAddr.String()
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		list, err := netlink.NeighList(l.Attrs().Index, family)
 		if err != nil {
@@ -273,6 +274,11 @@ func Neighbors(name string) map[netip.Addr]string {
 			// holds static entries for multicast groups and broadcast.
 			if len(n.HardwareAddr) != 6 || n.HardwareAddr[0]&1 != 0 ||
 				n.State&(netlink.NUD_FAILED|netlink.NUD_INCOMPLETE|netlink.NUD_NOARP|netlink.NUD_PERMANENT) != 0 {
+				continue
+			}
+			// Nor is the router itself (its own addresses can show up
+			// here under IPv6).
+			if n.HardwareAddr.String() == own {
 				continue
 			}
 			if ip, ok := netip.AddrFromSlice(n.IP); ok && !ip.IsMulticast() {

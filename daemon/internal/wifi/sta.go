@@ -262,6 +262,27 @@ func (s *STA) Scan() ([]ScanResult, error) {
 	return parseScanResults(out), nil
 }
 
+// KnownInRange returns the frequency of the strongest saved network in
+// the latest scan results, without starting a scan.
+func (s *STA) KnownInRange() (freq int, ok bool) {
+	out, err := s.cli("scan_results")
+	if err != nil {
+		return 0, false
+	}
+	s.mu.Lock()
+	known := map[string]bool{}
+	for _, n := range s.spec.Networks {
+		known[n.SSID] = true
+	}
+	s.mu.Unlock()
+	for _, r := range parseScanResults(out) { // strongest first
+		if known[r.SSID] {
+			return r.Freq, true
+		}
+	}
+	return 0, false
+}
+
 func parseScanResults(text string) []ScanResult {
 	best := map[string]ScanResult{}
 	for _, line := range strings.Split(text, "\n") {
