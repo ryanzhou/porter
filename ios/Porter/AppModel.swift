@@ -117,7 +117,7 @@ final class AppModel: ObservableObject {
                 } catch {
                     return // cancelled: the router answered
                 }
-                link?.abandon()
+                link?.abandon(BLEError.stalled("the secure handshake"))
             }
             defer { deadline.cancel() }
             let connection = try await RouterConnection.connect(

@@ -15,6 +15,8 @@ public enum BLEError: Error, LocalizedError {
     case serviceMissing
     case disconnected
     case timeout
+    /// Setting up the link stopped at the named step.
+    case stalled(String)
 
     public var errorDescription: String? {
         switch self {
@@ -23,6 +25,7 @@ public enum BLEError: Error, LocalizedError {
         case .serviceMissing: return "This device is not a Porter router."
         case .disconnected: return "The Bluetooth connection to the router was lost."
         case .timeout: return "The router did not answer in time."
+        case .stalled(let step): return "The router did not answer in time (stopped at: \(step))."
         }
     }
 }
@@ -115,7 +118,7 @@ public final class BLECentral: NSObject, ObservableObject {
             } catch {
                 return // cancelled: the link became ready (or failed) in time
             }
-            link?.fail(BLEError.timeout)
+            if let link { link.fail(BLEError.stalled(link.step)) }
         }
         defer { watchdog.cancel() }
         try await link.waitUntilReady()
@@ -205,6 +208,8 @@ public final class BLELink: NSObject, PacketTransport {
     /// Whether this link's own connection was ever established.
     private(set) var hasConnected = false
     var hasFailed: Bool { failure != nil }
+    /// What setting up the link is waiting for, for error messages.
+    private(set) var step = "connecting over Bluetooth"
     private var readyWaiters: [CheckedContinuation<Void, Error>] = []
     private var packets: [Data] = []
     private var packetWaiters: [CheckedContinuation<Data, Error>] = []
@@ -225,6 +230,7 @@ public final class BLELink: NSObject, PacketTransport {
     func didConnect() {
         guard failure == nil else { return }
         hasConnected = true
+        step = "finding the control service"
         peripheral.discoverServices([PorterUUID.service])
     }
 
@@ -324,6 +330,7 @@ extension BLELink: CBPeripheralDelegate {
                 fail(BLEError.serviceMissing)
                 return
             }
+            step = "reading the control service"
             peripheral.discoverCharacteristics([PorterUUID.rx, PorterUUID.tx, PorterUUID.info], for: service)
         }
     }
@@ -342,6 +349,7 @@ extension BLELink: CBPeripheralDelegate {
                 fail(BLEError.serviceMissing)
                 return
             }
+            step = "subscribing to the router's replies"
             peripheral.setNotifyValue(true, for: tx)
         }
     }
