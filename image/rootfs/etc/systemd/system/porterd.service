@@ -1,0 +1,18 @@
+[Unit]
+Description=Porter travel router
+After=local-fs.target dbus.service bluetooth.service data.mount
+Wants=bluetooth.service
+
+[Service]
+Type=notify
+ExecStartPre=/usr/lib/porter/ensure-data
+ExecStart=/usr/sbin/porterd
+Restart=always
+RestartSec=2
+WatchdogSec=90
+RuntimeDirectory=porter
+RuntimeDirectoryPreserve=restart
+LimitNOFILE=16384
+
+[Install]
+WantedBy=multi-user.target

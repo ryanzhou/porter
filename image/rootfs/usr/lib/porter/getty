@@ -1,0 +1,9 @@
+#!/bin/sh
+# Console login. The root account has no password, so consoles are inert
+# unless the "porter-debug" marker file exists on the boot partition, in
+# which case they open a root shell (see README.txt there).
+tty="$1"; shift
+if [ -e /boot/firmware/porter-debug ]; then
+    exec /sbin/agetty --autologin root --noclear --keep-baud "$tty" 115200,38400,9600 "${TERM:-linux}"
+fi
+exec /sbin/agetty --noclear --keep-baud "$tty" 115200,38400,9600 "${TERM:-linux}"

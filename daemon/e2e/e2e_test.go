@@ -601,8 +601,8 @@ func TestRouter(t *testing.T) {
 		for _, e := range evs {
 			kinds[e.Kind]++
 		}
-		if kinds["device"] < 2 {
-			t.Errorf("expected new-device events, got %v", kinds)
+		if kinds["device"] != 2 {
+			t.Errorf("expected exactly the two clients as new devices, got %v", kinds)
 		}
 		b, _ := json.Marshal(kinds)
 		t.Logf("events: %s", b)

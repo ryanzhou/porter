@@ -1,0 +1,29 @@
+#!/bin/sh
+# Makes sure /data is a mounted, writable file system before the router
+# daemon starts. A data partition that cannot be repaired is recreated:
+# the router then comes up in its factory state instead of not at all.
+set -u
+DEV=/dev/disk/by-partuuid/504f5254-03
+
+mounted() { mountpoint -q /data; }
+writable() { mounted && touch /data/.rw 2>/dev/null && rm -f /data/.rw; }
+
+if ! writable; then
+    for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$DEV" ] && break; sleep 1; done
+    if [ ! -e "$DEV" ]; then
+        echo "ensure-data: data partition not found" >&2
+        exit 1
+    fi
+    umount /data 2>/dev/null
+    fsck.ext4 -y "$DEV" >/dev/null 2>&1
+    mount -o rw,noatime "$DEV" /data 2>/dev/null
+    if ! writable; then
+        echo "ensure-data: data partition unusable, recreating it" >&2
+        umount /data 2>/dev/null
+        mkfs.ext4 -q -F -L porter-data "$DEV" || exit 1
+        mount -o rw,noatime "$DEV" /data || exit 1
+    fi
+fi
+mkdir -p /data/porter
+chmod 700 /data/porter
+exit 0

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -49,23 +50,26 @@ func (c *Config) Normalize() {
 	if c.WAN.EthMAC.Mode == MACRandom && c.WAN.EthMAC.Address == "" {
 		c.WAN.EthMAC.Address = RandomMAC()
 	}
-	if c.Radios == nil {
-		c.Radios = []Radio{}
-	}
-	if c.Ethernet == nil {
-		c.Ethernet = []EthPort{}
-	}
-	if c.VPNs == nil {
-		c.VPNs = []VPN{}
-	}
-	if c.Devices == nil {
-		c.Devices = []Device{}
-	}
-	if c.Policy.Rules == nil {
-		c.Policy.Rules = []Rule{}
-	}
-	if c.WAN.Networks == nil {
-		c.WAN.Networks = []WifiNetwork{}
+	// The app decodes this document strictly: a list is always a list,
+	// never null.
+	fillNilSlices(reflect.ValueOf(c).Elem())
+}
+
+// fillNilSlices replaces every nil slice reachable from v with an empty
+// one.
+func fillNilSlices(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			fillNilSlices(v.Field(i))
+		}
+	case reflect.Slice:
+		if v.IsNil() && v.CanSet() {
+			v.Set(reflect.MakeSlice(v.Type(), 0, 0))
+		}
+		for i := 0; i < v.Len(); i++ {
+			fillNilSlices(v.Index(i))
+		}
 	}
 }
 

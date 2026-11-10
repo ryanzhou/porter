@@ -269,10 +269,13 @@ func Neighbors(name string) map[netip.Addr]string {
 			continue
 		}
 		for _, n := range list {
-			if len(n.HardwareAddr) != 6 || n.State&(netlink.NUD_FAILED|netlink.NUD_INCOMPLETE) != 0 {
+			// Only learned unicast neighbours are devices: the table also
+			// holds static entries for multicast groups and broadcast.
+			if len(n.HardwareAddr) != 6 || n.HardwareAddr[0]&1 != 0 ||
+				n.State&(netlink.NUD_FAILED|netlink.NUD_INCOMPLETE|netlink.NUD_NOARP|netlink.NUD_PERMANENT) != 0 {
 				continue
 			}
-			if ip, ok := netip.AddrFromSlice(n.IP); ok {
+			if ip, ok := netip.AddrFromSlice(n.IP); ok && !ip.IsMulticast() {
 				out[ip.Unmap()] = n.HardwareAddr.String()
 			}
 		}

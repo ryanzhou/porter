@@ -1,0 +1,12 @@
+# Porter travel router - Raspberry Pi 5 boot configuration
+arm_64bit=1
+enable_uart=1
+disable_splash=1
+camera_auto_detect=0
+display_auto_detect=0
+dtparam=audio=off
+
+# Some USB Wi-Fi adapters draw more than the 600 mA the Pi 5 allows its
+# USB ports when the power supply does not identify itself as a 5 A one.
+# Uncomment only with a supply that can really deliver the current.
+#usb_max_current_enable=1

@@ -1,0 +1,7 @@
+# The root file system is never written to at run time. Everything that
+# must survive a reboot lives on /data; everything else is in RAM.
+PARTUUID=504f5254-02  /               ext4   ro,noatime                            0 1
+PARTUUID=504f5254-01  /boot/firmware  vfat   ro,noatime,nofail,umask=0077          0 2
+PARTUUID=504f5254-03  /data           ext4   rw,noatime,nofail,x-systemd.device-timeout=10s  0 2
+tmpfs                 /var            tmpfs  mode=0755,nosuid,nodev,size=128m      0 0
+tmpfs                 /tmp            tmpfs  mode=1777,nosuid,nodev,size=64m       0 0

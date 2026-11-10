@@ -1,0 +1,42 @@
+# Base system
+systemd
+systemd-sysv
+systemd-timesyncd
+dbus
+udev
+kmod
+iproute2
+nftables
+ca-certificates
+e2fsprogs
+libcap2-bin
+
+# Raspberry Pi 5 kernel, boot files and on-board radio firmware
+raspberrypi-archive-keyring
+linux-image-rpi-2712
+raspi-firmware
+firmware-brcm80211
+bluez-firmware
+
+# What porterd drives
+bluez
+hostapd
+wpasupplicant
+dnsmasq-base
+dhcpcd-base
+iw
+rfkill
+wireless-regdb
+
+# Firmware for USB Wi-Fi adapters
+firmware-mediatek
+firmware-realtek
+firmware-atheros
+firmware-misc-nonfree
+
+# Debugging (SSH is off unless enabled from the app)
+openssh-server
+wireguard-tools
+iputils-ping
+tcpdump
+less

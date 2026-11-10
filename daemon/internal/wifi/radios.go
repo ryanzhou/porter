@@ -67,7 +67,7 @@ func Discover() []Radio {
 	for _, e := range entries {
 		phy := e.Name()
 		dir := filepath.Join(sysPhy, phy)
-		r := Radio{Phy: phy}
+		r := Radio{Phy: phy, Bands: []Band{}}
 		if b, err := os.ReadFile(filepath.Join(dir, "macaddress")); err == nil {
 			r.MAC = strings.TrimSpace(string(b))
 		}
