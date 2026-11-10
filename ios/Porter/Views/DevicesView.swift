@@ -47,7 +47,7 @@ struct DevicesView: View {
             }
         }
         .navigationTitle("Devices")
-        .refreshable { await reload() }
+        .refreshable { _ = await reload() }
         .task { await poll() }
     }
 
@@ -236,23 +236,23 @@ struct DeviceDetailView: View {
     private var pausedBinding: Binding<Bool> {
         Binding(
             get: { device?.paused ?? false },
-            set: { value in
-                guard var settings = device?.settings else { return }
-                settings.paused = value
-                Task { await model.setDevice(settings) }
-            }
+            set: { value in applyNow { $0.paused = value } }
         )
     }
 
     private var routeBinding: Binding<String> {
         Binding(
             get: { device?.route ?? "" },
-            set: { value in
-                guard var settings = device?.settings else { return }
-                settings.route = value
-                Task { await model.setDevice(settings) }
-            }
+            set: { value in applyNow { $0.route = value } }
         )
+    }
+
+    /// Saves a change to the stored settings, leaving unsaved text edits alone.
+    private func applyNow(_ change: (inout DeviceSettings) -> Void) {
+        guard var settings = device?.settings else { return }
+        change(&settings)
+        let updated = settings
+        Task { await model.setDevice(updated) }
     }
 
     private func sync() {

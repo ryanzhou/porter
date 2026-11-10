@@ -1,6 +1,8 @@
 name: iOS
 
 on:
+  push:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
   workflow_dispatch:
 
 concurrency:
