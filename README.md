@@ -98,7 +98,7 @@ the button for a second or more shuts the router down cleanly.
 On Debian or Ubuntu (x86-64 or arm64), as root:
 
 ```bash
-sudo apt-get install mmdebstrap qemu-user-static binfmt-support dosfstools mtools fdisk e2fsprogs xz-utils gpg curl
+sudo apt-get install mmdebstrap qemu-user-static binfmt-support arch-test dosfstools mtools fdisk e2fsprogs xz-utils gpg curl
 ```
 
 ```bash

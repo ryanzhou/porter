@@ -6,7 +6,7 @@
 # Needs root (file ownership in the root file system, chroot) and:
 #   mmdebstrap, dosfstools, mtools, e2fsprogs, fdisk (sfdisk), xz-utils,
 #   gpg, curl, a Go toolchain, and - on anything but an arm64 host -
-#   qemu-user-static with binfmt_misc registered.
+#   qemu-user-static with binfmt_misc registered, plus arch-test.
 #
 # The image is assembled from partition files; nothing is loop-mounted,
 # so this also runs inside unprivileged-ish containers and CI runners.
@@ -27,6 +27,11 @@ BUILD_TIME=${SOURCE_DATE_EPOCH:-$(date +%s)}
 for tool in mmdebstrap mkfs.vfat mcopy mkfs.ext4 sfdisk xz gpg curl go; do
     command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
 done
+
+if [ "$(dpkg --print-architecture)" != arm64 ]; then
+    command -v arch-test >/dev/null || { echo "missing tool: arch-test (needed to build for arm64 on this host)" >&2; exit 1; }
+    arch-test arm64 >/dev/null 2>&1 || { echo "this host cannot run arm64 binaries: install qemu-user-static and binfmt-support" >&2; exit 1; }
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/porter-build.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
