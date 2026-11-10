@@ -15,6 +15,15 @@ plane, no account, no central management and no automatic updates.
 | iOS app | [`ios/`](ios) | SwiftUI app and `PorterKit`, the Swift protocol implementation |
 | Protocol | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | The BLE control protocol both sides implement |
 
+<p>
+<img src="docs/screenshots/overview.png" width="200" alt="Overview">
+<img src="docs/screenshots/traffic.png" width="200" alt="Traffic">
+<img src="docs/screenshots/flows.png" width="200" alt="Connections">
+<img src="docs/screenshots/vpn.png" width="200" alt="VPN and rules">
+</p>
+
+*The app in the iOS simulator, showing its built-in sample data.*
+
 ## What it does
 
 - **Radios in any arrangement.** Each Wi-Fi radio (the built-in one and
@@ -84,6 +93,13 @@ WPA-Enterprise upstream networks.
 Open `ios/Porter.xcodeproj` in Xcode 16 or later, set your development
 team and a bundle identifier of your own on the *Porter* target, and run
 it on an iPhone (iOS 17+). The app cannot be distributed pre-signed.
+
+To look around without a router, launch the app with the argument
+`-demo` (Xcode: *Product → Scheme → Edit Scheme → Arguments*). It then
+runs against built-in sample data and never touches Bluetooth;
+`-demoScreen traffic` (or `flows`, `speedtest`, `device`, or a tab name)
+opens one screen directly. The *iOS* workflow uses this to publish
+screenshots as an artifact.
 
 ### First run
 
