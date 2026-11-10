@@ -266,7 +266,9 @@ echo "==> update files"
 # What a router downloads to update itself: the two partition images of a
 # slot, and a description of them (signed, with PORTER_UPDATE_KEY set).
 rm -f "$OUT"/porter-*-boot.vfat.gz "$OUT"/porter-*-root.ext4.gz "$OUT/update.json" "$OUT/update.json.sig"
-"$WORK/host/porter-release" describe "$VERSION" "$BUILD_TIME" "$BOOT_IMG" "$ROOT_IMG" "$OUT"
+PUB=
+[ -f "$HERE/keys/update.pub" ] && PUB=$HERE/keys/update.pub
+PORTER_UPDATE_PUB=$PUB "$WORK/host/porter-release" describe "$VERSION" "$BUILD_TIME" "$BOOT_IMG" "$ROOT_IMG" "$OUT"
 mv "$BOOT_IMG.gz" "$ROOT_IMG.gz" "$OUT/"
 if [ -f "$HERE/keys/update.pub" ] && [ ! -f "$OUT/update.json.sig" ]; then
     echo "image/keys/update.pub exists but PORTER_UPDATE_KEY is not set: routers built from this tree would refuse this release" >&2

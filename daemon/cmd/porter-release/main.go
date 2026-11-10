@@ -5,7 +5,9 @@
 //	    compresses the two partition images next to themselves and writes
 //	    update.json, the manifest, into out-dir. With a signing key in the
 //	    environment variable PORTER_UPDATE_KEY it also writes
-//	    update.json.sig.
+//	    update.json.sig. With PORTER_UPDATE_PUB naming a public key file,
+//	    the signature is checked against it, so that a release signed with
+//	    the wrong key is never published.
 //
 //	porter-release keygen
 //	    prints a new signing key (keep it secret) and the public key that
@@ -61,6 +63,15 @@ func main() {
 			sig, err := update.Sign(raw, key)
 			if err != nil {
 				fail(err)
+			}
+			if pub := os.Getenv("PORTER_UPDATE_PUB"); pub != "" {
+				key, err := os.ReadFile(pub)
+				if err != nil {
+					fail(err)
+				}
+				if update.Verify(raw, []byte(sig), string(key)) != nil {
+					fail(fmt.Errorf("PORTER_UPDATE_KEY is not the key that belongs to %s; routers would refuse this release", pub))
+				}
 			}
 			if err := os.WriteFile(out+".sig", []byte(sig+"\n"), 0o644); err != nil {
 				fail(err)
