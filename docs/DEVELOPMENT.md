@@ -132,8 +132,8 @@ of a slot (`porter-<version>-boot.vfat.gz`, `-root.ext4.gz`) and
 Partition numbers and slot sizes are fixed (see the top of
 `image/build.sh`): every later version has to fit a card flashed today.
 A change to them needs a new `Layout` number in the update package, and
-cards have to be flashed again. A root slot is 4 GB, several times what
-the system takes now, which is why the card has to be 16 GB.
+cards have to be flashed again. A root slot is 3 GB, four times what the
+system takes now, and as much as two of them can be on an 8 GB card.
 
 **Settings across versions.** Both slots use the one data partition, so
 an update keeps settings, pairings and the router's identity without

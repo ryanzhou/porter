@@ -32,7 +32,7 @@ and can send some or all of your traffic through your VPN.
 ## What you need
 
 - A **Raspberry Pi 5** with its power supply (any RAM size)
-- A **microSD card**, 16 GB or larger
+- A **microSD card**, 8 GB or larger
 - An **iPhone** on iOS 17 or later
 - A **Mac with Xcode 16** or later, to put the app on your phone
 - Optional: an Ethernet cable for a wired uplink, a USB Wi-Fi adapter

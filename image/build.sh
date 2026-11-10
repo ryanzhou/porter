@@ -31,9 +31,12 @@ DISK_ID=504f5254          # must match fstab, cmdline.txt, ensure-data and the u
 # The numbers are fixed: the boot loader, the kernel command line and
 # daemon/internal/update all go by them. Slot sizes are fixed too, since
 # every later version has to fit the partitions of a card flashed today.
+#
+# The root slots are as large as an 8 GB card allows with room to spare:
+# such cards hold as little as 7.2 GiB, and this layout comes to 6.6 GiB.
 SELECT_MB=64
 BOOT_MB=128
-ROOT_SLOT_MB=4096
+ROOT_SLOT_MB=3072
 DATA_MB=256
 
 VERSION=${PORTER_VERSION:-$(git -C "$REPO" describe --tags --always --dirty 2>/dev/null || echo dev)}
@@ -230,6 +233,7 @@ ROOTA_START=$(( EXT_START + 1 ))
 ROOTB_START=$(( ROOTA_START + ROOT_SLOT_MB + 1 ))
 DATA_START=$(( ROOTB_START + ROOT_SLOT_MB + 1 ))
 TOTAL_MB=$(( DATA_START + DATA_MB ))
+[ "$TOTAL_MB" -le 7168 ] || { echo "the image (${TOTAL_MB} MB) would not fit every 8 GB card" >&2; exit 1; }
 rm -f "$IMG" "$IMG.xz"
 truncate -s "${TOTAL_MB}M" "$IMG"
 sfdisk --quiet "$IMG" <<PARTS
