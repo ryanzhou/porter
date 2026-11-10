@@ -29,12 +29,6 @@ and can send some or all of your traffic through your VPN.
   speed test.
 - **IPv6** works too, wherever the upstream network offers it.
 
-> **Status: MVP.** The software is tested end to end in automated tests
-> on simulated networks and radios, and the app runs in the iOS
-> Simulator. It has not yet been proven on a physical Raspberry Pi 5.
-> Expect rough edges on first boot; [Troubleshooting](#troubleshooting)
-> shows how to see what is going on.
-
 ## What you need
 
 - A **Raspberry Pi 5** with its power supply (any RAM size)
@@ -46,11 +40,9 @@ and can send some or all of your traffic through your VPN.
 
 ## 1. Flash the router
 
-1. Get the image. On GitHub, open **Actions → Image**, choose the most
-   recent successful run, and download the **porter-image** artifact.
-   Unzip it; inside is `porter-<version>.img.xz`. (Artifacts expire after
-   30 days. If there is none, press **Run workflow** on that page and
-   wait about 15 minutes, or [build it yourself](docs/DEVELOPMENT.md).)
+1. Download `porter-<version>.img.xz` from the
+   [latest release](https://github.com/ryanzhou/porter/releases/latest).
+   (Or [build it yourself](docs/DEVELOPMENT.md).)
 2. Open [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
    Choose **Raspberry Pi 5**, then **Use custom** and select the
    `.img.xz` file, then your SD card. When asked about OS customisation,
@@ -250,8 +242,11 @@ settings and pairings. Re-flashing the card does the same.
 
 ## Good to know
 
-- **Updating** means flashing a newer image. That also erases your
-  settings; there is no backup and restore yet.
+- **Updating** means flashing the image from a newer
+  [release](https://github.com/ryanzhou/porter/releases). That also
+  erases your settings; there is no backup and restore yet. Forget the
+  router in the app before pairing again, and update the app from the
+  same version of the source.
 - **What the router contacts by itself:** a time server; one small page
   on `captive.apple.com` to detect sign-in pages (the same check an
   iPhone makes); your chosen ad block lists, daily, when ad blocking is

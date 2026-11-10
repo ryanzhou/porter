@@ -185,7 +185,21 @@ screen directly: a tab name (`overview`, `internet`, `devices`, `vpn`,
 |---|---|---|
 | Daemon | pushes touching `daemon/` | unit tests, kernel-level firewall tests, both end-to-end tests inside the image's userland |
 | iOS | pushes touching `ios/` | PorterKit tests, app build for the simulator, screenshots |
-| Image | manually, and on `v*` tags | builds the SD card image as an artifact |
+| Image | manually, and on `v*` tags | builds the SD card image as an artifact; a tag publishes it as a release |
+
+A release is a tag:
+
+```bash
+git tag v0.2.0
+```
+
+```bash
+git push origin v0.2.0
+```
+
+The Image workflow builds the image for it, named after the tag, and
+attaches it to a release of that name. The router and the app both show
+the version.
 
 ## Things that are sampled or approximate
 

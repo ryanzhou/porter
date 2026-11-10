@@ -1,7 +1,8 @@
 name: Image
 
 # Builds the SD card image. Runs on demand and for version tags, not on
-# every push: it takes a while and the result is large.
+# every push: it takes a while and the result is large. A version tag
+# also publishes the image as a release.
 on:
   workflow_dispatch:
   push:
@@ -11,6 +12,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,3 +37,23 @@ jobs:
             build/*.sha256
           compression-level: 0
           retention-days: 30
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          Flash \`porter-$TAG.img.xz\` with Raspberry Pi Imager; the README has the steps.
+
+          Flashing replaces the router's settings and pairings. In the app, forget the router, then pair and set it up again. Build the app from the source at this tag.
+
+          SHA-256 of the image is in \`porter-$TAG.img.xz.sha256\`.
+          EOF
+          sed -i 's/^          //' notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" build/*.img.xz build/*.sha256 --clobber
+          else
+            gh release create "$TAG" build/*.img.xz build/*.sha256 --title "Porter $TAG" --notes-file notes.md --generate-notes --verify-tag
+          fi
