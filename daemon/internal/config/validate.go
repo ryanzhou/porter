@@ -175,7 +175,7 @@ func (c *Config) validateRadios() error {
 			return fmt.Errorf("radio %s: invalid role %q", r.ID, r.Role)
 		}
 		switch r.Band {
-		case "", "2.4", "5", "6":
+		case "", "2.4", "5":
 		default:
 			return fmt.Errorf("radio %s: invalid band %q", r.ID, r.Band)
 		}

@@ -64,7 +64,7 @@ const (
 type Radio struct {
 	ID   string `json:"id"`
 	Role string `json:"role"`
-	// Band is "2.4", "5" or "6" for the AP. Ignored for RoleAPWAN, where the
+	// Band is "2.4" or "5" for the AP. Ignored for RoleAPWAN, where the
 	// AP has to follow the upstream network's channel.
 	Band string `json:"band"`
 	// Channel is the AP channel number; 0 picks automatically.
