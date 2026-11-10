@@ -36,12 +36,18 @@ struct SetupView: View {
                 .listRowBackground(Color.clear)
             }
             Section {
-                TextField("Wi-Fi name", text: $ssid)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("Password", text: $passphrase)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                HStack(spacing: 12) {
+                    Glyph(symbol: "wifi", size: 30)
+                    TextField("Wi-Fi name", text: $ssid)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+                HStack(spacing: 12) {
+                    Glyph(symbol: "key.fill", size: 30)
+                    TextField("Password", text: $passphrase)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
             } footer: {
                 Text("8 to 63 characters")
                     .foregroundStyle(passwordProblem ? Color.red : Color.secondary)

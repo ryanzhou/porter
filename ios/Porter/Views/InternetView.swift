@@ -89,7 +89,10 @@ private struct UplinkRow: View {
         return uplink.carrier ? "No address" : "No link"
     }
 
-    private var color: Color { internetColor(uplink.internet) }
+    /// Nothing plugged in is not a fault: grey, and no second label.
+    private var color: Color {
+        uplink.carrier ? internetColor(uplink.internet) : Color.gray
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -107,10 +110,12 @@ private struct UplinkRow: View {
                 }
             }
             Spacer(minLength: 8)
-            Text(internetLabel(uplink.internet))
-                .font(.subheadline)
-                .foregroundStyle(color)
-                .multilineTextAlignment(.trailing)
+            if uplink.carrier {
+                Text(internetLabel(uplink.internet))
+                    .font(.subheadline)
+                    .foregroundStyle(color)
+                    .multilineTextAlignment(.trailing)
+            }
         }
     }
 }

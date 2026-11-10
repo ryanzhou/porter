@@ -143,7 +143,7 @@ struct AdblockPage: View {
                     }
             }
             HStack {
-                TextField("https://example.com/list.txt", text: $customURL)
+                TextField("List address", text: $customURL, prompt: Text(verbatim: "https://example.com/list.txt"))
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()

@@ -68,6 +68,7 @@ struct Figure: View {
         }
         .fontDesign(.rounded)
         .lineLimit(1)
+        .fixedSize()
     }
 }
 

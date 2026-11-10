@@ -464,7 +464,7 @@ private struct SpeedTestServerFields: View {
 
     var body: some View {
         Section {
-            TextField("https://example.com/large-file", text: $speedtest.downloadUrl)
+            TextField("Download address", text: $speedtest.downloadUrl, prompt: Text(verbatim: "https://example.com/large-file"))
                 .keyboardType(.URL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -474,7 +474,7 @@ private struct SpeedTestServerFields: View {
             Text("Returns a large file.")
         }
         Section {
-            TextField("https://example.com/upload", text: $speedtest.uploadUrl)
+            TextField("Upload address", text: $speedtest.uploadUrl, prompt: Text(verbatim: "https://example.com/upload"))
                 .keyboardType(.URL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()

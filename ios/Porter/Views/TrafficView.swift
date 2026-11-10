@@ -296,7 +296,7 @@ private struct TopDevicesSection: View {
     }
 
     var body: some View {
-        Section("Today") {
+        Section("24 hours") {
             if loaded && shown.isEmpty {
                 Text("Nothing yet")
                     .foregroundStyle(.secondary)

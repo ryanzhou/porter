@@ -148,7 +148,7 @@ private struct PathCard: View {
     private var diagram: some View {
         HStack(spacing: 0) {
             PathNode(symbol: "laptopcomputer.and.iphone", caption: deviceCaption, color: Color.accentColor)
-            PathLink(color: lanUp ? Color.accentColor : Color.gray, broken: !lanUp)
+            PathLink(color: lanUp ? Color.green : Color.gray, broken: !lanUp)
             PathNode(symbol: "wifi.router.fill", caption: status.name, color: Color.accentColor, filled: true)
             if let tunnel {
                 PathLink(color: vpnStateColor(tunnel.state), broken: tunnel.state != "up")
@@ -473,18 +473,17 @@ private struct TrafficCard: View {
             TrafficView()
         } label: {
             Card {
-                HStack(alignment: .bottom, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .firstTextBaseline, spacing: 18) {
+                        TransferFigure(symbol: "arrow.down", bytes: down, color: TrafficSeries.downloadColor)
+                        TransferFigure(symbol: "arrow.up", bytes: up, color: TrafficSeries.uploadColor)
+                        Spacer(minLength: 4)
                         Text("Last hour")
                             .font(.footnote.weight(.medium))
                             .foregroundStyle(.secondary)
-                        HStack(spacing: 14) {
-                            TransferFigure(symbol: "arrow.down", bytes: down, color: TrafficSeries.downloadColor)
-                            TransferFigure(symbol: "arrow.up", bytes: up, color: TrafficSeries.uploadColor)
-                        }
                     }
                     Sparkline(values: series)
-                        .frame(height: 44)
+                        .frame(height: 40)
                         .frame(maxWidth: .infinity)
                 }
             }
