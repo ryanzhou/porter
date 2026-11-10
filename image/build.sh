@@ -102,7 +102,7 @@ mmdebstrap --architectures=arm64 --variant=minbase --mode=root \
 
 echo "==> customising"
 cp -a "$HERE/rootfs/." "$ROOT/"
-chown -R 0:0 "$ROOT/etc/systemd" "$ROOT/usr/lib/porter" "$ROOT/etc/bluetooth" "$ROOT/etc/ssh/sshd_config.d" \
+chown -R 0:0 "$ROOT/etc/systemd" "$ROOT/usr/lib/porter" "$ROOT/etc/bluetooth" "$ROOT/etc/ssh/sshd_config.d" "$ROOT/etc/modprobe.d" \
     "$ROOT/etc/sysctl.d" "$ROOT/etc/tmpfiles.d" "$ROOT/etc/fstab" "$ROOT/etc/hostname" "$ROOT/etc/hosts"
 install -m 755 "$WORK/bin/porterd" "$ROOT/usr/sbin/porterd"
 install -m 755 "$WORK/bin/porterctl" "$ROOT/usr/sbin/porterctl"

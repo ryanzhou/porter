@@ -170,6 +170,21 @@ func qrCode(_ text: String) -> UIImage? {
 
 // MARK: - Indicators
 
+/// "5 GHz" or "2.4 GHz" for a frequency in MHz.
+func bandLabel(freq: Int) -> String {
+    if freq >= 5925 { return "6 GHz" }
+    return freq >= 4900 ? "5 GHz" : "2.4 GHz"
+}
+
+/// The band an uplink is on. The slower band is the one worth noticing.
+struct BandBadge: View {
+    let freq: Int
+
+    var body: some View {
+        Badge(text: bandLabel(freq: freq), color: freq >= 4900 ? Color.accentColor : Color.orange)
+    }
+}
+
 /// Four bars for a signal strength in dBm.
 struct SignalBars: View {
     let rssi: Int

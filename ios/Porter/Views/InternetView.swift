@@ -51,10 +51,10 @@ private struct UplinksSection: View {
 
     private var uplinks: [UplinkStatus] { model.status?.wan ?? [] }
 
-    private func network(_ uplink: UplinkStatus) -> String? {
+    private func station(_ uplink: UplinkStatus) -> StationStatus? {
         guard uplink.kind == "wifi" else { return nil }
         let stations: [StationStatus] = model.status?.stas ?? []
-        return stations.first(where: { $0.iface == uplink.iface })?.ssid
+        return stations.first(where: { $0.iface == uplink.iface })
     }
 
     var body: some View {
@@ -64,7 +64,7 @@ private struct UplinksSection: View {
                     .foregroundStyle(.secondary)
             }
             ForEach(uplinks) { uplink in
-                UplinkRow(uplink: uplink, network: network(uplink), active: uplink.iface == model.status?.active)
+                UplinkRow(uplink: uplink, station: station(uplink), active: uplink.iface == model.status?.active)
             }
         }
     }
@@ -73,12 +73,12 @@ private struct UplinksSection: View {
 /// One way out. The one in use has the filled icon.
 private struct UplinkRow: View {
     let uplink: UplinkStatus
-    let network: String?
+    let station: StationStatus?
     let active: Bool
 
     private var title: String {
         if uplink.kind == "wifi" {
-            if let network, !network.isEmpty { return network }
+            if let network = station?.ssid, !network.isEmpty { return network }
             return "Wi-Fi"
         }
         return "Ethernet"
@@ -107,14 +107,21 @@ private struct UplinkRow: View {
                     if uplink.hasV6 {
                         Badge(text: "IPv6", color: Color.accentColor)
                     }
+                    if let freq = station?.freq, freq > 0 {
+                        BandBadge(freq: freq)
+                    }
                 }
             }
             Spacer(minLength: 8)
             if uplink.carrier {
-                Text(internetLabel(uplink.internet))
-                    .font(.subheadline)
-                    .foregroundStyle(color)
-                    .multilineTextAlignment(.trailing)
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(internetLabel(uplink.internet))
+                        .font(.subheadline)
+                        .foregroundStyle(color)
+                    if station?.state == "connected", let signal = station?.signal {
+                        SignalBars(rssi: signal)
+                    }
+                }
             }
         }
     }

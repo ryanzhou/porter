@@ -169,6 +169,9 @@ private struct PathCard: View {
             if uplink.hasV6 {
                 Badge(text: "IPv6", color: Color.accentColor)
             }
+            if let freq = station?.freq, freq > 0 {
+                BandBadge(freq: freq)
+            }
             Spacer()
             Text(uplink.iface)
                 .font(.footnote.monospaced())

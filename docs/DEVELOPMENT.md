@@ -48,6 +48,14 @@ every subsystem against it and against what the network is doing.
 - **IPv6.** The LAN gets a ULA /64; the uplink takes whatever RA or
   DHCPv6 offers; traffic is masqueraded (NAT66). No prefix delegation is
   needed.
+- **Upstream band.** wpa_supplicant and radio firmware choose an access
+  point mostly by signal strength, which favours 2.4 GHz. porterd decides
+  the band itself from the scan results (5 GHz when it is at least fair,
+  with hysteresis) and tells wpa_supplicant by switching between a 5 GHz
+  and a 2.4 GHz copy of each saved network. On a radio that also runs the
+  access point, only channels an access point may use count. An access
+  point on its own radio is kept at the other end of 5 GHz from the
+  uplink.
 - **Control.** A Noise XX channel above GATT, independent of BLE
   pairing; see [PROTOCOL.md](PROTOCOL.md). Pairing is trust-on-first-use,
   gated by the power button.

@@ -1,6 +1,7 @@
 package wifi
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -135,13 +136,111 @@ func TestScanResults(t *testing.T) {
 }
 
 func TestWPAConf(t *testing.T) {
-	conf := wpaConf(STASpec{Iface: "wlan1", Country: "DE", Networks: []config.WifiNetwork{
+	conf, ids := wpaConf(STASpec{Iface: "wlan1", Country: "DE", Networks: []config.WifiNetwork{
 		{SSID: "Open Net", Priority: 1},
 		{SSID: "Home", PSK: `pass"word`, Hidden: true, Priority: 5},
 	}}, "/run/x")
-	for _, want := range []string{"country=DE", "ssid=4f70656e204e6574", "key_mgmt=NONE", "scan_ssid=1", `psk="pass"word"`, "priority=5"} {
+	for _, want := range []string{"country=DE", "ssid=4f70656e204e6574", "key_mgmt=NONE", "scan_ssid=1", `psk="pass"word"`, "priority=10",
+		"freq_list=5180 5200", "freq_list=2412 2417", "disabled=1"} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("config lacks %q:\n%s", want, conf)
+		}
+	}
+	// A visible network is a 5 GHz block and a 2.4 GHz block, both off
+	// until steering picks one; a hidden one is a single block, on.
+	if got := ids["Open Net"]; got != (netIDs{five: 0, two: 1, any: -1}) {
+		t.Errorf("blocks of the visible network: %+v", got)
+	}
+	if got := ids["Home"]; got != (netIDs{five: -1, two: -1, any: 2}) {
+		t.Errorf("block of the hidden network: %+v", got)
+	}
+	if n := strings.Count(conf, "disabled=1"); n != 2 {
+		t.Errorf("%d blocks start switched off, want 2:\n%s", n, conf)
+	}
+
+	// On a radio shared with the access point, 5 GHz is limited to the
+	// channels an access point may use.
+	conf, _ = wpaConf(STASpec{Iface: "wlan0", Country: "DE", Only5: []int{5180, 5200}, Networks: []config.WifiNetwork{{SSID: "x"}}}, "/run/x")
+	if !strings.Contains(conf, "freq_list=5180 5200\n") {
+		t.Errorf("5 GHz list not limited:\n%s", conf)
+	}
+}
+
+func TestBandChoice(t *testing.T) {
+	scan := func(lines ...string) []bss {
+		return parseBSS("bssid / frequency / signal level / flags / ssid\n" + strings.Join(lines, "\n"))
+	}
+	hotel := func(freq, level int) string {
+		return fmt.Sprintf("aa:bb:cc:00:00:%02x\t%d\t%d\t[WPA2-PSK-CCMP][ESS]\tHotel", freq%100, freq, level)
+	}
+	cases := []struct {
+		name    string
+		list    []bss
+		only5   []int
+		current string
+		want    string
+		decided bool
+	}{
+		{"strong 2.4, fair 5: take 5", scan(hotel(2437, -45), hotel(5500, -68)), nil, "", "5", true},
+		{"5 too weak: take 2.4", scan(hotel(2437, -45), hotel(5500, -76)), nil, "", "2.4", true},
+		{"already on 5: stay while it holds", scan(hotel(2437, -45), hotel(5500, -76)), nil, "5", "5", true},
+		{"already on 5: leave when it fades", scan(hotel(2437, -45), hotel(5500, -84)), nil, "5", "2.4", true},
+		{"on 2.4: not back to 5 until it is good", scan(hotel(2437, -45), hotel(5500, -76)), nil, "2.4", "2.4", true},
+		{"only 5 exists: use it however weak", scan(hotel(5500, -85)), nil, "", "5", true},
+		{"only 2.4 exists", scan(hotel(2437, -60)), nil, "", "2.4", true},
+		{"several access points: the best 5 counts", scan(hotel(2437, -45), hotel(5500, -80), hotel(5180, -60)), nil, "", "5", true},
+		{"shared radio: a radar channel is no use", scan(hotel(2437, -45), hotel(5500, -50)), []int{5180, 5200}, "", "2.4", true},
+		{"shared radio: an allowed channel is", scan(hotel(2437, -45), hotel(5500, -50), hotel(5200, -65)), []int{5180, 5200}, "", "5", true},
+		{"not in range: nothing to decide", scan(), nil, "5", "5", false},
+	}
+	for _, c := range cases {
+		got, decided := pickBand(see(c.list, "Hotel", c.only5), c.current)
+		if got != c.want || decided != c.decided {
+			t.Errorf("%s: got %q (decided %v), want %q (decided %v)", c.name, got, decided, c.want, c.decided)
+		}
+	}
+	if v := see(scan(hotel(2437, -45), hotel(5500, -80), hotel(5180, -60)), "Hotel", nil); v.freq5 != 5180 || v.freq2 != 2437 || v.freq != 2437 {
+		t.Errorf("strongest per band: %+v", v)
+	}
+}
+
+func TestChannelAwayFrom(t *testing.T) {
+	band := func(nums ...int) *Band {
+		b := &Band{Name: "5"}
+		for _, n := range nums {
+			b.Channels = append(b.Channels, Channel{Num: n, Freq: 5000 + 5*n})
+		}
+		// Radar channels exist but are not for access points.
+		for _, n := range []int{52, 100, 116} {
+			b.Channels = append(b.Channels, Channel{Num: n, Freq: 5000 + 5*n, Radar: true})
+		}
+		return b
+	}
+	wide := band(36, 40, 44, 48, 149, 153, 157, 161, 165)
+	low := band(36, 40, 44, 48)
+	cases := []struct {
+		name   string
+		b      *Band
+		uplink int
+		keep   int
+		want   int
+		ok     bool
+	}{
+		{"no uplink: no opinion", wide, 0, 0, 0, false},
+		{"uplink on 2.4 GHz: no opinion", wide, 2437, 0, 0, false},
+		{"uplink low: go high", wide, 5200, 0, 165, true},
+		{"uplink high: go low", wide, 5745, 0, 36, true},
+		{"uplink on a radar channel in the middle: go low", wide, 5600, 0, 36, true},
+		{"already clear: stay", wide, 5200, 149, 149, true},
+		{"no longer clear: move", wide, 5200, 36, 165, true},
+		{"uplink gone: stay where it was", wide, 0, 149, 149, true},
+		{"nowhere far enough: share the uplink's channel", low, 5220, 0, 44, true},
+		{"nowhere far enough, uplink on a radar channel: no opinion", low, 5260, 0, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := ChannelAwayFrom(c.b, c.uplink, c.keep)
+		if got != c.want || ok != c.ok {
+			t.Errorf("%s: got %d (%v), want %d (%v)", c.name, got, ok, c.want, c.ok)
 		}
 	}
 }

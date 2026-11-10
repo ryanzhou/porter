@@ -97,6 +97,8 @@ type Core struct {
 	aps    map[string]*wifi.AP  // by radio id
 	apKeys map[string]string    // spec fingerprint by radio id
 	stas   map[string]*wifi.STA // by radio id
+	staMAC map[string]string    // address policy last applied, by interface
+	apAuto map[string]int       // 5 GHz channel chosen to keep clear of an uplink, by radio id
 
 	reqs chan func()
 	kick chan struct{}
@@ -138,6 +140,8 @@ func New(opt Options) (*Core, error) {
 		aps:      map[string]*wifi.AP{},
 		apKeys:   map[string]string{},
 		stas:     map[string]*wifi.STA{},
+		staMAC:   map[string]string{},
+		apAuto:   map[string]int{},
 		reqs:     make(chan func(), 64),
 		kick:     make(chan struct{}, 1),
 		started:  time.Now(),
@@ -441,7 +445,21 @@ func (c *Core) reconcile() {
 				role = config.RoleWAN
 			}
 			if (role == config.RoleWAN || role == config.RoleAPWAN) && hw.STA {
-				wantSTA[rc.ID] = wifi.STASpec{Radio: rc.ID, Iface: hw.Iface, Country: cfg.System.Country, Networks: cfg.WAN.Networks}
+				spec := wifi.STASpec{Radio: rc.ID, Iface: hw.Iface, Country: cfg.System.Country, Networks: cfg.WAN.Networks}
+				if role == config.RoleAPWAN {
+					// The access point has to share the uplink's channel,
+					// and it is not allowed on every channel the uplink
+					// could use.
+					spec.Only5 = []int{}
+					if b := hw.Band("5"); b != nil {
+						for _, ch := range b.Channels {
+							if ch.Usable() {
+								spec.Only5 = append(spec.Only5, ch.Freq)
+							}
+						}
+					}
+				}
+				wantSTA[rc.ID] = spec
 			}
 			if (role == config.RoleAP || role == config.RoleAPWAN) && hw.AP {
 				spec := wifi.APSpec{Radio: *hw, Iface: hw.Iface, Bridge: fw.LANBridge, Country: cfg.System.Country, AP: cfg.AP, Width: rc.Width}
@@ -479,6 +497,16 @@ func (c *Core) reconcile() {
 					if !ok {
 						ch, ok = wifi.PickChannel(b, 0)
 					}
+					if role == config.RoleAP && channel == 0 && band == "5" {
+						// Left to choose, keep clear of an uplink on
+						// another radio: two radios a few centimetres
+						// apart on neighbouring channels deafen each
+						// other.
+						if away, found := wifi.ChannelAwayFrom(b, c.uplinkFreq(rc.ID), c.apAuto[rc.ID]); found {
+							ch, ok = away, true
+							c.apAuto[rc.ID] = away
+						}
+					}
 					if ok {
 						spec.Band, spec.Channel = band, ch
 						wantAP[rc.ID] = spec
@@ -489,6 +517,7 @@ func (c *Core) reconcile() {
 	}
 	for id, sta := range c.stas {
 		if _, ok := wantSTA[id]; !ok {
+			delete(c.staMAC, sta.Spec().Iface)
 			sta.Stop()
 			delete(c.stas, id)
 		}
@@ -516,17 +545,27 @@ func (c *Core) reconcile() {
 	}
 	for id, spec := range wantSTA {
 		sta := c.stas[id]
-		cur, perm, _ := netx.HardwareAddr(spec.Iface)
-		want := wifiMAC
-		if want == "" {
-			want = perm
-		}
-		if cur != want {
-			if sta != nil {
-				sta.Stop()
+		// The address is set when the policy for it changes, and once
+		// when a radio is first used. Not whenever the interface's
+		// address differs from the one wanted: an adapter that will not
+		// take the address would have its connection torn down on every
+		// pass.
+		if applied, seen := c.staMAC[spec.Iface]; !seen || applied != wifiMAC {
+			c.staMAC[spec.Iface] = wifiMAC
+			cur, perm, _ := netx.HardwareAddr(spec.Iface)
+			want := wifiMAC
+			if want == "" {
+				want = perm
 			}
-			if err := netx.SetMAC(spec.Iface, wifiMAC); err != nil {
-				c.log.Warn("setting Wi-Fi MAC", "err", err)
+			if cur != want {
+				if sta != nil {
+					sta.Stop()
+				}
+				if err := netx.SetMAC(spec.Iface, wifiMAC); err != nil {
+					c.log.Warn("setting Wi-Fi MAC", "if", spec.Iface, "err", err)
+				} else if now, _, _ := netx.HardwareAddr(spec.Iface); now != want {
+					c.log.Warn("this Wi-Fi adapter does not take the address asked for", "if", spec.Iface, "wanted", want, "has", now)
+				}
 			}
 		}
 		if sta == nil {
@@ -536,6 +575,7 @@ func (c *Core) reconcile() {
 		if err := sta.Start(spec); err != nil {
 			c.log.Error("starting station", "err", err)
 		}
+		sta.Steer()
 	}
 	for id, spec := range wantAP {
 		key := apKey(spec)
@@ -551,6 +591,7 @@ func (c *Core) reconcile() {
 			// A radio that used to be an uplink goes back to its own
 			// address.
 			_ = netx.SetMAC(spec.Iface, "")
+			delete(c.staMAC, spec.Iface)
 		}
 		ap.Start(spec)
 		c.apKeys[id] = key
@@ -933,6 +974,20 @@ func bridgeMAC(seed []byte) string {
 }
 
 // wiredPorts lists physical non-wireless network interfaces.
+// uplinkFreq returns the frequency a station on another radio than the
+// given one is connected on, or 0.
+func (c *Core) uplinkFreq(radio string) int {
+	for id, sta := range c.stas {
+		if id == radio {
+			continue
+		}
+		if st := sta.Status(); st.State == "connected" && st.Freq != 0 {
+			return st.Freq
+		}
+	}
+	return 0
+}
+
 func wiredPorts() []string {
 	entries, _ := os.ReadDir("/sys/class/net")
 	var out []string

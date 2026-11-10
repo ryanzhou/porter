@@ -66,12 +66,12 @@ func TestWifi(t *testing.T) {
 		os.RemoveAll(run)
 	}
 	cleanup()
-	if err := exec.Command("modprobe", "mac80211_hwsim", "radios=4").Run(); err != nil {
+	if err := exec.Command("modprobe", "mac80211_hwsim", "radios=5").Run(); err != nil {
 		t.Skip("mac80211_hwsim is not available on this kernel:", err)
 	}
 	t.Cleanup(func() {
 		if t.Failed() {
-			for _, name := range []string{"porterd.log", "hotel-hostapd.log", "client-wpa.log"} {
+			for _, name := range []string{"porterd.log", "hotel-hostapd.log", "hotel5-hostapd.log", "client-wpa.log"} {
 				if b, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
 					lines := strings.Split(string(b), "\n")
 					if len(lines) > 150 {
@@ -93,8 +93,9 @@ func TestWifi(t *testing.T) {
 		procs = append(procs, cmd)
 	}
 
-	// Four simulated radios: one for the hotel, two for the router, one
-	// for the client.
+	// Five simulated radios: one for the hotel, two for the router, one
+	// for the client, and a second one for the hotel, which later puts
+	// the same network on 5 GHz as well.
 	var phys []string
 	entries, _ := os.ReadDir("/sys/class/ieee80211")
 	for _, e := range entries {
@@ -103,13 +104,13 @@ func TestWifi(t *testing.T) {
 		}
 	}
 	sort.Strings(phys)
-	if len(phys) < 4 {
-		t.Skipf("expected 4 simulated radios, found %d", len(phys))
+	if len(phys) < 5 {
+		t.Skipf("expected 5 simulated radios, found %d", len(phys))
 	}
 	for _, ns := range []string{nsHotel, nsRouter, nsClient} {
 		sh(t, "ip netns add %s && ip -n %s link set lo up", ns, ns)
 	}
-	for i, ns := range []string{nsHotel, nsRouter, nsRouter, nsClient} {
+	for i, ns := range []string{nsHotel, nsRouter, nsRouter, nsClient, nsHotel} {
 		sh(t, "iw phy %s set netns name %s", phys[i], ns)
 	}
 	wlans := func(ns string) []string {
@@ -123,24 +124,28 @@ func TestWifi(t *testing.T) {
 		sort.Strings(names)
 		return names
 	}
-	hotelIf, clientIf := wlans(nsHotel)[0], wlans(nsClient)[0]
+	hotelIf, hotel5If, clientIf := wlans(nsHotel)[0], wlans(nsHotel)[1], wlans(nsClient)[0]
 
 	// --- the hotel ---------------------------------------------------------------
 	const hotelSSID, hotelPass = "HotelNet", "hotelpass123"
 	hotelConf := filepath.Join(dir, "hotel-hostapd.conf")
+	// Both of the hotel's access points are ports of one bridge, as the
+	// access points of one network are.
+	const hotelBridge = "brhotel"
+	sh(t, "ip -n %s link add %s type bridge && ip -n %s link set %s up", nsHotel, hotelBridge, nsHotel, hotelBridge)
 	os.WriteFile(hotelConf, []byte(fmt.Sprintf(
-		"interface=%s\ndriver=nl80211\nssid=%s\nhw_mode=g\nchannel=1\nwpa=2\nwpa_key_mgmt=WPA-PSK\nrsn_pairwise=CCMP\nwpa_passphrase=%s\n",
-		hotelIf, hotelSSID, hotelPass)), 0o600)
+		"interface=%s\nbridge=%s\ndriver=nl80211\nssid=%s\nhw_mode=g\nchannel=1\nwpa=2\nwpa_key_mgmt=WPA-PSK\nrsn_pairwise=CCMP\nwpa_passphrase=%s\n",
+		hotelIf, hotelBridge, hotelSSID, hotelPass)), 0o600)
 	start("hotel hostapd", "hotel-hostapd.log", "ip", "netns", "exec", nsHotel, "hostapd", hotelConf)
 	eventually(t, "hotel access point", 20*time.Second, func() bool {
 		b, _ := os.ReadFile(filepath.Join(dir, "hotel-hostapd.log"))
 		return strings.Contains(string(b), "AP-ENABLED")
 	})
-	sh(t, "ip -n %s addr add %s/24 dev %s", nsHotel, ispIP, hotelIf)
+	sh(t, "ip -n %s addr add %s/24 dev %s", nsHotel, ispIP, hotelBridge)
 	sh(t, "ip -n %s addr add %s/32 dev lo", nsHotel, siteA)
 	hotelDNS := filepath.Join(dir, "hotel-dnsmasq.conf")
 	os.WriteFile(hotelDNS, []byte(strings.Join([]string{
-		"interface=" + hotelIf, "except-interface=lo", "bind-interfaces", "no-resolv", "no-hosts", "user=root", "keep-in-foreground",
+		"interface=" + hotelBridge, "except-interface=lo", "bind-interfaces", "no-resolv", "no-hosts", "user=root", "keep-in-foreground",
 		"dhcp-range=100.64.0.50,100.64.0.99,255.255.255.0,10m", "dhcp-option=option:router," + ispIP,
 		"dhcp-option=option:dns-server," + ispIP, "dhcp-leasefile=" + filepath.Join(dir, "hotel.leases"),
 		"address=/probe.test/" + siteA,
@@ -191,6 +196,7 @@ func TestWifi(t *testing.T) {
 			Radio      string `json:"radio"`
 			State      string `json:"state"`
 			SSID       string `json:"ssid"`
+			Freq       int    `json:"freq"`
 			Failed     string `json:"failed"`
 			FailReason string `json:"fail_reason"`
 		} `json:"stas"`
@@ -344,6 +350,38 @@ func TestWifi(t *testing.T) {
 		})
 	})
 
+	t.Run("PrefersFiveGHz", func(t *testing.T) {
+		if s := getStatus(); len(s.STAs) != 1 || s.STAs[0].Freq != 2412 {
+			t.Fatalf("expected the uplink on the hotel's 2.4 GHz channel: %+v", s.STAs)
+		}
+		// The hotel turns on a second access point for the same network,
+		// on 5 GHz.
+		hotel5Conf := filepath.Join(dir, "hotel5-hostapd.conf")
+		os.WriteFile(hotel5Conf, []byte(fmt.Sprintf(
+			"interface=%s\nbridge=%s\ndriver=nl80211\nssid=%s\ncountry_code=US\nhw_mode=a\nchannel=36\nwpa=2\nwpa_key_mgmt=WPA-PSK\nrsn_pairwise=CCMP\nwpa_passphrase=%s\n",
+			hotel5If, hotelBridge, hotelSSID, hotelPass)), 0o600)
+		start("hotel hostapd (5 GHz)", "hotel5-hostapd.log", "ip", "netns", "exec", nsHotel, "hostapd", hotel5Conf)
+		eventually(t, "hotel access point on 5 GHz", 30*time.Second, func() bool {
+			b, _ := os.ReadFile(filepath.Join(dir, "hotel5-hostapd.log"))
+			return strings.Contains(string(b), "AP-ENABLED")
+		})
+		// Once the router has seen it (here: a scan from the app) it moves
+		// the uplink over.
+		eventually(t, "uplink moved to 5 GHz", 120*time.Second, func() bool {
+			s := getStatus()
+			if len(s.STAs) == 1 && s.STAs[0].State == "connected" && s.STAs[0].Freq == 5180 {
+				return s.Internet == "online"
+			}
+			var res []struct{}
+			c.Call("wifi.scan", nil, &res)
+			return false
+		})
+		eventually(t, "client still online", 60*time.Second, func() bool {
+			got, err := httpGet(nsClient, "http://"+siteA+"/ip")
+			return err == nil && got != "" && got == wanIP()
+		})
+	})
+
 	t.Run("OneRadioForBoth", func(t *testing.T) {
 		if !apRadio.APSTA {
 			t.Skip("the simulated radio does not report simultaneous AP and station support")
@@ -364,8 +402,10 @@ func TestWifi(t *testing.T) {
 			if len(s.STAs) != 1 || s.STAs[0].Radio != apRadio.ID || s.STAs[0].State != "connected" {
 				return false
 			}
-			// The access point has to have followed the hotel's channel.
-			return len(s.APs) == 1 && s.APs[0].Iface == "ap-"+apRadio.Iface && s.APs[0].State == "up" && s.APs[0].Channel == 1 &&
+			// The uplink goes to the hotel's 5 GHz access point, and the
+			// router's own access point has to follow it there.
+			return s.STAs[0].Freq == 5180 &&
+				len(s.APs) == 1 && s.APs[0].Iface == "ap-"+apRadio.Iface && s.APs[0].State == "up" && s.APs[0].Channel == 36 &&
 				s.Internet == "online" && s.Active == apRadio.Iface
 		})
 		eventually(t, "client back online through the shared radio", 120*time.Second, func() bool {

@@ -154,6 +154,53 @@ func PickChannel(b *Band, want int) (int, bool) {
 	return 0, false
 }
 
+// ChannelAwayFrom chooses the 5 GHz channel for an access point whose
+// radio sits beside another radio that is connected upstream on
+// uplinkFreq. Two radios centimetres apart on neighbouring channels
+// drown each other out, so the access point goes to the other end of the
+// band; where the rules leave no channel far enough away, it shares the
+// uplink's own channel, where the two at least take turns. keep is the
+// channel chosen before (0 for none) and is kept while it is still far
+// enough, so that the access point does not move without need. The
+// result is false when there is nothing to avoid or nothing to choose.
+func ChannelAwayFrom(b *Band, uplinkFreq, keep int) (int, bool) {
+	const far = 160 // MHz: an 80 MHz channel and room to spare
+	freq := map[int]int{}
+	for _, c := range b.Channels {
+		if c.Usable() {
+			freq[c.Num] = c.Freq
+		}
+	}
+	if f, ok := freq[keep]; ok && (uplinkFreq < 4900 || abs(f-uplinkFreq) >= far) {
+		return keep, true
+	}
+	if uplinkFreq < 4900 {
+		return 0, false
+	}
+	best, bestGap := 0, 0
+	for _, ch := range []int{36, 44, 149, 157, 40, 48, 153, 161, 165} {
+		if f, ok := freq[ch]; ok && abs(f-uplinkFreq) > bestGap {
+			best, bestGap = ch, abs(f-uplinkFreq)
+		}
+	}
+	if bestGap >= far {
+		return best, true
+	}
+	for ch, f := range freq {
+		if f == uplinkFreq {
+			return ch, true
+		}
+	}
+	return 0, false
+}
+
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 func hostapdConf(s APSpec, v variant, ctrlDir string) string {
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }

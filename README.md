@@ -115,6 +115,13 @@ Networks you have joined are remembered and rejoined automatically. If
 the venue's network uses the same address range as yours, the router
 moves your network out of the way by itself.
 
+Where a network is on both bands the router joins it on 5 GHz, unless
+that signal is poor; the band shows next to the uplink. With one radio
+doing both jobs, your own network follows the uplink onto its channel,
+and 5 GHz is only used on channels where an access point is allowed
+(venues often use the radar channels, which are not). A second adapter
+has no such limit.
+
 ### Sign-in pages (captive portals)
 
 When the venue wants you to accept terms or enter a room number,
