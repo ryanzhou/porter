@@ -346,7 +346,7 @@ func (f IPFamily) validate(what string, v6, dnsOptional bool) error {
 		name = "IPv6"
 	}
 	switch f.Mode {
-	case IPAuto:
+	case IPAuto, "":
 		return nil
 	case IPStatic:
 	default:
