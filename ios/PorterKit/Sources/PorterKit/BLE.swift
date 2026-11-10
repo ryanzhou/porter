@@ -196,7 +196,7 @@ public final class BLELink: NSObject, PacketTransport {
     func waitUntilReady() async throws {
         if let failure { throw failure }
         if isReady { return }
-        try await withCheckedThrowingContinuation { readyWaiters.append($0) }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in readyWaiters.append(c) }
     }
 
     /// Ends the link, failing everything that is waiting on it.
@@ -220,8 +220,8 @@ public final class BLELink: NSObject, PacketTransport {
     public func readInfo() async throws -> RouterInfo {
         if let failure { throw failure }
         guard let infoCharacteristic else { throw BLEError.serviceMissing }
-        let data: Data = try await withCheckedThrowingContinuation { continuation in
-            infoWaiters.append(continuation)
+        let data: Data = try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
+            infoWaiters.append(c)
             peripheral.readValue(for: infoCharacteristic)
         }
         return try RouterConnection.makeDecoder().decode(RouterInfo.self, from: data)
@@ -244,12 +244,18 @@ public final class BLELink: NSObject, PacketTransport {
     private func sendOnMain(_ packet: Data) async throws {
         // One packet at a time: fragments of two packets must not mix.
         if sending {
-            await withCheckedContinuation { sendQueue.append($0) }
+            // Woken by the previous sender, which hands the turn over
+            // without ever clearing `sending`.
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in sendQueue.append(c) }
+        } else {
+            sending = true
         }
-        sending = true
         defer {
-            sending = false
-            if !sendQueue.isEmpty { sendQueue.removeFirst().resume() }
+            if sendQueue.isEmpty {
+                sending = false
+            } else {
+                sendQueue.removeFirst().resume()
+            }
         }
         if let failure { throw failure }
         guard let rx else { throw BLEError.serviceMissing }
@@ -257,7 +263,7 @@ public final class BLELink: NSObject, PacketTransport {
         for fragment in Framing.fragment(tag: tag, packet: packet, mtu: mtu) {
             while !peripheral.canSendWriteWithoutResponse {
                 if let failure { throw failure }
-                try await withCheckedThrowingContinuation { writeWaiters.append($0) }
+                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in writeWaiters.append(c) }
             }
             if let failure { throw failure }
             peripheral.writeValue(fragment, for: rx, type: .withoutResponse)
@@ -267,7 +273,7 @@ public final class BLELink: NSObject, PacketTransport {
     private func receiveOnMain() async throws -> Data {
         if !packets.isEmpty { return packets.removeFirst() }
         if let failure { throw failure }
-        return try await withCheckedThrowingContinuation { packetWaiters.append($0) }
+        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in packetWaiters.append(c) }
     }
 }
 
