@@ -59,6 +59,29 @@ if ! { [ -r "$DEBKEYS" ] && curl -fsS "https://deb.debian.org/debian/dists/$SUIT
 fi
 cat "$DEBKEYS" "$WORK/rpi.gpg" > "$WORK/keys.gpg"
 
+# Country database for country rules and the flow list. It is baked in
+# because the router itself never downloads anything. DB-IP publishes a
+# new file each month; early in a month the previous one may be all there
+# is. Fetched before the slow stages so that a failure shows at once.
+GEO_DATE=
+if [ "${PORTER_NO_GEOIP:-0}" != 1 ]; then
+    echo "==> country database"
+    for month in "$(date -u +%Y-%m)" "$(date -u -d "$(date -u +%Y-%m-15) -1 month" +%Y-%m)"; do
+        if curl -fsS -o "$WORK/geoip.csv.gz" "https://download.db-ip.com/free/dbip-country-lite-$month.csv.gz"; then
+            GEO_DATE=$month
+            break
+        fi
+    done
+    [ -n "$GEO_DATE" ] && gzip -t "$WORK/geoip.csv.gz" || {
+        echo "could not fetch the country database from db-ip.com (set PORTER_NO_GEOIP=1 to build without country rules)" >&2
+        exit 1
+    }
+    # Sanity-check the format on the whole file (no early-exiting pipe).
+    GEO_ROWS=$(gzip -dc "$WORK/geoip.csv.gz" | grep -Ec '^[0-9a-fA-F.:]+,[0-9a-fA-F.:]+,[A-Z]{2}$' || true)
+    [ "$GEO_ROWS" -gt 100000 ] || { echo "the country database from db-ip.com is not in the expected format" >&2; exit 1; }
+    echo "    DB-IP country lite $GEO_DATE, $GEO_ROWS ranges"
+fi
+
 echo "==> root file system"
 PACKAGES=$(grep -vE '^\s*(#|$)' "$HERE/packages" | paste -sd,)
 mmdebstrap --architectures=arm64 --variant=minbase --mode=root \
@@ -86,30 +109,13 @@ install -m 755 "$WORK/bin/porterctl" "$ROOT/usr/sbin/porterctl"
 mkdir -p "$ROOT/data" "$ROOT/boot/firmware"
 printf 'PORTER_VERSION=%s\nPORTER_BUILD_TIME=%s\n' "$VERSION" "$BUILD_TIME" > "$ROOT/etc/porter-release"
 
-# Country database for country rules and the flow list. It is baked in
-# here because the router itself never downloads anything. DB-IP publishes
-# a new file each month; early in a month the previous one may be all
-# there is.
-if [ "${PORTER_NO_GEOIP:-0}" != 1 ]; then
-    echo "==> country database"
-    GEO_DATE=
-    for month in "$(date -u +%Y-%m)" "$(date -u -d "$(date -u +%Y-%m-15) -1 month" +%Y-%m)"; do
-        if curl -fsS -o "$WORK/geoip.csv.gz" "https://download.db-ip.com/free/dbip-country-lite-$month.csv.gz"; then
-            GEO_DATE=$month
-            break
-        fi
-    done
-    if [ -z "$GEO_DATE" ] || ! gzip -dc "$WORK/geoip.csv.gz" | head -n 1 | grep -Eq '^[0-9a-fA-F.:]+,[0-9a-fA-F.:]+,[A-Z]{2}$'; then
-        echo "could not fetch the country database from db-ip.com (set PORTER_NO_GEOIP=1 to build without country rules)" >&2
-        exit 1
-    fi
+if [ -n "$GEO_DATE" ]; then
     install -D -m 644 "$WORK/geoip.csv.gz" "$ROOT/usr/share/porter/geoip.csv.gz"
     echo "$GEO_DATE" > "$ROOT/usr/share/porter/geoip.csv.gz.date"
     cat > "$ROOT/usr/share/porter/geoip.LICENSE" <<LICENSE
 IP to Country Lite database ($GEO_DATE) by DB-IP, https://db-ip.com
 Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0).
 LICENSE
-    echo "    DB-IP country lite $GEO_DATE"
 fi
 
 # The router's own lookups go through its own forwarder.
