@@ -1,19 +1,12 @@
 # Porter
 
-A travel router for the Raspberry Pi 5, controlled from an iPhone over
-Bluetooth Low Energy.
+A travel router you build from a Raspberry Pi 5 and control from your
+iPhone.
 
-Porter is its own router software on a minimal Debian base, not a
-distribution of an existing router OS. The router and the app are the
-only two components: there is no server anywhere, so no cloud control
-plane, no account, no central management and no automatic updates.
-
-| Part | Where | What |
-|------|-------|------|
-| Router daemon | [`daemon/`](daemon) | `porterd` (Go): radios, uplinks, LAN, firewall, policy routing, DNS, VPN, BLE control |
-| OS image | [`image/`](image) | Build script and root file system overlay for the SD card image |
-| iOS app | [`ios/`](ios) | SwiftUI app and `PorterKit`, the Swift protocol implementation |
-| Protocol | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | The BLE control protocol both sides implement |
+Plug it in at a hotel, café or Airbnb and it gives all your devices one
+private Wi-Fi network of their own: it joins the venue's network (or a
+wired port) for you, gets through the sign-in page once for everything,
+and can send some or all of your traffic through your VPN.
 
 <p>
 <img src="docs/screenshots/overview.png" width="200" alt="Overview">
@@ -22,276 +15,267 @@ plane, no account, no central management and no automatic updates.
 <img src="docs/screenshots/vpn.png" width="200" alt="VPN and rules">
 </p>
 
-*The app in the iOS simulator, showing its built-in sample data.*
+- **Your own network anywhere.** Wired or Wi-Fi uplink; the built-in
+  radio, a USB Wi-Fi adapter, or both, in whichever roles you choose.
+- **Controlled over Bluetooth.** The app talks to the router directly,
+  so it works whether or not anything has internet yet. No account, no
+  cloud service: the router and the app are the only two parts.
+- **Sign-in pages handled once.** One device signs in to the venue's
+  network; every device behind the router is then online.
+- **VPN with rules.** WireGuard, with a kill switch. Send everything
+  through it, or only certain devices, sites, countries or ports.
+- **See and manage what is connected.** Per-device traffic, live
+  connections, pause a device, block ads for the whole network, run a
+  speed test.
+- **IPv6** works too, wherever the upstream network offers it.
 
-## What it does
+> **Status: MVP.** The software is tested end to end in automated tests
+> on simulated networks and radios, and the app runs in the iOS
+> Simulator. It has not yet been proven on a physical Raspberry Pi 5.
+> Expect rough edges on first boot; [Troubleshooting](#troubleshooting)
+> shows how to see what is going on.
 
-- **Radios in any arrangement.** Each Wi-Fi radio (the built-in one and
-  any USB adapters) is assigned a role: access point, internet uplink,
-  both at once (where the driver supports it; one shared channel), or
-  off. Wired ports are likewise internet or local network. Roles can be
-  changed at any time from the app.
-- **Wired or wireless WAN**, with automatic preference between uplinks,
-  MAC address choice per uplink type (hardware, random, custom), and
-  automatic renumbering of the LAN when it collides with the upstream
-  network.
-- **Bluetooth-only control.** The app never needs IP connectivity to the
-  router, so it works the same whether the phone is on the router's
-  Wi-Fi, on a network without internet, or on no network at all. The
-  channel is end-to-end authenticated and encrypted above BLE
-  (Noise XX); pairing is gated by the Pi's power button.
-- **Captive portals** are signed into natively by a client device. While
-  the upstream network is captive, one device (the first one connected,
-  or one chosen in the app) is routed straight to it and uses its DNS,
-  so the device's own sign-in sheet works; everything else keeps its
-  normal policy, including kill switches. A network that announces a
-  captive portal API (RFC 8910) has it passed on to clients.
-- **IPv6 by NAT66.** The LAN gets a ULA /64; the router takes whatever
-  address the upstream network offers by RA or DHCPv6 and masquerades.
-  No prefix delegation is needed.
-- **WireGuard VPN with policy routing.** Traffic is split by source
-  (device, address range) and destination (domain, address range,
-  protocol, port); the first matching rule wins, then the device's own
-  setting, then the default. Per-profile kill switch. DNS follows the
-  traffic: a query leaves by the same path the connection will, so
-  tunnelled devices use the tunnel's resolver. An IPv4-only tunnel never
-  lets IPv6 slip around it.
-- **Country rules.** A rule's destination can also be a set of
-  countries, matched against a country database built into the image.
-- **Device management**: names, pause, per-device route, address
-  reservations, recent DNS lookups, new-device log.
-- **Traffic and flows.** Per-device and whole-network history (per minute
-  for the last hour, per hour for three days), top devices, and a live
-  list of each device's connections with host name, country, the path it
-  took (direct or which VPN) and byte counts.
-- **Speed test** from the router, directly or through a chosen VPN.
-- **DNS**: forwarding to the upstream network's resolvers or your own
-  over plain DNS, DNS-over-TLS or DNS-over-HTTPS; interception of
-  hard-coded resolvers; your own blocked domains.
-- **Ad blocking** at the DNS level from downloadable block lists (hosts,
-  plain-domain and Adblock formats), refreshed daily, with an allow list
-  and a per-device opt-out.
+## What you need
 
-Not included (compared with Firewalla's feature set): intrusion
-detection, OpenVPN/AnyConnect clients, a VPN server, multi-WAN load
-balancing, and WPA-Enterprise upstream networks.
+- A **Raspberry Pi 5** with its power supply (any RAM size)
+- A **microSD card**, 2 GB or larger
+- An **iPhone** on iOS 17 or later
+- A **Mac with Xcode 16** or later, to put the app on your phone
+- Optional: an Ethernet cable for a wired uplink, a USB Wi-Fi adapter
+  for a second radio, a micro-HDMI cable and keyboard for troubleshooting
 
-## Install
+## 1. Flash the router
 
-### Router
+1. Get the image. On GitHub, open **Actions → Image**, choose the most
+   recent successful run, and download the **porter-image** artifact.
+   Unzip it; inside is `porter-<version>.img.xz`. (Artifacts expire after
+   30 days. If there is none, press **Run workflow** on that page and
+   wait about 15 minutes, or [build it yourself](docs/DEVELOPMENT.md).)
+2. Open [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
+   Choose **Raspberry Pi 5**, then **Use custom** and select the
+   `.img.xz` file, then your SD card. When asked about OS customisation,
+   choose **No**.
+3. Put the card in the Pi and plug in power.
 
-1. Get the image: build it (below) or take `porter-image` from a run of
-   the *Image* workflow.
-2. Write `porter-<version>.img.xz` to an SD card of 2 GB or more with
-   Raspberry Pi Imager ("Use custom"; apply no OS customisation) or:
-   ```bash
-   xz -dc porter-<version>.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
-   ```
-3. Boot the Pi 5. The green LED blinks slowly until the router has been
-   set up.
+After about a minute the green light blinks slowly: the router is waiting
+to be set up.
 
-### App
+## 2. Install the app on your iPhone
 
-The app is built from source with Xcode 16 or later on a Mac and
-installed on your own iPhone (iOS 17+). It cannot be distributed
-pre-signed. No paid developer account is needed:
+The app is installed from source with Xcode. A free Apple ID is enough;
+you do not need a paid developer account.
 
-1. In Xcode, *Settings → Accounts*, add your Apple ID. A free Apple ID
-   gives you a "Personal Team" that can install apps on your own devices.
-2. Copy `ios/Local.xcconfig.example` to `ios/Local.xcconfig` and set your
-   Team ID and a bundle identifier of your own. That file is ignored by
-   git, so your signing details never enter the repository.
-3. Open `ios/Porter.xcodeproj`, connect the iPhone, select it as the run
-   destination and press Run. The first time, the phone asks you to turn
-   on *Developer Mode* (Settings → Privacy & Security) and, with a free
-   Apple ID, to trust your certificate (Settings → General → VPN & Device
-   Management).
+1. Download this repository to your Mac and open Xcode.
+2. In **Xcode → Settings → Accounts**, add your Apple ID.
+3. In the `ios` folder, copy `Local.xcconfig.example` to
+   `Local.xcconfig` and fill in the two values it describes: your Team ID
+   and a bundle identifier of your own, such as `com.yourname.porter`.
+   (Xcode shows your Team ID next to your account; the file itself
+   explains where else to find it.)
+4. Open `ios/Porter.xcodeproj`. Connect your iPhone with a cable, choose
+   it at the top of the Xcode window, and press **Run** (▶).
+5. The first time, your iPhone asks you to turn on **Developer Mode**
+   (Settings → Privacy & Security) and to trust your certificate
+   (Settings → General → VPN & Device Management). Do both, then press
+   Run again.
 
-With a free Apple ID the installed app stops launching after 7 days
-until you press Run again (its data is kept). A paid developer account
-extends that to a year.
+With a free Apple ID the app stops opening after 7 days. Connect the
+phone and press Run again to renew it; nothing is lost.
 
-To look around without a router, launch the app with the argument
-`-demo` (Xcode: *Product → Scheme → Edit Scheme → Arguments*). It then
-runs against built-in sample data and never touches Bluetooth;
-`-demoScreen traffic` (or `flows`, `speedtest`, `device`, or a tab name)
-opens one screen directly. The *iOS* workflow uses this to publish
-screenshots as an artifact.
+Want to look around first? In Xcode choose **Product → Scheme → Edit
+Scheme → Run → Arguments**, add `-demo`, and run in the Simulator. The
+app then shows sample data and needs neither a router nor an Apple ID.
 
-### First run
+## 3. Set up the router
 
-1. In the app, pick the router from the list. A router that has never
-   been paired accepts the first phone that asks.
-2. Choose a country (radios stay off until the regulatory domain is
-   known), a Wi-Fi name and a password.
-3. By default the built-in radio is the access point and the Ethernet
-   port is the uplink. Change roles under *Internet*.
+1. Stand near the Pi and open the app. Allow Bluetooth when asked.
+2. Tap **Porter** in the list. A new router pairs with the first phone
+   that connects.
+3. Choose your **country** (it decides which Wi-Fi channels are legal),
+   a **Wi-Fi name** and a **password**, then tap **Start router**.
+4. Join that Wi-Fi network from your devices.
 
-To pair another phone, press the Pi's power button briefly (the LED
-blinks fast for two minutes) or use *Settings → Paired phones*. Holding
-the button for a second or more shuts the router down cleanly.
+Out of the box the built-in radio is your Wi-Fi network and the Ethernet
+port is the uplink. If you have a cable, plug it in and you are online.
+If not, read on.
 
-## Trying it out
+## Getting online
 
-Without any hardware: run the app in the iOS Simulator with the `-demo`
-argument (above). That needs no Apple ID at all.
+Everything here is on the **Internet** tab.
 
-With a Pi 5, a suggested order, each step building on the last:
+| You have | Do this |
+|---|---|
+| A wired port | Plug in Ethernet. Nothing else to do. |
+| Wi-Fi only, Pi alone | Set the built-in radio's role to **Both**, tap **Scan**, and join the network. Your own network briefly drops while it moves to the same channel. |
+| Wi-Fi only, plus a USB Wi-Fi adapter | Give the adapter the **Upstream Wi-Fi** role, scan and join. The built-in radio stays your network. This is faster and steadier than one radio doing both. |
+| Only your phone's data | Turn on Personal Hotspot and join it as above. |
 
-1. **Boot.** Flash the image and, for the first boot, put an empty file
-   named `porter-debug` on the boot partition and attach HDMI and a
-   keyboard (or a serial cable). You get a root shell; `porterctl status`
-   shows what the router thinks, `journalctl -u porterd` its log, and
-   `bluetoothctl show` whether the Bluetooth controller is up.
-2. **Pair.** Run the app on the iPhone, pick the router, finish setup
-   (country, Wi-Fi name and password).
-3. **Wired uplink.** Plug Ethernet into a network with DHCP, join the
-   router's Wi-Fi from a laptop and browse. *Overview* should say Online.
-4. **Wi-Fi uplink.** Add a USB Wi-Fi adapter, give it the *Uplink* role
-   under *Internet*, scan and join a network. Then try the built-in
-   radio alone with the role *Both*.
-5. **Captive portal.** Join a hotel or café network; *Overview* shows the
-   sign-in section.
-6. **VPN and rules.** Import a WireGuard configuration under *VPN*, route
-   one device or one country through it, and check *Connections* to see
-   which path each connection took.
+Networks you have joined are remembered and rejoined automatically. If
+the venue's network uses the same address range as yours, the router
+moves your network out of the way by itself.
 
-If the app cannot reach the router, everything the app does can also be
-done from the debug shell. First-time setup, for example:
+### Sign-in pages (captive portals)
+
+When the venue wants you to accept terms or enter a room number,
+**Overview** shows **Sign-in required**. One of your devices does the
+signing in, for everyone:
+
+- On the device named there, connected to *your* Wi-Fi, tap **Open
+  sign-in page** (or just open any website). Complete the page.
+- If nothing appears, tap **Reconnect that device**: it rejoins your
+  Wi-Fi and its own sign-in sheet pops up.
+- To use a different device, pick it under **Sign-in device**.
+
+Once the venue lets the router through, every device is online and the
+section disappears. Until then only the sign-in device can reach the
+venue's network; devices you have put behind a VPN kill switch stay
+protected.
+
+## Using a VPN
+
+On the **VPN** tab tap **Add VPN** and paste the WireGuard configuration
+from your VPN provider or your own server (or import the `.conf` file).
+
+- **Everything through the VPN:** set **Default route** to that VPN.
+- **One device:** open it on the **Devices** tab and set its **Route**.
+- **Some destinations:** tap **Add rule** and choose sources (devices)
+  and destinations (domains, address ranges, countries, ports), then
+  where that traffic goes: a VPN, **Direct**, or **Blocked**.
+
+Rules are checked top to bottom and the first match wins; then the
+device's own route; then the default. Drag to reorder.
+
+**Kill switch** (per VPN, on by default): if the tunnel is down, traffic
+meant for it is stopped rather than sent out unprotected.
+
+DNS lookups follow the traffic: a device routed through a VPN uses that
+VPN's DNS server.
+
+## Everyday things
+
+- **Devices.** See what is connected, rename it, **pause** its internet,
+  give it a fixed address, see what it has been looking up.
+- **Ad blocking.** Settings → Ad blocking. Blocks ad and tracker domains
+  for every device. If a site breaks, add it under **Always allow**, or
+  turn on **Skip ad blocking** for one device.
+- **Traffic.** Overview → Traffic shows how much each device has used;
+  **Connections** shows what each is talking to right now, in which
+  country, and whether it went through the VPN.
+- **Speed test.** Overview → Speed test measures the router's own
+  connection, directly or through a VPN. (It measures the venue's
+  internet, not the Wi-Fi between you and the router.)
+- **Another phone.** Briefly press the Pi's power button; the light
+  blinks fast for two minutes while a new phone can pair. Or use
+  Settings → Paired phones. Remove a phone there too.
+- **Turning it off.** Hold the power button for a second and release, or
+  use Settings → System. Simply pulling the plug is safe as well: the
+  system is read-only and cannot be corrupted that way.
+
+### The light and the button
+
+| Green light | Meaning |
+|---|---|
+| Slow blink | Waiting for first-time setup |
+| Fast blink | A new phone can pair (2 minutes) |
+| Steady | Running normally |
+
+| Power button | Does |
+|---|---|
+| Short press | Lets a new phone pair |
+| Hold 1 second, release | Shuts down |
+| Press while off | Starts up |
+
+## Troubleshooting
+
+**The router does not appear in the app.** Give it a full minute after
+power-on and stay within a few metres. Check that Bluetooth is on and
+that the app is allowed to use it (Settings → Porter). If the light is
+not blinking at all, the Pi did not boot: re-flash the card.
+
+**"Press the power button".** The router already belongs to another
+phone. Press the button briefly, then try again.
+
+**The app stopped opening.** With a free Apple ID that happens after 7
+days. Connect the phone to your Mac and press Run in Xcode.
+
+**No Wi-Fi network appears after setup.** Open **Overview** and look at
+**Access point** for an error, and check the country is right.
+
+**Online, but a device has no internet.** Check it is not paused, and
+whether it is routed through a VPN that is down (kill switch).
+
+**Seeing what the router is doing.** Put the SD card in your computer
+and create an empty file named `porter-debug` on the `BOOTFS` volume.
+Boot the Pi with a display (micro-HDMI) and keyboard attached: you get a
+command line as root. Useful commands:
 
 ```bash
-porterctl config | sed -e 's/"country": ""/"country": "AU"/' -e 's/"ssid": ""/"ssid": "PorterTest"/' -e 's/"passphrase": ""/"passphrase": "choose-a-password"/' > /tmp/c.json
+porterctl status
+```
+
+```bash
+journalctl -u porterd -b --no-pager | tail -60
+```
+
+```bash
+bluetoothctl show
+```
+
+The first shows what the router thinks is happening, the second its log,
+the third whether Bluetooth is up. If Bluetooth is the problem you can
+still do first-time setup from there:
+
+```bash
+porterctl config | sed -e 's/"country": ""/"country": "AU"/' -e 's/"ssid": ""/"ssid": "MyNetwork"/' -e 's/"passphrase": ""/"passphrase": "choose-a-password"/' > /tmp/c.json
 ```
 
 ```bash
 porterctl call config.set "{\"config\": $(cat /tmp/c.json)}"
 ```
 
-In general `porterctl config` prints the configuration, and writing an
-edited copy back with `config.set` applies it.
+Delete the `porter-debug` file when you are done.
 
-## Build
+**Starting over.** Settings → System → Factory reset erases all
+settings and pairings. Re-flashing the card does the same.
 
-### Image
+## Good to know
 
-On Debian or Ubuntu (x86-64 or arm64), as root:
+- **Updating** means flashing a newer image. That also erases your
+  settings; there is no backup and restore yet.
+- **What the router contacts by itself:** a time server; one small page
+  on `captive.apple.com` to detect sign-in pages (the same check an
+  iPhone makes); your chosen ad block lists, daily, when ad blocking is
+  on; and a country database from db-ip.com, monthly. A speed test
+  contacts its test server only when you run one. Nothing reports to
+  the authors of this project; there is nowhere for it to report to.
+- **Security.** The app's connection to the router is encrypted and
+  authenticated independently of Bluetooth pairing, and a phone can only
+  pair while the router is new or its button has just been pressed.
+  There are no passwords to log in to the router itself; SSH is off
+  unless you enable it in Settings, and then only from your own network
+  with your key.
+- **Ad blocking** works by refusing to look up ad domains. It cannot
+  remove ads served from the same place as the content, and a device
+  using its own encrypted DNS bypasses it.
+- **Country rules** use a public database that is approximate. Global
+  services such as public DNS resolvers appear under a single country.
+- **IPv6** is provided by address translation. Your devices get private
+  IPv6 addresses, so for sites that have both, most devices will prefer
+  IPv4; IPv6-only sites work.
+- **USB Wi-Fi adapters** that draw a lot of power may need a 5 A power
+  supply, or `usb_max_current_enable=1` in `config.txt` on the card.
+- **Many devices on the built-in radio.** The Pi's Wi-Fi chip supports
+  only a handful of simultaneous clients with its default firmware.
+  [The developer notes](docs/DEVELOPMENT.md#built-in-radio-client-limit)
+  describe the alternative firmware.
+- **Not included:** OpenVPN, a VPN server, enterprise (username and
+  password) Wi-Fi as the uplink, intrusion detection, load balancing
+  across several uplinks.
 
-```bash
-sudo apt-get install mmdebstrap qemu-user-static binfmt-support arch-test dosfstools mtools fdisk e2fsprogs xz-utils gpg curl
-```
+## For developers
 
-```bash
-sudo image/build.sh
-```
+How it is built, how to build the image yourself, the tests, and the
+control protocol are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and
+[docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-The result is `build/porter-<version>.img.xz` with its SHA-256. The
-script needs Go (the version in `daemon/go.mod`) and downloads Debian
-*trixie* and Raspberry Pi packages; that is the only time anything is
-fetched. Nothing is loop-mounted, so it also runs in containers.
-
-The image is deliberately appliance-like:
-
-- The root file system is mounted read-only; `/var` and `/tmp` are in
-  RAM. Pulling the power cannot corrupt the system.
-- Settings live on a small third partition (`/data`). If it is ever
-  unrecoverable it is recreated and the router returns to factory state
-  rather than failing to start.
-- There is no password login. SSH is off unless enabled in the app
-  (LAN-side only, key-only). For a console, create an empty file named
-  `porter-debug` on the boot partition: that gives a root shell on the
-  serial port and on HDMI.
-
-### Daemon
-
-```bash
-cd daemon && go test ./...
-```
-
-The end-to-end test runs the real daemon in network namespaces against a
-simulated upstream network (DHCP, DNS, captive portal, WireGuard server)
-and two client devices:
-
-```bash
-cd daemon && sudo go test -tags e2e -count=1 -v ./e2e/
-```
-
-On the router, `porterctl status`, `porterctl config` and
-`porterctl call <method> [json]` speak the same protocol as the app over
-a local socket.
-
-### PorterKit
-
-```bash
-cd ios/PorterKit && swift test
-```
-
-The tests check the Swift protocol code against vectors generated by the
-Go implementation. With `PORTER_CONTROL_SOCKET=/run/porter/control.sock`
-set they also drive a running `porterd`.
-
-## How the pieces fit
-
-```
- iPhone app ── BLE GATT ── bluetoothd ── porterd ─┬─ hostapd          (access points)
-                                                  ├─ wpa_supplicant   (Wi-Fi uplink)
-                                                  ├─ dhcpcd           (uplink DHCP / RA / DHCPv6)
-                                                  ├─ dnsmasq          (LAN DHCP and router advertisements)
-                                                  ├─ nftables         (firewall, NAT44/NAT66, classification)
-                                                  ├─ policy routing   (one table per VPN profile)
-                                                  ├─ WireGuard        (kernel)
-                                                  └─ DNS forwarder    (built in)
-```
-
-`porterd` owns one configuration document and continuously reconciles
-every subsystem against it and against what the network is doing. Each
-connection from the LAN is classified once in nftables and marked; the
-mark selects a routing table. Whenever the inputs to classification
-change, connection tracking is flushed so no flow stays on a path that no
-longer applies to it. The firewall is replaced atomically and is left in
-place if the daemon restarts.
-
-## Things to know
-
-- **Time.** The Pi 5 has no clock battery by default. The router keeps
-  time by NTP, the app also sets its clock at the start of every session
-  (which covers a router that is not online yet), and the last known time
-  is restored at boot.
-- **Connectivity check.** To tell a captive portal from a working uplink
-  the router fetches one small page every so often (Apple's
-  `captive.apple.com`, the same one an iPhone asks).
-- **What the router fetches by itself.** Besides NTP and the
-  connectivity check: block lists daily, when ad blocking is on (from
-  the URLs you chose), and DB-IP's free "IP to Country Lite" database
-  monthly (CC BY 4.0, attribution in the app's About page). Each
-  download is checked before it replaces the copy in use, and is kept on
-  the data partition, so both keep working offline and across reboots.
-  The image carries a copy of the country database from build time as
-  the starting point (`PORTER_NO_GEOIP=1` builds without one). The
-  router's own software is never updated this way: that takes a new
-  image.
-- **Country data is approximate**, and anycast services such as public
-  DNS resolvers are attributed to a single country.
-- **Ad blocking is DNS-level.** It stops lookups of listed names; it
-  cannot remove ads served from the same host as the content, and a
-  device using its own encrypted DNS bypasses it.
-- **Speed test.** A speed test has to exchange data with a server on the
-  internet. It runs only when started from the app, against the URLs
-  under *Settings → Speed test server* (Cloudflare's by default). It
-  measures the router's uplink, not the Wi-Fi between a device and the
-  router.
-- **Flows are sampled.** The connection list is read from the kernel
-  every five seconds, so very short connections can be missed, and
-  connections refused by a block rule are not listed. Changing rules
-  resets connection tracking, which also clears the active list.
-- **NAT66 and address selection.** Clients hold only ULA addresses, so
-  for destinations that have both address families most systems prefer
-  IPv4. IPv6-only destinations work.
-- **USB power.** The Pi 5 limits its USB ports to 600 mA on supplies
-  that do not identify as 5 A. High-power Wi-Fi adapters may need
-  `usb_max_current_enable=1` in `config.txt` (see the comment there).
-- **Built-in radio as access point.** Raspberry Pi ships two firmware
-  builds for the on-board radio; the default one allows only a handful
-  of simultaneous access point clients. The image keeps the default. To
-  switch, on the router:
-  `update-alternatives --set cyfmac43455-sdio.bin /lib/firmware/cypress/cyfmac43455-sdio-minimal.bin`
-  (needs the root file system remounted read-write).
+IP geolocation by [DB-IP](https://db-ip.com).
