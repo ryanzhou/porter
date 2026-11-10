@@ -26,6 +26,16 @@ jobs:
           set -o pipefail
           xcodebuild -project Porter.xcodeproj -scheme Porter \
             -destination 'generic/platform=iOS Simulator' \
-            -configuration Debug CODE_SIGNING_ALLOWED=NO build \
-            | grep -E "error|warning: unre|BUILD (SUCCEEDED|FAILED)|\*\* " || true
-          test "${PIPESTATUS[0]}" = 0
+            -derivedDataPath build \
+            -configuration Debug CODE_SIGNING_ALLOWED=NO build > xcodebuild.log 2>&1 || status=$?
+          grep -E "error:|BUILD (SUCCEEDED|FAILED)" xcodebuild.log || true
+          echo "Swift files compiled: $(grep -c 'SwiftCompile normal' xcodebuild.log || true)"
+          test "${status:-0}" = 0
+      - name: Check the built app contains the app's own code
+        working-directory: ios
+        run: |
+          app=build/Build/Products/Debug-iphonesimulator/Porter.app
+          ls -l "$app"
+          for symbol in DashboardView InternetView DevicesView VPNView SettingsView BLECentral; do
+            grep -rqa "$symbol" "$app" || { echo "missing $symbol in the built app"; exit 1; }
+          done
