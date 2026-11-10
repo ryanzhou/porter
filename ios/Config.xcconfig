@@ -1,0 +1,11 @@
+// Signing and identity for the Porter app.
+//
+// Do not put your own team or bundle identifier here, and do not pick a
+// team in Xcode's Signing & Capabilities pane (Xcode would write it into
+// the project file). Instead copy Local.xcconfig.example to
+// Local.xcconfig, which git ignores, and set them there.
+
+DEVELOPMENT_TEAM =
+PRODUCT_BUNDLE_IDENTIFIER = com.example.porter
+
+#include? "Local.xcconfig"

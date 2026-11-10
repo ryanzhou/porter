@@ -92,9 +92,24 @@ balancing, and WPA-Enterprise upstream networks.
 
 ### App
 
-Open `ios/Porter.xcodeproj` in Xcode 16 or later, set your development
-team and a bundle identifier of your own on the *Porter* target, and run
-it on an iPhone (iOS 17+). The app cannot be distributed pre-signed.
+The app is built from source with Xcode 16 or later on a Mac and
+installed on your own iPhone (iOS 17+). It cannot be distributed
+pre-signed. No paid developer account is needed:
+
+1. In Xcode, *Settings → Accounts*, add your Apple ID. A free Apple ID
+   gives you a "Personal Team" that can install apps on your own devices.
+2. Copy `ios/Local.xcconfig.example` to `ios/Local.xcconfig` and set your
+   Team ID and a bundle identifier of your own. That file is ignored by
+   git, so your signing details never enter the repository.
+3. Open `ios/Porter.xcodeproj`, connect the iPhone, select it as the run
+   destination and press Run. The first time, the phone asks you to turn
+   on *Developer Mode* (Settings → Privacy & Security) and, with a free
+   Apple ID, to trust your certificate (Settings → General → VPN & Device
+   Management).
+
+With a free Apple ID the installed app stops launching after 7 days
+until you press Run again (its data is kept). A paid developer account
+extends that to a year.
 
 To look around without a router, launch the app with the argument
 `-demo` (Xcode: *Product → Scheme → Edit Scheme → Arguments*). It then
@@ -115,6 +130,35 @@ screenshots as an artifact.
 To pair another phone, press the Pi's power button briefly (the LED
 blinks fast for two minutes) or use *Settings → Paired phones*. Holding
 the button for a second or more shuts the router down cleanly.
+
+## Trying it out
+
+Without any hardware: run the app in the iOS Simulator with the `-demo`
+argument (above). That needs no Apple ID at all.
+
+With a Pi 5, a suggested order, each step building on the last:
+
+1. **Boot.** Flash the image and, for the first boot, put an empty file
+   named `porter-debug` on the boot partition and attach HDMI and a
+   keyboard (or a serial cable). You get a root shell; `porterctl status`
+   shows what the router thinks, `journalctl -u porterd` its log, and
+   `bluetoothctl show` whether the Bluetooth controller is up.
+2. **Pair.** Run the app on the iPhone, pick the router, finish setup
+   (country, Wi-Fi name and password).
+3. **Wired uplink.** Plug Ethernet into a network with DHCP, join the
+   router's Wi-Fi from a laptop and browse. *Overview* should say Online.
+4. **Wi-Fi uplink.** Add a USB Wi-Fi adapter, give it the *Uplink* role
+   under *Internet*, scan and join a network. Then try the built-in
+   radio alone with the role *Both*.
+5. **Captive portal.** Join a hotel or café network; *Overview* shows the
+   sign-in section.
+6. **VPN and rules.** Import a WireGuard configuration under *VPN*, route
+   one device or one country through it, and check *Connections* to see
+   which path each connection took.
+
+If the app cannot reach the router, everything the app does can also be
+done from the debug shell: `porterctl config` prints the configuration
+and `porterctl call config.set '{"config": ...}'` writes it.
 
 ## Build
 

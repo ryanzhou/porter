@@ -1,0 +1,10 @@
+// Copy to Local.xcconfig (ignored by git) and fill in.
+//
+// DEVELOPMENT_TEAM is the 10-character Team ID. With a free Apple ID it is
+// your "Personal Team": add the Apple ID under Xcode > Settings > Accounts,
+// then look the ID up in Keychain Access (the "Apple Development"
+// certificate's Organizational Unit) or let Xcode show it once in the
+// Signing pane. PRODUCT_BUNDLE_IDENTIFIER must be unique to you.
+
+DEVELOPMENT_TEAM = ABCDE12345
+PRODUCT_BUNDLE_IDENTIFIER = com.yourname.porter

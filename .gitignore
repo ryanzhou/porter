@@ -8,3 +8,6 @@ xcuserdata/
 DerivedData/
 .build/
 .swiftpm/
+
+# Local signing settings for the iOS app
+ios/Local.xcconfig
