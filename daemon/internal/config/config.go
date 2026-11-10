@@ -3,6 +3,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -437,7 +438,10 @@ func (s *Store) Load() (*Config, error) {
 		return nil, err
 	}
 	var c Config
-	err = json.Unmarshal(b, &c)
+	b, err = migrate(b, SchemaVersion, migrations)
+	if err == nil {
+		err = json.Unmarshal(b, &c)
+	}
 	if err == nil {
 		c.Normalize()
 		err = c.Validate()
@@ -447,6 +451,51 @@ func (s *Store) Load() (*Config, error) {
 		return Default(), fmt.Errorf("stored config rejected, using defaults: %w", err)
 	}
 	return &c, nil
+}
+
+// migrations carries settings across versions of the software. Entry n
+// rewrites a stored document of schema version n as version n+1; a
+// version that needs no rewriting has no entry. Fields that are merely
+// new need nothing here: Normalize gives them their defaults.
+//
+// The document is handled as plain JSON rather than as a Config, because
+// a field an old version wrote may no longer exist in Config at all.
+//
+// When SchemaVersion is raised, the step from the previous version goes
+// here. Without it a router that updates itself would lose its settings.
+var migrations = map[int]func(doc map[string]any) error{}
+
+// migrate brings a stored document up to schema version to.
+func migrate(raw []byte, to int, steps map[int]func(doc map[string]any) error) ([]byte, error) {
+	var head struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil, err
+	}
+	switch {
+	case head.Version == to:
+		return raw, nil
+	case head.Version > to:
+		return nil, fmt.Errorf("the settings were written by a newer version of the software (format %d; this version reads %d)", head.Version, to)
+	case head.Version < 1:
+		return nil, fmt.Errorf("unsupported config version %d", head.Version)
+	}
+	var doc map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber() // keeps large numbers exact through the round trip
+	if err := dec.Decode(&doc); err != nil {
+		return nil, err
+	}
+	for v := head.Version; v < to; v++ {
+		if step := steps[v]; step != nil {
+			if err := step(doc); err != nil {
+				return nil, fmt.Errorf("carrying the settings from format %d to %d: %w", v, v+1, err)
+			}
+		}
+		doc["version"] = v + 1
+	}
+	return json.Marshal(doc)
 }
 
 func (s *Store) Save(c *Config) error {

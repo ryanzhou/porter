@@ -117,6 +117,13 @@ type System struct {
 	// Pending records an update that has been written and not yet
 	// confirmed. It is on the data partition, which both slots see.
 	Pending string
+	// DataDir is the daemon's directory on the data partition, and
+	// Backup a directory for a copy of its small files, taken before a
+	// trial. Both versions use the same data partition, so a new version
+	// may rewrite settings in a form the old one cannot read; if the
+	// trial does not hold, the old version gets back what it had.
+	DataDir string
+	Backup  string
 	// PublicKey is a file with the base64 Ed25519 key updates must be
 	// signed with. If the file does not exist, updates are trusted on
 	// the strength of the HTTPS connection they came over.
@@ -480,6 +487,9 @@ func (s *System) Install(ctx context.Context, client *http.Client, base string, 
 	if err != nil {
 		return fmt.Errorf("finishing the boot partition: %w", err)
 	}
+	if err := s.snapshot(); err != nil {
+		return fmt.Errorf("saving the settings: %w", err)
+	}
 	note, _ := json.Marshal(pending{Version: m.Version, Slot: target.Name, From: from, At: time.Now().Unix()})
 	if err := writeSynced(s.Pending, note); err != nil {
 		return err
@@ -489,6 +499,102 @@ func (s *System) Install(ctx context.Context, client *http.Client, base string, 
 	}
 	progress("restart", 100)
 	return s.Restart(true)
+}
+
+// kept reports whether a file in the data directory belongs in the copy
+// taken before a trial: settings and other small state, not caches, not
+// the clock, not the updater's own notes.
+func (s *System) kept(e os.DirEntry) bool {
+	name := e.Name()
+	if !e.Type().IsRegular() || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".bad") {
+		return false
+	}
+	if name == filepath.Base(s.Pending) || name == "clock" {
+		return false
+	}
+	info, err := e.Info()
+	return err == nil && info.Size() <= 1<<20
+}
+
+func copySynced(from, to string) error {
+	b, err := os.ReadFile(from)
+	if err != nil {
+		return err
+	}
+	tmp := to + ".tmp"
+	if err := writeSynced(tmp, b); err != nil {
+		return err
+	}
+	if info, err := os.Stat(from); err == nil {
+		_ = os.Chmod(tmp, info.Mode().Perm())
+	}
+	return os.Rename(tmp, to)
+}
+
+// snapshot copies the settings aside before a trial.
+func (s *System) snapshot() error {
+	if s.DataDir == "" {
+		return nil
+	}
+	if err := os.RemoveAll(s.Backup); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.Backup, 0o700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(s.DataDir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !s.kept(e) {
+			continue
+		}
+		if err := copySynced(filepath.Join(s.DataDir, e.Name()), filepath.Join(s.Backup, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Recover is called when the daemon starts, before it reads anything from
+// the data directory. If an update was tried and the system that is
+// starting is the old one, the settings go back to what they were before
+// the trial: the new version ran for a while and may have rewritten them
+// in a way this version does not understand. It reports whether it
+// restored anything. Settle, later, does the reporting and tidies up.
+func (s *System) Recover() (bool, error) {
+	b, err := os.ReadFile(s.Pending)
+	if err != nil || s.DataDir == "" {
+		return false, nil
+	}
+	var note pending
+	if json.Unmarshal(b, &note) != nil {
+		return false, nil
+	}
+	cur, err := s.Current()
+	if err != nil || cur.Name == note.Slot {
+		return false, nil
+	}
+	entries, err := os.ReadDir(s.Backup)
+	if err != nil {
+		return false, nil
+	}
+	restored := false
+	for _, e := range entries {
+		if !e.Type().IsRegular() || strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		if err := copySynced(filepath.Join(s.Backup, e.Name()), filepath.Join(s.DataDir, e.Name())); err != nil {
+			return restored, err
+		}
+		restored = true
+	}
+	// Done once: a second start must not undo changes made since.
+	if err := os.RemoveAll(s.Backup); err != nil {
+		return restored, err
+	}
+	return restored, nil
 }
 
 // Outcome is what Settle found.
@@ -522,6 +628,7 @@ func (s *System) Settle() (Outcome, error) {
 		// Back on the old slot: the trial never got as far as this.
 		_ = s.writeSelector(cur, cur)
 		_ = os.Remove(s.Pending)
+		_ = os.RemoveAll(s.Backup)
 		return Outcome{Failed: true, Version: note.Version}, nil
 	}
 	// The old slot stays as it is, a working system to fall back on by
@@ -532,6 +639,7 @@ func (s *System) Settle() (Outcome, error) {
 	if err := os.Remove(s.Pending); err != nil {
 		return Outcome{}, err
 	}
+	_ = os.RemoveAll(s.Backup)
 	return Outcome{Updated: true, Version: note.Version}, nil
 }
 

@@ -31,6 +31,8 @@ func Router(dataDir, runDir string) *System {
 		TryFlag:    "/proc/device-tree/chosen/bootloader/tryboot",
 		Selector:   "/boot/firmware",
 		Pending:    filepath.Join(dataDir, "update-pending"),
+		DataDir:    dataDir,
+		Backup:     filepath.Join(dataDir, "before-update"),
 		PublicKey:  "/usr/lib/porter/update.pub",
 	}
 	s.WritableSelector = func(fn func() error) error {

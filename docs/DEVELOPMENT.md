@@ -132,7 +132,25 @@ of a slot (`porter-<version>-boot.vfat.gz`, `-root.ext4.gz`) and
 Partition numbers and slot sizes are fixed (see the top of
 `image/build.sh`): every later version has to fit a card flashed today.
 A change to them needs a new `Layout` number in the update package, and
-cards have to be flashed again.
+cards have to be flashed again. A root slot is 4 GB, several times what
+the system takes now, which is why the card has to be 16 GB.
+
+**Settings across versions.** Both slots use the one data partition, so
+an update keeps settings, pairings and the router's identity without
+doing anything. Two cases need care:
+
+- *A newer version changes the format of the settings.* New fields need
+  nothing; `Normalize` fills in their defaults. A change to existing
+  fields means raising `SchemaVersion` in `daemon/internal/config` and
+  adding the step from the old version to `migrations` there. Without
+  that step the new version would reject the stored settings and start
+  in the factory state.
+- *An update does not hold and the old version starts again.* The new
+  version ran for a while on the shared partition and may have rewritten
+  the settings in a form the old one cannot read. So the installer copies
+  the small files of the data directory aside before the trial
+  (`before-update/`), and `porterd` restores them at startup, before it
+  reads anything, if it finds itself back on the old slot.
 
 **Signing.** By default a router trusts an update because it came from
 GitHub over HTTPS. To make it require a signature as well, create a key

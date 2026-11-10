@@ -102,11 +102,20 @@ func main() {
 	}
 
 	bt, _ := strconv.ParseInt(buildTime, 10, 64)
+	// Before anything reads the settings: if an update was tried and did
+	// not hold, this is the old version starting again, and it gets back
+	// the settings it had before the new one touched them.
+	updater := update.Router(*dataDir, *runDir)
+	if restored, err := updater.Recover(); err != nil {
+		log.Error("restoring the settings from before the update", "err", err)
+	} else if restored {
+		log.Warn("an update did not hold; the settings are as they were before it")
+	}
 	c, err := core.New(core.Options{
 		DataDir: *dataDir, RunDir: *runDir,
 		DHCPHook: hooks[dhcpHook], LeaseHook: hooks[leaseHook],
 		WGUserspace: *wgImpl, GeoIPPath: *geoPath, Version: version, BuildTime: time.Unix(bt, 0),
-		Update: update.Router(*dataDir, *runDir), UpdateURL: releaseURL(), UpdateSettle: 45 * time.Second,
+		Update: updater, UpdateURL: releaseURL(), UpdateSettle: 45 * time.Second,
 		Log: log, Logs: ring,
 	})
 	if err != nil {

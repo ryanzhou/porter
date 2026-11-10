@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,5 +110,60 @@ func TestParseUpstream(t *testing.T) {
 		if _, err := ParseUpstream(bad); err == nil {
 			t.Errorf("%s: accepted", bad)
 		}
+	}
+}
+
+func TestMigrate(t *testing.T) {
+	old := []byte(`{"version":1,"rev":18446744073709551615,"system":{"name":"Porter","hostname":"gone-in-2"},"wifi_name":"Mine"}`)
+	steps := map[int]func(map[string]any) error{
+		// Format 2 moved the Wi-Fi name and dropped a field.
+		1: func(doc map[string]any) error {
+			doc["ap"] = map[string]any{"ssid": doc["wifi_name"]}
+			delete(doc, "wifi_name")
+			delete(doc["system"].(map[string]any), "hostname")
+			return nil
+		},
+		// Format 3 changed nothing that needs rewriting; format 4 did.
+		3: func(doc map[string]any) error {
+			doc["ap"].(map[string]any)["band"] = "5"
+			return nil
+		},
+	}
+	got, err := migrate(old, 4, steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"ap":{"band":"5","ssid":"Mine"},"rev":18446744073709551615,"system":{"name":"Porter"},"version":4}`
+	if string(got) != want {
+		t.Errorf("migrated:\n%s\nwant:\n%s", got, want)
+	}
+	// Already current: untouched, byte for byte.
+	if same, err := migrate(old, 1, steps); err != nil || string(same) != string(old) {
+		t.Errorf("a current document was rewritten: %s %v", same, err)
+	}
+	// Written by a newer version than this one: refused, not guessed at.
+	if _, err := migrate([]byte(`{"version":5}`), 4, steps); err == nil {
+		t.Error("settings from a newer version were accepted")
+	}
+	if _, err := migrate([]byte(`{"version":0}`), 4, steps); err == nil {
+		t.Error("a document without a version was accepted")
+	}
+	// A step that fails stops the migration.
+	steps[2] = func(map[string]any) error { return errors.New("no") }
+	if _, err := migrate(old, 4, steps); err == nil {
+		t.Error("a failed step was ignored")
+	}
+
+	// What is stored today loads as it always did.
+	dir := t.TempDir()
+	st := NewStore(dir)
+	c := Default()
+	c.System.Name = "Kept"
+	if err := st.Save(c); err != nil {
+		t.Fatal(err)
+	}
+	back, err := st.Load()
+	if err != nil || back.System.Name != "Kept" {
+		t.Errorf("round trip through the store: %+v %v", back, err)
 	}
 }

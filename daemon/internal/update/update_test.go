@@ -45,13 +45,22 @@ func newRig(t *testing.T, runningRoot int) *rig {
 	}
 	selector := filepath.Join(r.dir, "selector")
 	os.MkdirAll(selector, 0o755)
+	// The data partition, with settings as the running version wrote them.
+	data := filepath.Join(r.dir, "data")
+	os.MkdirAll(filepath.Join(data, "blocklists"), 0o755)
+	os.WriteFile(filepath.Join(data, "config.json"), []byte(`{"version":1,"name":"before"}`), 0o600)
+	os.WriteFile(filepath.Join(data, "pairings.json"), []byte(`["phone"]`), 0o600)
+	os.WriteFile(filepath.Join(data, "clock"), []byte("1700000000"), 0o644)
+	os.WriteFile(filepath.Join(data, "geoip.csv.gz"), make([]byte, 2<<20), 0o644)
 	os.WriteFile(filepath.Join(r.dir, "cmdline"), []byte(fmt.Sprintf("console=tty1 root=PARTUUID=504f5254-%02x ro rootwait\n", runningRoot)), 0o644)
 	r.sys = &System{
 		PartPrefix: parts, DiskID: "504f5254",
 		Cmdline:          filepath.Join(r.dir, "cmdline"),
 		TryFlag:          filepath.Join(r.dir, "tryboot"),
 		Selector:         selector,
-		Pending:          filepath.Join(r.dir, "pending"),
+		Pending:          filepath.Join(r.dir, "data", "update-pending"),
+		DataDir:          filepath.Join(r.dir, "data"),
+		Backup:           filepath.Join(r.dir, "data", "before-update"),
 		PublicKey:        filepath.Join(r.dir, "update.pub"),
 		WritableSelector: func(fn func() error) error { return fn() },
 		WithBoot: func(dev string, fn func(dir string) error) error {
@@ -171,6 +180,12 @@ func TestInstallAndSettle(t *testing.T) {
 	if !r.sys.Trial() {
 		t.Error("trial start not recognised")
 	}
+	// The new version starts and rewrites the settings its own way; that
+	// is its business, and nothing is put back while it is on trial.
+	os.WriteFile(filepath.Join(r.sys.DataDir, "config.json"), []byte(`{"version":2,"name":"after"}`), 0o600)
+	if restored, err := r.sys.Recover(); restored || err != nil {
+		t.Errorf("settings were put back under the new version: %v %v", restored, err)
+	}
 	out, err := r.sys.Settle()
 	if err != nil || !out.Updated || out.Failed || out.Version != "v1.2.0" {
 		t.Fatalf("settle: %+v, %v", out, err)
@@ -180,6 +195,9 @@ func TestInstallAndSettle(t *testing.T) {
 	}
 	if r.sys.Unsettled() {
 		t.Error("still waiting to be confirmed")
+	}
+	if _, err := os.Stat(r.sys.Backup); err == nil {
+		t.Error("the copy of the old settings was kept after a successful update")
 	}
 	if out, _ := r.sys.Settle(); out.Updated || out.Failed {
 		t.Errorf("settling twice: %+v", out)
@@ -195,8 +213,35 @@ func TestTrialThatDidNotHold(t *testing.T) {
 	if !bytes.Equal(r.part(5)[:len(r.rootImg)], r.rootImg) || !strings.Contains(r.cmdline, "root=PARTUUID=504f5254-05 ") {
 		t.Error("update not written to slot A")
 	}
-	// The new system never came up; the machine restarted and is on
-	// slot B again.
+	// The copy taken before the trial: settings, not caches or the clock.
+	for name, want := range map[string]bool{"config.json": true, "pairings.json": true, "clock": false, "geoip.csv.gz": false, "update-pending": false, "blocklists": false} {
+		if _, err := os.Stat(filepath.Join(r.sys.Backup, name)); (err == nil) != want {
+			t.Errorf("%s in the copy taken before the trial: %v, want %v", name, err == nil, want)
+		}
+	}
+	// The new version ran for a moment, rewrote the settings in a form
+	// the old one cannot read, and did not hold. The machine restarted
+	// and is on slot B again.
+	cfg := filepath.Join(r.sys.DataDir, "config.json")
+	os.WriteFile(cfg, []byte(`{"version":2,"name":"after"}`), 0o600)
+	restored, err := r.sys.Recover()
+	if !restored || err != nil {
+		t.Fatalf("recover: %v %v", restored, err)
+	}
+	if b, _ := os.ReadFile(cfg); string(b) != `{"version":1,"name":"before"}` {
+		t.Errorf("settings after going back: %s", b)
+	}
+	if info, _ := os.Stat(cfg); info == nil || info.Mode().Perm() != 0o600 {
+		t.Error("restored settings lost their permissions")
+	}
+	// Only once: what is changed from here on must stay.
+	os.WriteFile(cfg, []byte(`{"version":1,"name":"changed since"}`), 0o600)
+	if restored, _ := r.sys.Recover(); restored {
+		t.Error("settings were put back a second time")
+	}
+	if b, _ := os.ReadFile(cfg); string(b) != `{"version":1,"name":"changed since"}` {
+		t.Errorf("a later change was undone: %s", b)
+	}
 	out, err := r.sys.Settle()
 	if err != nil || !out.Failed || out.Updated || out.Version != "v1.2.0" {
 		t.Fatalf("settle: %+v, %v", out, err)
