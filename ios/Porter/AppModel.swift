@@ -54,8 +54,32 @@ final class AppModel: ObservableObject {
             .store(in: &subscriptions)
     }
 
+    /// Demo mode runs the whole app against built-in sample data, with no
+    /// router and no Bluetooth: launch with the argument `-demo`.
+    let isDemo = ProcessInfo.processInfo.arguments.contains("-demo")
+
+    /// In demo mode, the screen to open directly (`-demoScreen traffic`).
+    var demoScreen: String? {
+        isDemo ? UserDefaults.standard.string(forKey: "demoScreen") : nil
+    }
+
     func start() {
-        central.startScanning()
+        if isDemo {
+            startDemo()
+        } else {
+            central.startScanning()
+        }
+    }
+
+    private func startDemo() {
+        guard connection == nil else { return }
+        let demo = DemoRouter.makeConnection()
+        connection = demo
+        Task {
+            try? await reload()
+            activity = (try? await demo.activity()) ?? []
+            phase = .connected
+        }
     }
 
     var isConnected: Bool { phase == .connected }
@@ -64,7 +88,7 @@ final class AppModel: ObservableObject {
 
     /// Connects to the paired router as soon as it shows up.
     private func autoConnect(_ routers: [DiscoveredRouter]) {
-        guard phase == .searching, connectTask == nil, !holdOff else { return }
+        guard !isDemo, phase == .searching, connectTask == nil, !holdOff else { return }
         guard let match = routers.first(where: { seen in knownRouters.contains { $0.peripheral == seen.id } }) else { return }
         connect(to: match)
     }

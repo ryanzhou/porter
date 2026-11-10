@@ -39,3 +39,37 @@ jobs:
           for symbol in DashboardView InternetView DevicesView VPNView SettingsView BLECentral; do
             grep -rqa "$symbol" "$app" || { echo "missing $symbol in the built app"; exit 1; }
           done
+      - name: Screenshots of the app in demo mode
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          app=build/Build/Products/Debug-iphonesimulator/Porter.app
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          runtimes = json.load(sys.stdin)["devices"]
+          for runtime in sorted((r for r in runtimes if "iOS" in r), reverse=True):
+              phones = [d for d in runtimes[runtime] if d["name"].startswith("iPhone")]
+              plain = [d for d in phones if "Pro" in d["name"] and "Max" not in d["name"]] or phones
+              if plain:
+                  print(plain[-1]["udid"])
+                  break
+          ')
+          test -n "$udid"
+          xcrun simctl list devices | grep "$udid"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl status_bar "$udid" override --time "9:41" --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 || true
+          xcrun simctl install "$udid" "$app"
+          mkdir -p screenshots
+          for screen in overview internet devices vpn settings traffic flows speedtest device; do
+            xcrun simctl launch "$udid" com.example.porter -demo -demoScreen "$screen"
+            sleep 6
+            xcrun simctl io "$udid" screenshot "screenshots/$screen.png"
+            xcrun simctl terminate "$udid" com.example.porter || true
+          done
+          ls -l screenshots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porter-screenshots
+          path: ios/screenshots/*.png
+          retention-days: 30

@@ -24,7 +24,9 @@ public struct Empty: Codable, Equatable { public init() {} }
 
 /// The RPC layer: requests, responses and events over a secure session.
 public actor RouterConnection {
-    private let session: SecureSession
+    private let session: SecureSession?
+    /// Answers calls locally instead of over a session (demo mode).
+    private let demo: ((String, Data) throws -> Data)?
     private var nextID: UInt32 = 1
     private var pending: [UInt32: CheckedContinuation<Data, Error>] = [:]
     private var closedError: Error?
@@ -36,20 +38,31 @@ public actor RouterConnection {
     private let eventSink: AsyncStream<RouterEvent>.Continuation
     private var closeHandlers: [(Error) -> Void] = []
 
-    static func makeEncoder() -> JSONEncoder {
+    public static func makeEncoder() -> JSONEncoder {
         let e = JSONEncoder()
         e.keyEncodingStrategy = .convertToSnakeCase
         return e
     }
 
-    static func makeDecoder() -> JSONDecoder {
+    public static func makeDecoder() -> JSONDecoder {
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
         return d
     }
 
+    /// A connection with no router behind it: `handler` receives each
+    /// method name with its JSON parameters and returns the JSON result.
+    /// Used to run the app against sample data.
+    public init(demo handler: @escaping (String, Data) throws -> Data) {
+        session = nil
+        demo = handler
+        routerKey = Data(count: 32)
+        (events, eventSink) = AsyncStream<RouterEvent>.makeStream(bufferingPolicy: .bufferingNewest(64))
+    }
+
     public init(session: SecureSession) {
         self.session = session
+        demo = nil
         routerKey = session.routerKey
         (events, eventSink) = AsyncStream<RouterEvent>.makeStream(bufferingPolicy: .bufferingNewest(64))
     }
@@ -85,6 +98,7 @@ public actor RouterConnection {
     }
 
     private func readLoop() async {
+        guard let session else { return }
         while true {
             do {
                 let message = try await session.receive()
@@ -129,7 +143,7 @@ public actor RouterConnection {
         for (_, continuation) in pending { continuation.resume(throwing: error) }
         pending.removeAll()
         eventSink.finish()
-        session.close()
+        session?.close()
         for handler in closeHandlers { handler(error) }
         closeHandlers.removeAll()
     }
@@ -157,6 +171,9 @@ public actor RouterConnection {
         // The method name and envelope keys are sent verbatim; only the
         // parameters go through the snake_case conversion.
         let paramData = try Self.makeEncoder().encode(params)
+        if let demo {
+            return try Self.makeDecoder().decode(R.self, from: try demo(method, paramData))
+        }
         var payload = Data("{\"id\":\(id),\"m\":".utf8)
         payload.append(try JSONEncoder().encode(method))
         payload.append(Data(",\"p\":".utf8))
@@ -177,7 +194,7 @@ public actor RouterConnection {
 
     private func transmit(id: UInt32, payload: Data) async {
         do {
-            try await session.send(payload)
+            try await session?.send(payload)
         } catch {
             pending.removeValue(forKey: id)?.resume(throwing: error)
             fail(error)

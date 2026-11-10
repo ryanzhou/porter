@@ -42,14 +42,22 @@ public final class BLECentral: NSObject, ObservableObject {
     @Published public private(set) var state: CBManagerState = .unknown
     @Published public private(set) var discovered: [DiscoveredRouter] = []
 
-    private var central: CBCentralManager!
+    /// Created on first use, so that an app that never scans (demo mode)
+    /// never touches Bluetooth or asks for permission.
+    private var central: CBCentralManager?
     private var peripherals: [UUID: CBPeripheral] = [:]
     private var links: [UUID: BLELink] = [:]
     private var wantsScan = false
 
     public override init() {
         super.init()
-        central = CBCentralManager(delegate: self, queue: .main)
+    }
+
+    private func manager() -> CBCentralManager {
+        if let central { return central }
+        let created = CBCentralManager(delegate: self, queue: .main)
+        central = created
+        return created
     }
 
     /// A sentence explaining why Bluetooth cannot be used, or nil if it can.
@@ -65,19 +73,21 @@ public final class BLECentral: NSObject, ObservableObject {
 
     public func startScanning() {
         wantsScan = true
+        let central = manager()
         guard state == .poweredOn else { return }
         central.scanForPeripherals(withServices: [PorterUUID.service], options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
     }
 
     public func stopScanning() {
         wantsScan = false
-        if state == .poweredOn { central.stopScan() }
+        if state == .poweredOn { central?.stopScan() }
     }
 
     /// Connects to a router by peripheral identifier and prepares its
     /// GATT link. Works for routers seen in this scan and for ones
     /// remembered from earlier.
     public func connect(to id: UUID, timeout: TimeInterval = 15) async throws -> BLELink {
+        let central = manager()
         guard state == .poweredOn else {
             throw BLEError.bluetoothUnavailable(unavailableReason ?? "Bluetooth is not ready yet.")
         }
@@ -91,8 +101,8 @@ public final class BLECentral: NSObject, ObservableObject {
             throw BLEError.connectionFailed("the router is not in range")
         }
         links[id]?.close()
-        let link = BLELink(peripheral: peripheral) { [weak self] in
-            self?.central.cancelPeripheralConnection(peripheral)
+        let link = BLELink(peripheral: peripheral) { [weak central] in
+            central?.cancelPeripheralConnection(peripheral)
         }
         links[id] = link
         central.connect(peripheral, options: nil)
