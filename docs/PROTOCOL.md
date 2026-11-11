@@ -128,24 +128,61 @@ phone; it closes again as soon as one phone has paired.
 | `status.get` | – | Status |
 | `config.get` | – | Config |
 | `config.set` | `{config}` | `{rev}`; `conflict` if `config.rev` is stale |
+| `config.check` | `{config}` | `{error?, notes[], effects[]}`; changes nothing |
 | `events.list` | – | `[{t,kind,msg,mac?}]` |
 
 The configuration is one document (`daemon/internal/config/config.go`
 defines every field). The app edits a copy and writes the whole document
 back with the `rev` it read; the router validates all of it, rejects
-stale writes with `conflict`, and applies the change atomically.
+stale writes with `conflict`, and applies the change atomically: a
+change to several things at once never passes through a state in which
+only some of them have been made.
+
+Beyond every field being well formed, a change has to describe a router
+that can work: at most one radio joins upstream networks, and something
+is left to carry the router's own network. `config.check` answers what
+`config.set` would do with a document without doing it: `error` is why
+it would be refused, `notes` what the hardware cannot do of it (a Wi-Fi
+network that fits on no radio), `effects` what will be noticed (Wi-Fi
+restarting, devices having to rejoin or getting new addresses).
+
+The document's format is `version` 2. Its parts, briefly:
+
+```
+wifi[]      {id ssid passphrase security hidden isolate network enabled}
+            the Wi-Fi networks broadcast; the first ("main") always exists
+networks[]  {id name address ula_prefix isolated route}
+            the router's own networks; the first ("lan") always exists.
+            address and ula_prefix may be left empty for a new one: the
+            router chooses. isolated: cannot open connections to the
+            others. route: "", "direct", "block" or "vpn:<id>"
+lan         {auto_renumber lease_minutes domain ipv6}   shared by all networks
+radios[]    {id role band channel width}   role "off" | "ap" | "wan" | "ap+wan"
+ethernet[]  {name role ip network}         role "wan" | "lan" | "off";
+            network: the network a "lan" port belongs to
+wan         {networks[] wifi_mac eth_mac order[] probe}
+            order: uplink keys, best first: "eth:<port>", "wifi", "phone"
+policy      {default rules[{id name enabled src{devices cidrs networks} dst action}]}
+```
 
 Status (`daemon/internal/core/api.go`):
 
 ```
 name id version time uptime temp ready rev pairing
 internet   "down" | "connecting" | "limited" | "captive" | "online"
-active     interface carrying the default route
-wan[]      {if kind metric carrier internet ipv4 gateway ipv6[] has_v6 dns[] portal_url captive_api mac}
+active     interface of the uplink in use: the first in the configured
+           order that reaches the internet or stands behind a sign-in page
+wan[]      {if kind key label metric rank carrier internet ipv4 gateway ipv6[] has_v6 dns[] portal_url captive_api mac}
+           kind "eth" | "wifi" | "phone"; key: its entry in wan.order;
+           rank: its place in that order, 0 first
 portal     {captive url device}
-aps[]      {radio iface state band channel mode error}
+aps[]      {radio iface state band channel mode error ssids[]}
+           ssids: ids of the Wi-Fi networks the radio carries
 stas[]     {radio iface state ssid bssid freq signal failed fail_reason}
-lan        {address ula clients}
+           state "connected" | "connecting" | "scanning" | "disconnected"
+off_air[]  ids of Wi-Fi networks that are switched on but fit on no radio
+ports[]    {name label phone carrier}   wired interfaces that are plugged in
+lan        {address ula clients networks{id: devices online}}
 vpns[]     {id name type if state error endpoint handshake rx tx paths? of?}
            type "wireguard" | "mpquic"; paths of an MPQUIC tunnel working, of how many
 geoip      {available date}   country database for country rules and flows
@@ -156,12 +193,19 @@ adblock    {enabled domains blocked lists[{url domains updated error}]}
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `radios.list` | – | `[{id,phy,iface,driver,bus,product,mac,bands[],ap,sta,ap_sta,present,role}]` |
-| `wifi.scan` | – | `[{ssid,signal,freq,security,known}]` (takes several seconds) |
+| `radios.list` | – | `[{id,phy,iface,driver,bus,product,mac,bands[],ap,sta,ap_sta,max_ap,max_ap_sta,present,role}]` |
+| `wifi.uplink` | `{radio}` | `{}` – makes that radio the one that joins upstream networks (`""`: none) |
+| `wifi.scan` | `{quick?}` | `[{ssid,signal,freq,security,known}]`; takes several seconds, or with `quick` answers at once from the last scan and starts a new one |
 | `wifi.connect` | `{ssid,psk,hidden}` | `{}` – saves the network with top priority |
 | `wifi.forget` | `{ssid}` | `{}` |
 | `wan.new_mac` | `{kind: "wifi"\|"eth"}` | `{}` – new random upstream MAC |
 | `wan.recheck` | – | `{}` – probe reachability now |
+
+`wifi.uplink` arranges the other radios in the same step: a radio that
+was the uplink goes back to broadcasting, and the chosen one shares
+itself between both jobs only when no other radio carries the router's
+network. `max_ap` and `max_ap_sta` say how many Wi-Fi networks a radio
+can broadcast, alone and while it is also the uplink.
 
 Whether joining succeeded shows up in `stas[]`: `state` becomes
 `connected`, or `failed`/`fail_reason` (`wrong_password`, `rejected`) name

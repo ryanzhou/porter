@@ -45,7 +45,36 @@ every subsystem against it and against what the network is doing.
 - **Captive portals.** While the active uplink is captive, one device is
   marked direct and resolved through the upstream network's own DNS;
   everything else keeps its policy.
-- **IPv6.** The LAN gets a ULA /64; the uplink takes whatever RA or
+- **Networks.** Each of the router's own networks is a bridge
+  (`br-<id>`; the main one is `br-lan`) with its own address range,
+  served by one dnsmasq. Wi-Fi networks (hostapd BSSes) and wired LAN
+  ports are attached to the bridge of the network they belong to.
+  Traffic between networks is routed by the main table and decided in
+  the forward hook: allowed, except new connections out of a network
+  marked isolated. A network's route is one more step in classification,
+  after rules and a device's own route.
+- **Several Wi-Fi networks on a radio.** hostapd runs one BSS per Wi-Fi
+  network on a radio, each on its own interface (`ap<phy>-<n>`) with an
+  address derived from the radio's. How many a radio can carry is read
+  from its interface combinations (`iw phy`); the Raspberry Pi's on-board
+  radio carries one. Networks are spread over the access point radios so
+  that each is on the air somewhere if that is possible at all, and the
+  status says which are not.
+- **Uplink order.** Uplinks keep fixed route metrics; the configured
+  order is carried out by a routing table of its own (105, consulted
+  after the tunnels' tables and before the main table's default route)
+  that holds a default route only while the uplink to use is not the one
+  the metrics would pick. Reordering therefore restarts nothing. The
+  uplink to use is the first in the order that is online or behind a
+  sign-in page; one that has an address but fails three reachability
+  probes in a row is stepped past.
+- **Phones on USB.** An interface driven by `ipheth` (iPhone) or
+  `rndis_host` (Android) is an uplink of kind "phone" for as long as it
+  is plugged in; nothing about it is stored. An iPhone only brings the
+  link up for a computer it trusts: `usbmuxd`, started by udev when an
+  iPhone is plugged in, asks it, and keeps the pairing record in
+  `/data/lockdown` (linked from `/var/lib/lockdown`).
+- **IPv6.** Each network gets a ULA /64; the uplink takes whatever RA or
   DHCPv6 offers; traffic is masqueraded (NAT66). No prefix delegation is
   needed.
 - **MPQUIC.** A VPN profile of this type runs the `mpquic` program as it
@@ -68,8 +97,20 @@ every subsystem against it and against what the network is doing.
   with hysteresis) and tells wpa_supplicant by switching between a 5 GHz
   and a 2.4 GHz copy of each saved network. On a radio that also runs the
   access point, only channels an access point may use count. An access
-  point on its own radio is kept at the other end of 5 GHz from the
-  uplink.
+  point on its own radio is kept clear of the uplink on 5 GHz, on the
+  first channel far enough away that takes an 80 MHz network.
+- **One radio for both.** The access point of a radio that is also the
+  uplink runs on a second interface (`ap<phy>`) and has to be on the
+  uplink's channel. It moves there before the station is allowed to
+  join (a station that tries first is refused, and wpa_supplicant then
+  leaves the network alone for a while), and otherwise stays where it
+  is rather than fall back to a default channel between connections.
+- **Changes as one.** `config.set` validates the document, checks that
+  it describes a router that can work (`Config.Consistent`), and the
+  next pass of the control loop applies all of it: uplinks that stop
+  being uplinks are released, then stations start, then access points.
+  `config.check` runs the same checks, and the radio planning, on a
+  document without applying it.
 - **Control.** A Noise XX channel above GATT, independent of BLE
   pairing; see [PROTOCOL.md](PROTOCOL.md). Pairing is trust-on-first-use,
   gated by the power button.
@@ -222,11 +263,16 @@ CI runs the end-to-end tests this way.
   what actually crosses the router: NAT44, NAT66, DNS interception,
   pause and block, VPN splits by device, domain, country and port,
   per-path DNS, the kill switch, the captive portal bypass, ad blocking,
-  flows, traffic history and speed tests.
+  flows, traffic history and speed tests; a second network (its own
+  addresses, isolation, a route and a rule of its own, and its removal);
+  and a second uplink standing in for a phone (the order of uplinks, and
+  falling back when the first stops reaching the internet).
 - `TestWifi` uses simulated radios (`mac80211_hwsim`): hostapd and
   wpa_supplicant for real, scanning, wrong and right passwords, a
-  wireless client through the router, and one radio doing both jobs. It
-  is skipped where the kernel module is unavailable.
+  wireless client through the router, a second Wi-Fi network on a
+  network of its own, the two radios swapping jobs in one step, and one
+  radio doing both jobs. It is skipped where the kernel module is
+  unavailable.
 
 Optional tests against real data are enabled by environment variables:
 `PORTER_GEOIP_FILE` (a DB-IP file) and `PORTER_BLOCKLIST_DIR` (a

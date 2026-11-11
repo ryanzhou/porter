@@ -15,8 +15,11 @@ and can send some or all of your traffic through your VPN.
 <img src="docs/screenshots/vpn.png" width="200" alt="VPN and rules">
 </p>
 
-- **Your own network anywhere.** Wired or Wi-Fi uplink; the built-in
-  radio, a USB Wi-Fi adapter, or both, in whichever roles you choose.
+- **Your own network anywhere.** The internet comes from a wired port,
+  the venue's Wi-Fi or a phone on a USB cable, in the order you rank
+  them; if the first stops working the router moves on to the next.
+- **More than one network.** A second Wi-Fi name for guests or for work,
+  on addresses of its own, kept apart from your devices if you like.
 - **Controlled over Bluetooth.** The app talks to the router directly,
   so it works whether or not anything has internet yet. No account, no
   cloud service: the router and the app are the only two parts.
@@ -37,7 +40,8 @@ and can send some or all of your traffic through your VPN.
 - An **iPhone** on iOS 17 or later
 - A **Mac with Xcode 16** or later, to put the app on your phone
 - Optional: an Ethernet cable for a wired uplink, a USB Wi-Fi adapter
-  for a second radio, a micro-HDMI cable and keyboard for troubleshooting
+  for a second radio, your phone's USB cable to share its data, a
+  micro-HDMI cable and keyboard for troubleshooting
 
 ## 1. Flash the router
 
@@ -95,23 +99,33 @@ If not, read on.
 
 ## Getting online
 
-Everything here is on the **Internet** tab.
+Everything here is on the **Internet** tab. At the top are the ways out,
+in the order the router tries them.
 
 | You have | Do this |
 |---|---|
 | A wired port | Plug in Ethernet. Nothing else to do. |
-| Wi-Fi only, Pi alone | Set the built-in radio's role to **Both**, tap **Scan**, and join the network. Your own network briefly drops while it moves to the same channel. |
-| Wi-Fi only, plus a USB Wi-Fi adapter | Give the adapter the **Uplink** role, scan and join. The built-in radio stays your network. This is faster and steadier than one radio doing both. |
-| Only your phone's data | Turn on Personal Hotspot and join it as above. |
+| Wi-Fi only | Tap **Join a Wi-Fi network** and pick the network. With the Pi alone, the built-in radio does both jobs and your own network moves to the same channel. With a USB Wi-Fi adapter plugged in, the adapter joins and the built-in radio stays your network, which is faster and steadier. |
+| Your phone's data | Plug the phone into one of the Pi's USB ports and turn on Personal Hotspot (iPhone) or USB tethering (Android). An iPhone asks once whether to trust the router: tap **Trust**. Or join the phone's hotspot as a Wi-Fi network. |
 
 Networks you have joined are remembered and rejoined automatically. If
-the venue's network uses the same address range as yours, the router
-moves your network out of the way by itself.
+the venue's network uses the same address range as one of yours, the
+router moves yours out of the way by itself.
+
+**Order.** The router uses the first way out in the list that works, and
+moves on to the next when one stops reaching the internet (a sign-in
+page does not count as not working: it waits for you). Tap **Edit** and
+drag to change the order, for instance to put your phone last so that
+its data is only used when nothing else works.
+
+**Wi-Fi uplink** has the rest: which radio joins when there are two, the
+address the router shows upstream, and **Stop using Wi-Fi**.
 
 Addresses come from the network by default. Where a network wants a
-fixed address instead, set it by hand: for a wired port under
-**Addresses**, for a Wi-Fi network by tapping it under **Saved**. IPv4
-and IPv6 are set separately, each with address, gateway and DNS servers.
+fixed address instead, set it by hand: for a wired port by tapping
+**Ethernet** in the list, for a Wi-Fi network by tapping it under
+**Saved**. IPv4 and IPv6 are set separately, each with address, gateway
+and DNS servers.
 
 Where a network is on both bands the router joins it on 5 GHz, unless
 that signal is poor; the band shows next to the uplink. With one radio
@@ -137,6 +151,29 @@ section disappears. Until then only the sign-in device can reach the
 venue's network; devices you have put behind a VPN kill switch stay
 protected.
 
+## Your networks
+
+**Settings → Wi-Fi & networks** is where your own side is set up: the
+Wi-Fi names, the networks behind them, which radio broadcasts, and what
+each wired port is for. These depend on each other, so nothing there
+changes the router until you tap **Apply**. Before you do, the page says
+what the changes will do (devices having to reconnect, for instance), or
+why they cannot be applied; **Discard** puts everything back.
+
+- **A guest network.** Tap **Add Wi-Fi network**, give it a name and a
+  password, and leave it on **A new one**, **Keep apart**. Guests get
+  online, on addresses of their own, and cannot reach your devices.
+- **A network** is a set of addresses with its own rules. A Wi-Fi name or
+  a wired port belongs to one; a network can have a **Route** (everything
+  on it through a VPN, say), and rules on the VPN tab can apply to a
+  whole network.
+- **Radios.** Each radio either broadcasts your Wi-Fi or does not. The
+  Pi's built-in radio broadcasts one Wi-Fi name at a time; a second name
+  needs a USB Wi-Fi adapter that can carry several, or a second radio.
+  The page tells you when a name is not on the air.
+- **Wired ports** can each be an uplink (**Internet**), belong to one of
+  your networks, or be off.
+
 ## Using a VPN
 
 On the **VPN** tab tap **Add VPN** and paste the WireGuard configuration
@@ -145,12 +182,15 @@ from your VPN provider or your own server (or import the `.conf` file).
 - **Everything through the VPN:** set **Everything else**, the last row
   of the rules, to that VPN.
 - **One device:** open it on the **Devices** tab and set its **Route**.
-- **Some destinations:** tap **Add rule** and choose sources (devices)
-  and destinations (domains, address ranges, countries, ports), then
-  where that traffic goes: a VPN, **Direct**, or **Blocked**.
+- **One network:** set its **Route** under Settings → Wi-Fi & networks.
+- **Some destinations:** tap **Add rule** and choose sources (devices or
+  whole networks) and destinations (domains, address ranges, countries,
+  ports), then where that traffic goes: a VPN, **Direct**, or
+  **Blocked**.
 
 Rules are numbered in the order they are checked and the first match
-wins; then the device's own route; then **Everything else**. Tap **Edit**
+wins; then the device's own route; then its network's; then
+**Everything else**. Tap **Edit**
 to reorder, swipe a rule right to turn it off.
 
 **Kill switch** (per VPN, on by default): if the tunnel is down, traffic
@@ -215,6 +255,16 @@ days. Connect the phone to your Mac and press Run in Xcode.
 
 **No Wi-Fi network appears after setup.** Open **Overview** and look at
 the Wi-Fi card for an error, and check the country is right.
+
+**A second Wi-Fi name says "Off air".** The radio broadcasting your
+network carries one name at a time (the Pi's built-in radio does). It
+goes on the air once a radio that can carry it broadcasts: see **Your
+networks**.
+
+**The phone on USB stays "Turn on the phone's hotspot".** Check that
+Personal Hotspot (or USB tethering) is on, and on an iPhone that you
+tapped **Trust** when it asked; unplugging and plugging it in again makes
+it ask again. Some cables only charge.
 
 **Online, but a device has no internet.** Check it is not paused, and
 whether it is routed through a VPN that is down (kill switch).
@@ -286,6 +336,9 @@ settings and pairings. Re-flashing the card does the same.
   IPv4; IPv6-only sites work.
 - **USB Wi-Fi adapters** that draw a lot of power may need a 5 A power
   supply, or `usb_max_current_enable=1` in `config.txt` on the card.
+- **A phone on USB charges from the Pi** while it shares its data. With
+  a USB Wi-Fi adapter plugged in as well, a 5 A power supply is the safe
+  choice.
 - **Many devices on the built-in radio.** The Pi's Wi-Fi chip supports
   only a handful of simultaneous clients with its default firmware.
   [The developer notes](docs/DEVELOPMENT.md#built-in-radio-client-limit)
