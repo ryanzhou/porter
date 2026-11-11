@@ -63,11 +63,20 @@ every subsystem against it and against what the network is doing.
 - **Uplink order.** Uplinks keep fixed route metrics; the configured
   order is carried out by a routing table of its own (105, consulted
   after the tunnels' tables and before the main table's default route)
-  that holds a default route only while the uplink to use is not the one
-  the metrics would pick. Reordering therefore restarts nothing. The
-  uplink to use is the first in the order that is online or behind a
-  sign-in page; one that has an address but fails three reachability
-  probes in a row is stepped past.
+  that always names the uplink to use: its gateway per address family,
+  and "unreachable" for a family it does not have, so that IPv6 never
+  follows an uplink that has been stepped past. Reordering therefore
+  restarts nothing, and a port with a fixed address whose cable is
+  pulled is not used (the kernel would keep its route). The uplink to
+  use is the first in the order that is online or behind a sign-in
+  page; one that has an address but fails three reachability probes in
+  a row is stepped past. A sign-in page is believed on the second probe
+  that shows one when the uplink was online before, and a sign-in under
+  way survives two failed probes.
+- **Presence.** A Wi-Fi device is online while an access point lists
+  it. The kernel's neighbour table is only asked about wired devices:
+  with few entries it keeps an address until something is sent there
+  and goes unanswered, long after a phone has left.
 - **Phones on USB.** An interface driven by `ipheth` (iPhone) or
   `rndis_host` (Android) is an uplink of kind "phone" for as long as it
   is plugged in; nothing about it is stored. An iPhone only brings the
@@ -231,11 +240,12 @@ want it at all.
 
 Raspberry Pi ships two firmware builds for the on-board radio; the
 default one allows only a handful of simultaneous access point clients.
-The image keeps the default. To switch, on the router (with the root
-file system remounted read-write):
+The image keeps the default. The other is chosen when the image is
+built (it cannot be switched on a running router: the root file system
+is read-only and replaced whole by every update):
 
 ```bash
-update-alternatives --set cyfmac43455-sdio.bin /lib/firmware/cypress/cyfmac43455-sdio-minimal.bin
+sudo PORTER_WIFI_FIRMWARE=minimal image/build.sh
 ```
 
 ## The daemon

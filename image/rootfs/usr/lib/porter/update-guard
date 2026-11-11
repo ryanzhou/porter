@@ -7,13 +7,20 @@
 # there five minutes after a trial start, the new version is not doing its
 # job: restart, and the boot loader returns to the version before it.
 #
-# A new version that does not even get this far is covered elsewhere: the
+# The note counts as gone only when the data partition is there to look
+# in: a new version that cannot mount it has confirmed nothing.
+#
+# A new version that does not even get this far is covered in part: the
 # trial is good for one start only, so any restart ends it, and a system
-# that hangs is restarted by the hardware watchdog.
+# that hangs once it is running is restarted by the hardware watchdog. A
+# kernel that never finds its root file system is not: that takes pulling
+# the power, after which the version before starts.
 flag=/proc/device-tree/chosen/bootloader/tryboot
 [ -r "$flag" ] || exit 0
 [ "$(od -An -v -tx1 "$flag" | tr -d ' \n')" = 00000001 ] || exit 0
 sleep 300
-[ -e /data/porter/update-pending ] || exit 0
+if mountpoint -q /data && [ ! -e /data/porter/update-pending ]; then
+    exit 0
+fi
 echo "update-guard: the update was not confirmed; going back to the previous version" >&2
 systemctl reboot

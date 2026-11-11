@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -136,22 +135,26 @@ func Assign(capacity []int, n int) [][]int {
 			continue
 		}
 		// The radio to take it: one whose last network is the most
-		// widely carried elsewhere.
-		best, bestCount := -1, 1
+		// widely carried elsewhere. Failing that, one that carries such a
+		// network anywhere in its list.
+		best, at, bestCount := -1, -1, 1
 		for r := range out {
-			if len(out[r]) == 0 {
-				continue
+			if n := len(out[r]); n > 0 && count[out[r][n-1]] > bestCount {
+				best, at, bestCount = r, n-1, count[out[r][n-1]]
 			}
-			if last := out[r][len(out[r])-1]; count[last] > bestCount {
-				best, bestCount = r, count[last]
+		}
+		for r := range out {
+			for pos, have := range out[r] {
+				if best < 0 && count[have] > 1 {
+					best, at = r, pos
+				}
 			}
 		}
 		if best < 0 {
 			continue
 		}
-		last := out[best][len(out[best])-1]
-		count[last]--
-		out[best][len(out[best])-1] = i
+		count[out[best][at]]--
+		out[best][at] = i
 		count[i]++
 	}
 	return out
@@ -203,8 +206,22 @@ func ladder(s APSpec) []variant {
 			}
 			add(variant{vht: true, ht: true, width: 80})
 		}
+		// Narrower is not the same as older: a channel 40 or 20 MHz wide,
+		// chosen or all the radio can do, still carries 802.11ac and ax.
+		if b.VHT && can40 {
+			if b.HE {
+				add(variant{he: true, vht: true, ht: true, width: 40})
+			}
+			add(variant{vht: true, ht: true, width: 40})
+		}
 		if b.HT && can40 {
 			add(variant{ht: true, width: 40})
+		}
+		if b.VHT {
+			if b.HE {
+				add(variant{he: true, vht: true, ht: true, width: 20})
+			}
+			add(variant{vht: true, ht: true, width: 20})
 		}
 	}
 	if b.HT {
@@ -513,16 +530,12 @@ func (a *AP) run(spec APSpec, stop, done chan struct{}) {
 	// Interfaces left behind by an earlier instance would make hostapd
 	// refuse to create its own.
 	for _, n := range spec.BSS[1:] {
-		exec.Command("iw", "dev", n.Iface, "del").Run()
+		tool(4*time.Second, "iw", "dev", n.Iface, "del").Run()
 	}
 	if spec.Virtual {
-		// Recreate the virtual interface from scratch each time.
-		exec.Command("iw", "dev", spec.Iface, "del").Run()
-		if out, err := exec.Command("iw", "phy", spec.Radio.Phy, "interface", "add", spec.Iface, "type", "__ap").CombinedOutput(); err != nil {
-			a.fail(fmt.Sprintf("cannot create AP interface: %s", strings.TrimSpace(string(out))))
-			return
-		}
-		defer exec.Command("iw", "dev", spec.Iface, "del").Run()
+		// Recreate the virtual interface from scratch.
+		tool(4*time.Second, "iw", "dev", spec.Iface, "del").Run()
+		defer func() { tool(4*time.Second, "iw", "dev", spec.Iface, "del").Run() }()
 	}
 	variants := ladder(spec)
 	conf := filepath.Join(a.RunDir, "hostapd-"+spec.Iface+".conf")
@@ -530,6 +543,20 @@ func (a *AP) run(spec APSpec, stop, done chan struct{}) {
 	for {
 		ranOnce := false
 		retried := map[int]bool{}
+		if _, err := os.Stat("/sys/class/net/" + spec.Iface); spec.Virtual && err != nil {
+			// Made here, and made again whenever it has gone: a radio
+			// that was busy for a moment is no reason to stay off air
+			// until the settings next change.
+			if out, err := tool(4*time.Second, "iw", "phy", spec.Radio.Phy, "interface", "add", spec.Iface, "type", "__ap").CombinedOutput(); err != nil {
+				a.fail(fmt.Sprintf("cannot create AP interface: %s", strings.TrimSpace(string(out))))
+				select {
+				case <-time.After(15 * time.Second):
+					continue
+				case <-stop:
+					return
+				}
+			}
+		}
 		for i := first; i < len(variants) && !ranOnce; i++ {
 			v := variants[i]
 			if err := os.WriteFile(conf, []byte(hostapdConf(spec, v, a.ctrlDir())), 0o600); err != nil {
@@ -551,7 +578,6 @@ func (a *AP) run(spec APSpec, stop, done chan struct{}) {
 				},
 				OnExit: func(error) { close(exited) },
 			}
-			began := time.Now()
 			p.Start()
 			up := false
 			select {
@@ -570,7 +596,9 @@ func (a *AP) run(spec APSpec, stop, done chan struct{}) {
 				// changed jobs) as that the radio cannot do this mode.
 				// The first deserves another go; stepping down a rung
 				// for it would leave the network slower for good.
-				if time.Since(began) < 5*time.Second && !retried[i] {
+				// And one that never came up within the time allowed may
+				// have been waiting on a busy radio.
+				if !retried[i] {
 					retried[i] = true
 					a.Log.Info("access point did not start; trying once more", "iface", spec.Iface, "mode", v.String())
 					select {
@@ -592,12 +620,18 @@ func (a *AP) run(spec APSpec, stop, done chan struct{}) {
 			a.mu.Unlock()
 			a.Log.Info("access point up", "iface", spec.Iface, "channel", spec.Channel, "mode", v.String(), "networks", len(spec.BSS))
 			a.changed()
+			upSince := time.Now()
 			select {
 			case <-exited:
 				a.Log.Warn("hostapd exited", "iface", spec.Iface)
 			case <-stop:
 				p.Stop()
 				return
+			}
+			if time.Since(upSince) > time.Minute {
+				// It ran well. Whatever made an earlier, better mode
+				// fail may be over; start from the top again.
+				first = 0
 			}
 			a.mu.Lock()
 			a.state = "starting"
@@ -639,23 +673,25 @@ type Station struct {
 }
 
 // Stations lists the associated clients of all the access point's
-// networks.
-func (a *AP) Stations() []Station {
+// networks. ok is false when one of them could not be asked, and the
+// list may therefore be short.
+func (a *AP) Stations() (all []Station, ok bool) {
 	a.mu.Lock()
 	state := a.state
 	a.mu.Unlock()
 	if state != "up" {
-		return nil
+		return nil, true
 	}
-	var all []Station
+	ok = true
 	for _, iface := range a.Ifaces() {
-		out, err := exec.Command("hostapd_cli", "-p", a.ctrlDir(), "-i", iface, "all_sta").Output()
+		out, err := tool(4*time.Second, "hostapd_cli", "-p", a.ctrlDir(), "-i", iface, "all_sta").Output()
 		if err != nil {
+			ok = false
 			continue
 		}
 		all = append(all, parseAllSta(string(out), iface)...)
 	}
-	return all
+	return all, ok
 }
 
 func parseAllSta(text, iface string) []Station {
@@ -689,6 +725,6 @@ func parseAllSta(text, iface string) []Station {
 // its captive portal check).
 func (a *AP) Kick(mac string) {
 	for _, iface := range a.Ifaces() {
-		exec.Command("hostapd_cli", "-p", a.ctrlDir(), "-i", iface, "deauthenticate", mac).Run()
+		tool(4*time.Second, "hostapd_cli", "-p", a.ctrlDir(), "-i", iface, "deauthenticate", mac).Run()
 	}
 }

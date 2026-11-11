@@ -1,7 +1,7 @@
 [Unit]
 Description=Porter travel router
-After=local-fs.target dbus.service bluetooth.service data.mount
-Wants=bluetooth.service
+After=local-fs.target dbus.service bluetooth.service data.mount porter-data.service
+Wants=bluetooth.service porter-data.service
 
 [Service]
 Type=notify

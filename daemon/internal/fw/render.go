@@ -16,6 +16,17 @@ func Render(p *Plan) string { return render(p, true) }
 // to decide whether the ruleset needs replacing.
 func Fingerprint(p *Plan) string { return render(p, false) }
 
+// ClassKey identifies the part of a plan that decides which way a
+// connection goes. Connections under way have to be classified again when
+// it changes, and only then: a change to who may reach the router, or to
+// the list of uplinks, moves no connection, and forgetting them all for
+// it would stall every one of them.
+func ClassKey(p *Plan) string {
+	q := *p
+	q.WANIfs, q.SSH, q.Intercept, q.Learned = nil, false, false, nil
+	return render(&q, false)
+}
+
 func render(p *Plan, full bool) string {
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
@@ -114,10 +125,12 @@ func render(p *Plan, full bool) string {
 		return fmt.Sprintf("meta mark set 0x%x ct mark set 0x%x accept", mark, mark)
 	}
 	w("\tchain classify {")
+	// Paused comes first: a paused device is not let out to sign in for
+	// everyone either.
+	w("\t\tether saddr @paused %s", set(MarkBlock))
 	if len(p.PortalDevs) > 0 {
 		w("\t\tether saddr @portal_devs %s", set(MarkDirect|MarkPortal))
 	}
-	w("\t\tether saddr @paused %s", set(MarkBlock))
 	for _, r := range p.Rules {
 		chain := "r_" + r.ID
 		if len(r.SrcMACs) == 0 && len(r.Src4) == 0 && len(r.Src6) == 0 && len(r.SrcIfs) == 0 {
@@ -241,10 +254,35 @@ func render(p *Plan, full bool) string {
 	w("\t\tct state established,related accept")
 	w("\t}")
 
+	// The router's own traffic that is meant for a tunnel (its DNS queries
+	// on behalf of devices routed there, a speed test through it). Policy
+	// routing looks at the main table's specific routes before the
+	// tunnel's, so a tunnel resolver whose address falls inside the
+	// upstream network's range would be reached over the uplink, in the
+	// clear. Forwarded traffic is stopped by lan_out; this is the same
+	// check for what the router sends itself.
+	w("\tchain output {")
+	w("\t\ttype filter hook output priority filter; policy accept;")
+	for _, v := range p.VPNs {
+		if !v.KillSwitch {
+			continue
+		}
+		if v.Active {
+			w("\t\tmeta mark & 0x%x == 0x%x oifname != %q jump refuse", ClassMask, v.Mark, v.If)
+		} else {
+			w("\t\tmeta mark & 0x%x == 0x%x jump refuse", ClassMask, v.Mark)
+		}
+	}
+	w("\t}")
+
 	if several {
-		// Between the router's own networks: anything already under way,
-		// and anything new unless it comes from an isolated network.
+		// Between the router's own networks: nothing from a paused device,
+		// then anything already under way, and anything new unless it
+		// comes from an isolated network. Traffic between networks is not
+		// classified (see prerouting), so pausing has to be looked at
+		// here, and before replies are let through.
 		w("\tchain lan_lan {")
+		w("\t\tether saddr @paused jump refuse")
 		w("\t\tct state established,related accept")
 		if len(isolated) > 0 {
 			w("\t\tiifname { %s } jump refuse", strings.Join(quoteAll(sorted(isolated)), ", "))
@@ -256,6 +294,12 @@ func render(p *Plan, full bool) string {
 	// lan_out decides for every packet leaving the LAN, new or established,
 	// so that a flow can never continue on a path its mark does not allow.
 	w("\tchain lan_out {")
+	// Everything that leaves the router's networks for elsewhere has been
+	// classified. A packet that has not was let past classification as
+	// bound for another of the router's networks and then found no route
+	// there (a network just removed or renumbered): it is not to leave by
+	// an uplink instead.
+	w("\t\tmeta mark & 0x%x == 0x0 jump refuse", ClassMask)
 	w("\t\tmeta mark & 0x%x == 0x%x jump refuse", ClassMask, MarkBlock)
 	for _, v := range p.VPNs {
 		if v.Active {

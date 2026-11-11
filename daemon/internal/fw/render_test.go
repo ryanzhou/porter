@@ -89,10 +89,42 @@ func TestRender(t *testing.T) {
 		`iifname @lan_ifs oifname @lan_ifs jump lan_lan`,
 		`iifname { "br-guest" } jump refuse`,
 		`iifname { "br-iot", "br-lan" } tcp dport 22 accept`,
+		// What the router sends itself for a kill-switched tunnel leaves
+		// by that tunnel or not at all.
+		`meta mark & 0xff == 0x10 oifname != "wg-home" jump refuse`,
+		`meta mark & 0xff == 0x0 jump refuse`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("ruleset lacks %q", want)
 		}
+	}
+	// A tunnel that is switched off, kill switch on: its mark goes nowhere
+	// from the router itself either.
+	if !strings.Contains(out, "\t\tmeta mark & 0xff == 0x12 jump refuse\n\t}\n") {
+		t.Error("no output rule for the switched-off kill-switched VPN")
+	}
+	// Order matters in three places.
+	for _, pair := range [][2]string{
+		{`ether saddr @paused meta mark set 0x2`, `ether saddr @portal_devs`},                          // paused before the sign-in pass
+		{"chain lan_lan {\n\t\tether saddr @paused jump refuse", `iifname { "br-guest" } jump refuse`}, // paused before anything in lan_lan
+		{`meta mark & 0xff == 0x0 jump refuse`, `oifname @wan_ifs accept`},                             // unclassified refused before the uplink accept
+	} {
+		a, b := strings.Index(out, pair[0]), strings.LastIndex(out, pair[1])
+		if a < 0 || b < 0 || a > b {
+			t.Errorf("%q does not come before %q", pair[0], pair[1])
+		}
+	}
+	// Who may reach the router, and the list of uplinks, are not part of
+	// what decides a connection's way.
+	alt := *p
+	alt.SSH, alt.Intercept, alt.WANIfs = !p.SSH, !p.Intercept, []string{"eth9"}
+	if ClassKey(&alt) != ClassKey(p) || Fingerprint(&alt) == Fingerprint(p) {
+		t.Error("ClassKey follows changes that reroute nothing")
+	}
+	alt = *p
+	alt.Paused = append([]string{"02:00:00:00:00:aa"}, p.Paused...)
+	if ClassKey(&alt) == ClassKey(p) {
+		t.Error("ClassKey misses a paused device")
 	}
 	if strings.Contains(out, `"wg-off"`) {
 		t.Error("switched-off VPN must not get interface rules")

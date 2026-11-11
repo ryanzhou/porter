@@ -204,7 +204,12 @@ your `mpquic remote`, which has to run with `-u`. Everything above works
 the same for it; the profile shows how many of its paths are up.
 
 DNS lookups follow the traffic: a device routed through a VPN uses that
-VPN's DNS server.
+VPN's DNS server. If the profile names none, the DNS servers you set
+under Settings are asked through the tunnel, or public ones (1.1.1.1,
+9.9.9.9) if you set none; the network you are connected to is not asked
+(unless the tunnel only carries a few networks rather than everything).
+While a tunnel is down, lookups go where the traffic goes: nowhere with
+the kill switch on, directly without it.
 
 ## Everyday things
 

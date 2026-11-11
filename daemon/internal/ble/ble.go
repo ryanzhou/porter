@@ -80,6 +80,17 @@ type session struct {
 	closed chan struct{}
 	once   sync.Once
 	last   time.Time
+	// trusted: the far end has shown that it is a paired phone. Until
+	// then a session is anybody's within radio range.
+	trusted bool
+	created time.Time
+}
+
+// Trust marks the session as belonging to a paired phone.
+func (s *session) Trust() {
+	s.srv.mu.Lock()
+	s.trusted = true
+	s.srv.mu.Unlock()
 }
 
 func (s *session) ReadPacket() ([]byte, error) {
@@ -234,7 +245,9 @@ func (s *Server) reap() {
 	s.mu.Lock()
 	var list []*session
 	for _, se := range s.sessions {
-		if time.Since(se.last) > idleTimeout {
+		// Pairing takes a person a minute or two; a session that is still
+		// nobody's after longer than that is not going to be.
+		if time.Since(se.last) > idleTimeout || (!se.trusted && time.Since(se.created) > 4*time.Minute) {
 			list = append(list, se)
 		}
 	}
@@ -492,9 +505,13 @@ func (s *Server) receive(device string, mtu int, frag []byte) {
 			return
 		}
 		if len(s.sessions) >= maxSessions {
+			// Room is made at the expense of a session nobody has
+			// vouched for, if there is one: anyone in range can open
+			// sessions, and that must not be a way to throw the owner
+			// out.
 			var oldest *session
 			for _, c := range s.sessions {
-				if oldest == nil || c.last.Before(oldest.last) {
+				if oldest == nil || (!c.trusted && oldest.trusted) || (c.trusted == oldest.trusted && c.last.Before(oldest.last)) {
 					oldest = c
 				}
 			}
@@ -503,7 +520,7 @@ func (s *Server) receive(device string, mtu int, frag []byte) {
 			s.mu.Lock()
 		}
 		se = &session{srv: s, key: key, device: device, tag: tag, mtu: mtu,
-			in: make(chan []byte, 256), closed: make(chan struct{}), last: time.Now()}
+			in: make(chan []byte, 256), closed: make(chan struct{}), last: time.Now(), created: time.Now()}
 		s.sessions[key] = se
 		go func() {
 			defer se.Close()

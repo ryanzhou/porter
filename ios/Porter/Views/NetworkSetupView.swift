@@ -29,15 +29,101 @@ struct NetworkSetup: Equatable {
     }
 
     /// Carries what was changed since `base` over to a newer copy from the
-    /// router, part by part: a part that was not touched follows the
-    /// router.
+    /// router, item by item and field by field: what was not touched here
+    /// follows the router. Taking a whole part from the draft because one
+    /// thing in it was touched would undo what was changed elsewhere in
+    /// the meantime, such as a radio made the Wi-Fi uplink under Internet.
     func rebased(from base: NetworkSetup, onto fresh: NetworkSetup) -> NetworkSetup {
         var out = fresh
-        if wifi != base.wifi { out.wifi = wifi }
-        if networks != base.networks { out.networks = networks }
-        if radios != base.radios { out.radios = radios }
-        if ethernet != base.ethernet { out.ethernet = ethernet }
+        out.wifi = NetworkSetup.rebasedItems(wifi, from: base.wifi, onto: fresh.wifi)
+        out.networks = NetworkSetup.rebasedItems(networks, from: base.networks, onto: fresh.networks)
+        out.radios = fresh.radios.map { radio in rebasedRadio(radio, from: base) }
+        out.ethernet = fresh.ethernet.map { port in rebasedPort(port, from: base) }
         if lan != base.lan { out.lan = lan }
+        // A network removed here may have been given a Wi-Fi network or
+        // a port elsewhere since; they go to the main one, as the ones it
+        // had when it was removed did.
+        for old in base.networks where !networks.contains(where: { $0.id == old.id }) {
+            out.removeNetwork(old.id)
+        }
+        return out
+    }
+
+    /// One list of Wi-Fi networks or of networks, rebased. An item changed
+    /// here keeps the draft's version and an untouched one follows the
+    /// router; one added here is kept and one removed here stays removed;
+    /// one the router has gained since is added. The router's order is
+    /// kept, so its first item, the main one, stays first.
+    private static func rebasedItems<Item: Identifiable & Equatable>(_ draft: [Item], from base: [Item], onto fresh: [Item]) -> [Item] where Item.ID == String {
+        var out: [Item] = []
+        for item in fresh {
+            guard let old = base.first(where: { $0.id == item.id }) else {
+                // New on the router since the draft was begun.
+                out.append(item)
+                continue
+            }
+            guard let mine = draft.first(where: { $0.id == item.id }) else {
+                // Removed here.
+                continue
+            }
+            out.append(mine != old ? mine : item)
+        }
+        for mine in draft where !fresh.contains(where: { $0.id == mine.id }) {
+            if let old = base.first(where: { $0.id == mine.id }) {
+                // Gone from the router since. Untouched here, it goes
+                // from the draft too; changed here, the draft keeps it.
+                if mine != old { out.append(mine) }
+            } else {
+                // Added here.
+                out.append(mine)
+            }
+        }
+        return out
+    }
+
+    /// One radio of the fresh copy with what was changed here. This page
+    /// decides whether a radio broadcasts and never whether it is the
+    /// uplink, so of the two things its role says the second is always
+    /// the router's.
+    private func rebasedRadio(_ radio: RadioConfig, from base: NetworkSetup) -> RadioConfig {
+        guard let mine = radios.first(where: { $0.id == radio.id }),
+              let old = base.radios.first(where: { $0.id == radio.id }) else { return radio }
+        var out: RadioConfig = radio
+        if mine.band != old.band {
+            // A channel is one of its band's: choosing a band here also
+            // chose the channel, if only by leaving it automatic.
+            out.band = mine.band
+            out.channel = mine.channel
+        } else if mine.channel != old.channel {
+            out.channel = mine.channel
+        }
+        if mine.width != old.width { out.width = mine.width }
+        let uplink: Bool = radio.role == .wan || radio.role == .apWan
+        var broadcasts: Bool = radio.role == .ap || radio.role == .apWan
+        let mineBroadcasts: Bool = mine.role == .ap || mine.role == .apWan
+        let oldBroadcasts: Bool = old.role == .ap || old.role == .apWan
+        if mineBroadcasts != oldBroadcasts { broadcasts = mineBroadcasts }
+        if uplink {
+            out.role = broadcasts ? .apWan : .wan
+        } else {
+            out.role = broadcasts ? .ap : .off
+        }
+        return out
+    }
+
+    /// One wired port of the fresh copy with what was changed here. How
+    /// it gets its addresses is not set on this page.
+    private func rebasedPort(_ port: EthernetPort, from base: NetworkSetup) -> EthernetPort {
+        guard let mine = ethernet.first(where: { $0.name == port.name }),
+              let old = base.ethernet.first(where: { $0.name == port.name }) else { return port }
+        var out: EthernetPort = port
+        if mine.role != old.role {
+            out.role = mine.role
+            // A port given to a network here was given to that one, also
+            // when it is the one the port had been left with before.
+            if mine.role == .lan { out.network = mine.network }
+        }
+        if mine.network != old.network { out.network = mine.network }
         return out
     }
 
@@ -112,6 +198,9 @@ struct NetworkSetupPage: View {
                 CommonSection(lan: binding(current).lan)
             }
         }
+        // A change made while Apply is on its way would be thrown away
+        // when the answer comes.
+        .disabled(applying)
         .navigationTitle("Wi-Fi & networks")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(dirty)
@@ -174,26 +263,38 @@ struct NetworkSetupPage: View {
         checking = true
         try? await Task.sleep(nanoseconds: 400_000_000)
         if Task.isCancelled { return }
-        let result: ConfigCheck? = await model.check { cfg in setup.apply(to: &cfg) }
+        // Asked about what Apply would send: the draft's changes on the
+        // copy the router has at that moment.
+        let start: NetworkSetup = base
+        let result: ConfigCheck? = await model.check { cfg in
+            setup.rebased(from: start, onto: NetworkSetup(cfg)).apply(to: &cfg)
+        }
         if Task.isCancelled { return }
         check = result
         checking = false
     }
 
     private func apply() {
-        guard let setup = draft else { return }
+        guard let setup = draft, let start = base else { return }
         applying = true
         Task {
-            let ok = await model.update { cfg in setup.apply(to: &cfg) }
+            // The copy the write is built on may be newer than the one
+            // the draft was made from (the router moved on, and the write
+            // is tried again on what it has now). Only what was changed
+            // here goes onto it; the rest of it stays as the router has it.
+            let ok = await model.update { cfg in
+                setup.rebased(from: start, onto: NetworkSetup(cfg)).apply(to: &cfg)
+            }
             applying = false
             if ok {
                 base = nil
                 draft = nil
                 check = nil
                 sync()
-            } else if let config = model.config {
-                // Refused: the draft stays, to be put right.
-                base = NetworkSetup(config)
+            } else {
+                // Refused: the draft stays, to be put right, on top of
+                // what the router has now.
+                sync()
             }
         }
     }

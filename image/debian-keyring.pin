@@ -1,0 +1,14 @@
+# The package that holds Debian's archive signing keys, and its SHA-256.
+# Everything else that goes into the image is checked against the keys in
+# it, so the package itself is checked against the hash here rather than
+# taken on the word of whichever server answered.
+#
+# Used where the machine building the image has no Debian keyring of its
+# own that knows the release (Ubuntu, which is what CI runs on). When
+# Debian publishes a newer keyring the old file leaves the archive and the
+# build says so: take the new Filename and SHA256 from the
+# debian-archive-keyring entry of
+#   https://deb.debian.org/debian/dists/trixie/main/binary-all/Packages.xz
+# and compare the hash with https://packages.debian.org/trixie/all/debian-archive-keyring/download
+DEBIAN_KEYRING_DEB=pool/main/d/debian-archive-keyring/debian-archive-keyring_2025.1_all.deb
+DEBIAN_KEYRING_SHA256=9ea7778e443144ca490668737a8ab22dd3e748bb99e805e22ec055abeb3c7fac

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -121,7 +122,20 @@ const (
 	LEDSetup   = "setup"   // slow blink: waiting for first-time setup
 )
 
+var (
+	ledMu  sync.Mutex
+	ledNow string
+)
+
 func SetLED(pattern string) {
+	// Setting the trigger again restarts the blinking, which shows as a
+	// stutter; it is only written when it changes.
+	ledMu.Lock()
+	defer ledMu.Unlock()
+	if pattern == ledNow {
+		return
+	}
+	ledNow = pattern
 	write := func(name, v string) { _ = os.WriteFile(filepath.Join(ledDir, name), []byte(v), 0) }
 	switch pattern {
 	case LEDPairing:

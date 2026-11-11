@@ -68,13 +68,12 @@ func (u *upstreams) exchange(ctx context.Context, m *dns.Msg, srv config.Upstrea
 func exchangePlain(ctx context.Context, m *dns.Msg, srv config.Upstream, mark uint32) (*dns.Msg, error) {
 	c := &dns.Client{Net: "udp", Dialer: dialer(mark), Timeout: 2 * time.Second, UDPSize: 1232}
 	resp, _, err := c.ExchangeContext(ctx, m, srv.Addr.String())
-	if err == nil && !resp.Truncated {
-		return resp, nil
+	if err != nil || !resp.Truncated {
+		// A resolver that does not answer over UDP is not asked again
+		// over TCP: that only doubles the wait before the next one is
+		// tried.
+		return resp, err
 	}
-	if err != nil && ctx.Err() != nil {
-		return nil, err
-	}
-	// Truncated, or UDP failed outright: retry over TCP.
 	c = &dns.Client{Net: "tcp", Dialer: dialer(mark), Timeout: 3 * time.Second}
 	resp, _, err = c.ExchangeContext(ctx, m, srv.Addr.String())
 	return resp, err
@@ -115,9 +114,14 @@ func (u *upstreams) exchangeTLS(ctx context.Context, m *dns.Msg, srv config.Upst
 			}
 			tc.conn = &dns.Conn{Conn: raw}
 		}
-		deadline, ok := ctx.Deadline()
-		if !ok {
-			deadline = time.Now().Add(4 * time.Second)
+		// A connection that has been idle may be dead without either end
+		// having noticed (the uplink changed, the resolver timed it out
+		// behind a NAT). The wait for an answer is kept short so that the
+		// second attempt, on a new connection, still fits in the time the
+		// client is prepared to wait.
+		deadline := time.Now().Add(2 * time.Second)
+		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+			deadline = d
 		}
 		tc.conn.SetDeadline(deadline)
 		if err := tc.conn.WriteMsg(m); err == nil {

@@ -154,7 +154,13 @@ func (c *Config) normalizeNetworks() {
 	if len(c.Networks) == 0 {
 		c.Networks = []Network{{Name: "Main"}}
 	}
-	c.Networks[0].ID = MainNetwork
+	// The first of each is the main one and goes by a fixed id. That is
+	// filled in where it is missing and never written over: a list sent
+	// in another order has to be refused, not quietly have every port
+	// and rule that names the main network point at a different one.
+	if c.Networks[0].ID == "" {
+		c.Networks[0].ID = MainNetwork
+	}
 	var taken []netip.Prefix
 	for _, n := range c.Networks {
 		if p, err := netip.ParsePrefix(strings.TrimSpace(n.Address)); err == nil {
@@ -180,7 +186,9 @@ func (c *Config) normalizeNetworks() {
 	if len(c.Wifi) == 0 {
 		c.Wifi = []SSID{{Security: SecWPA2, Enabled: true}}
 	}
-	c.Wifi[0].ID = MainSSID
+	if c.Wifi[0].ID == "" {
+		c.Wifi[0].ID = MainSSID
+	}
 	for i := range c.Wifi {
 		w := &c.Wifi[i]
 		if w.ID = strings.TrimSpace(w.ID); w.ID == "" {
@@ -492,7 +500,7 @@ func validMACPolicy(p MACPolicy, what string) error {
 	case MACHardware:
 	case MACRandom, MACCustom:
 		hw, err := net.ParseMAC(p.Address)
-		if err != nil || len(hw) != 6 || hw[0]&1 != 0 {
+		if err != nil || len(hw) != 6 || hw[0]&1 != 0 || hw.String() == "00:00:00:00:00:00" {
 			return fmt.Errorf("%s: invalid MAC address", what)
 		}
 	default:
@@ -698,8 +706,8 @@ func (c *Config) validateLAN() error {
 		if !p.Addr().IsPrivate() {
 			return fmt.Errorf("%s: the address must be a private address", n.Name)
 		}
-		if p.Addr() == p.Masked().Addr() {
-			return fmt.Errorf("%s: the address must be a host address, not the network address", n.Name)
+		if p.Addr() == p.Masked().Addr() || p.Addr() == broadcast(p) {
+			return fmt.Errorf("%s: the address must be a host address, not the first or last of its range", n.Name)
 		}
 		u, err := netip.ParsePrefix(n.ULAPrefix)
 		if err != nil || !u.Addr().Is6() || u.Bits() != 64 {
@@ -1040,9 +1048,21 @@ func (c *Config) validAction(a string, allowEmpty bool) error {
 	return fmt.Errorf("invalid action %q", a)
 }
 
+// broadcast returns the last address of an IPv4 range.
+func broadcast(p netip.Prefix) netip.Addr {
+	a := p.Masked().Addr().As4()
+	for bit := p.Bits(); bit < 32; bit++ {
+		a[bit/8] |= 0x80 >> (bit % 8)
+	}
+	return netip.AddrFrom4(a)
+}
+
 func (c *Config) validateDevices() error {
 	if len(c.Devices) > 512 {
 		return fmt.Errorf("too many devices")
+	}
+	if len(c.Radios) > 16 || len(c.Ethernet) > 32 {
+		return fmt.Errorf("too many radios or ports")
 	}
 	seen := map[string]bool{}
 	ips := map[string]bool{}
@@ -1071,6 +1091,9 @@ func (c *Config) validateDevices() error {
 			}
 			if router, _ := home.Prefix(); a == router {
 				return fmt.Errorf("device %s: %s is the router's own address", d.MAC, d.IP)
+			}
+			if _, p := home.Prefix(); a == p.Addr() || a == broadcast(p) {
+				return fmt.Errorf("device %s: %s is the first or last address of its range, which no device can have", d.MAC, d.IP)
 			}
 			if ips[d.IP] {
 				return fmt.Errorf("address %s reserved twice", d.IP)

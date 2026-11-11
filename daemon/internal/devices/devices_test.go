@@ -26,7 +26,7 @@ func TestTable(t *testing.T) {
 
 	tb.Lease("add", a, ip4.String(), "laptop")
 	tb.Observe(map[netip.Addr]string{ip4: a, ip6: a, netip.MustParseAddr("fe80::1"): a},
-		[]Station{{MAC: b, Iface: "wlan0", Signal: -48}}, map[string]string{a: "lan", b: "guest"})
+		[]Station{{MAC: b, Iface: "wlan0", Signal: -48}}, map[string]string{a: "lan", b: "guest"}, true)
 	for _, e := range tb.List() {
 		if want := map[string]string{a: "lan", b: "guest"}[e.MAC]; e.Network != want {
 			t.Errorf("%s is on %q, want %q", e.MAC, e.Network, want)
@@ -64,8 +64,35 @@ func TestTable(t *testing.T) {
 		}
 	}
 
+	// A Wi-Fi device that has left is gone when its access point says so,
+	// whatever the kernel still remembers of its address; unless the
+	// access point could not be asked.
+	ipb := netip.MustParseAddr("10.84.0.7")
+	still := map[netip.Addr]string{ip4: a, ipb: b}
+	online := func(mac string) bool {
+		for _, e := range tb.List() {
+			if e.MAC == mac {
+				return e.Online
+			}
+		}
+		return false
+	}
+	tb.Observe(still, nil, nil, false)
+	if !online(b) {
+		t.Error("Wi-Fi device dropped although its access point did not answer")
+	}
+	tb.Observe(still, nil, nil, true)
+	if online(b) || !online(a) {
+		t.Error("presence does not follow the access point for a Wi-Fi device")
+	}
+	// A lease that runs out does not bring a device into being.
+	tb.Lease("del", "02:00:00:00:00:0c", "10.83.0.99", "")
+	if len(tb.List()) != 2 {
+		t.Error("lease removal created a device")
+	}
+
 	// Gone from the network: offline, but remembered across restarts.
-	tb.Observe(map[netip.Addr]string{}, nil, nil)
+	tb.Observe(map[netip.Addr]string{}, nil, nil, true)
 	for _, e := range tb.List() {
 		if e.Online {
 			t.Errorf("%s still online", e.MAC)

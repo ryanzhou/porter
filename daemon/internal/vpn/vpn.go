@@ -47,6 +47,12 @@ type tunnel struct {
 	st       Status
 	resolved time.Time
 	started  time.Time
+	// hsWall is the last handshake as the kernel dates it, and hsAt the
+	// same moment on this process's own clock. A router without a
+	// battery sets its clock some time after it starts; measured against
+	// the wall clock, a tunnel that had just come up would then look
+	// hours stale and be taken for down.
+	hsWall, hsAt time.Time
 }
 
 // Resolver looks up an endpoint host name via the uplink.
@@ -382,8 +388,12 @@ func (m *Manager) poll() {
 				hasEndpoint = true
 			}
 		}
+		if !last.Equal(t.hsWall) {
+			age := max(now.Sub(last), 0)
+			t.hsWall, t.hsAt = last, now.Add(-age)
+		}
 		state := "connecting"
-		if !last.IsZero() && now.Sub(last) < handshakeFresh {
+		if !last.IsZero() && time.Since(t.hsAt) < handshakeFresh {
 			state = "up"
 		}
 		t.st.Error = ""

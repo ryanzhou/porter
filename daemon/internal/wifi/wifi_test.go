@@ -99,7 +99,7 @@ func TestParsePhyInfo(t *testing.T) {
 	r.Phy, r.MAC = "phy0", "d8:3a:dd:00:11:22"
 	spec := APSpec{Radio: r, Iface: "wlan0", Country: "US", Band: "5", Channel: 36, BSS: Networks(r, "wlan0", []config.SSID{main}, bridge)}
 	l := ladder(spec)
-	if len(l) != 4 || l[0].String() != "ac/80MHz" || l[1].String() != "n/40MHz" || l[3].String() != "legacy/20MHz" {
+	if fmt.Sprint(l) != "[ac/80MHz ac/40MHz n/40MHz ac/20MHz n/20MHz legacy/20MHz]" {
 		t.Errorf("ladder: %v", l)
 	}
 	conf := hostapdConf(spec, l[0], "/run/x")
@@ -112,11 +112,12 @@ func TestParsePhyInfo(t *testing.T) {
 	// 149-161 cannot do 80 MHz here because 161 is disabled.
 	spec.Channel = 153
 	l = ladder(spec)
-	if l[0].String() != "n/40MHz" || !strings.Contains(hostapdConf(spec, l[0], "/run/x"), "ht_capab=[HT40-]") {
+	if c := hostapdConf(spec, l[0], "/run/x"); l[0].String() != "ac/40MHz" || !strings.Contains(c, "ht_capab=[HT40-]") || !strings.Contains(c, "vht_oper_chwidth=0") {
 		t.Errorf("ladder for 153: %v", l)
 	}
 	spec.Width = 20
-	if l = ladder(spec); l[0].String() != "n/20MHz" {
+	// A narrow channel still gets the newest mode the radio has.
+	if l = ladder(spec); l[0].String() != "ac/20MHz" || l[1].String() != "n/20MHz" {
 		t.Errorf("width cap ignored: %v", l)
 	}
 
@@ -184,11 +185,12 @@ func TestAssign(t *testing.T) {
 		want string
 	}{
 		{[]int{4}, 2, "[[0 1]]"},
-		{[]int{1}, 2, "[[0]]"},          // one radio, one network: the main one
-		{[]int{1, 1}, 2, "[[1] [0]]"},   // one each rather than the same twice
-		{[]int{4, 1}, 2, "[[0 1] [0]]"}, // the able radio carries both
-		{[]int{1, 1}, 3, "[[1] [0]]"},   // not enough radios: the third stays off
-		{[]int{2, 1}, 3, "[[0 1] [2]]"}, // spread over both
+		{[]int{1}, 2, "[[0]]"},            // one radio, one network: the main one
+		{[]int{1, 1}, 2, "[[1] [0]]"},     // one each rather than the same twice
+		{[]int{4, 1}, 2, "[[0 1] [0]]"},   // the able radio carries both
+		{[]int{1, 1}, 3, "[[1] [0]]"},     // not enough radios: the third stays off
+		{[]int{2, 1}, 3, "[[0 1] [2]]"},   // spread over both
+		{[]int{2, 2}, 4, "[[3 2] [0 1]]"}, // all four, though it takes more than the last of each
 		{[]int{0, 2}, 2, "[[] [0 1]]"},
 		{[]int{1, 1}, 1, "[[0] [0]]"}, // nothing to spread
 	} {
@@ -332,5 +334,32 @@ func TestChannelAwayFrom(t *testing.T) {
 		if got != c.want || ok != c.ok {
 			t.Errorf("%s: got %d (%v), want %d (%v)", c.name, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// A hidden network on a radio that also broadcasts starts switched off
+// like the others (so that the station can be kept quiet), and is kept to
+// channels the access point can follow it to.
+func TestHiddenOnSharedRadio(t *testing.T) {
+	nets := []config.WifiNetwork{{SSID: "Hidden", PSK: "password1", Hidden: true}}
+	conf, ids := wpaConf(STASpec{Iface: "wlan0", Country: "US", Shared: true, Only5: []int{5180, 5200}, Networks: nets}, "/run/x")
+	if id := ids["Hidden"]; id.any != 0 {
+		t.Fatalf("ids: %+v", ids)
+	}
+	for _, want := range []string{"scan_ssid=1", "disabled=1", "freq_list=5180 5200 2412 "} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("config lacks %q:\n%s", want, conf)
+		}
+	}
+	conf, _ = wpaConf(STASpec{Iface: "wlan0", Country: "US", Networks: nets}, "/run/x")
+	if strings.Contains(conf, "disabled=1") || strings.Contains(conf, "freq_list") {
+		t.Errorf("hidden network on a radio of its own:\n%s", conf)
+	}
+}
+
+func TestParseKVKeepsSpaces(t *testing.T) {
+	kv := parseKV("wpa_state=COMPLETED\nssid=Cafe \nfreq=5180\n")
+	if kv["ssid"] != "Cafe " || kv["wpa_state"] != "COMPLETED" || kv["freq"] != "5180" {
+		t.Errorf("%q", kv)
 	}
 }

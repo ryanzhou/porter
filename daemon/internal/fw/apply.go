@@ -79,37 +79,60 @@ func (m *Manager) Learn(ruleID string, addrs []netip.Addr, ttl time.Duration) er
 	defer m.mu.Unlock()
 	now := m.now()
 	var script strings.Builder
+	var pending []learnedEntry
 	for _, v6 := range []bool{false, true} {
 		name := SetName(ruleID, v6)
 		if !m.sets[name] {
 			continue
 		}
-		var items []string
+		var items, stale []string
 		for _, a := range addrs {
 			a = a.Unmap()
 			if a.Is6() != v6 {
 				continue
-			}
-			if m.learned[name] == nil {
-				m.learned[name] = map[netip.Addr]time.Time{}
 			}
 			// Skip the kernel round trip while a comfortably fresh entry
 			// exists.
 			if exp, ok := m.learned[name][a]; ok && exp.Sub(now) > ttl/2 {
 				continue
 			}
-			m.learned[name][a] = now.Add(ttl)
+			if _, known := m.learned[name][a]; known {
+				stale = append(stale, a.String())
+			}
+			pending = append(pending, learnedEntry{name, a, now.Add(ttl)})
 			items = append(items, fmt.Sprintf("%s timeout %ds", a, int(ttl/time.Second)))
 		}
+		// Adding an element that is already there leaves its lifetime as
+		// it was, so one that is being renewed is taken out first; both
+		// happen in the one transaction.
+		if len(stale) > 0 {
+			fmt.Fprintf(&script, "destroy element inet %s %s { %s }\n", Table, name, strings.Join(stale, ", "))
+		}
 		if len(items) > 0 {
-			// Delete-then-add refreshes the timeout of an existing element.
 			fmt.Fprintf(&script, "add element inet %s %s { %s }\n", Table, name, strings.Join(items, ", "))
 		}
 	}
 	if script.Len() == 0 {
 		return nil
 	}
-	return nft(script.String())
+	if err := nft(script.String()); err != nil {
+		return err
+	}
+	// Recorded only once the kernel has them: a record of something the
+	// kernel does not hold would keep it from being added later.
+	for _, e := range pending {
+		if m.learned[e.set] == nil {
+			m.learned[e.set] = map[netip.Addr]time.Time{}
+		}
+		m.learned[e.set][e.addr] = e.expiry
+	}
+	return nil
+}
+
+type learnedEntry struct {
+	set    string
+	addr   netip.Addr
+	expiry time.Time
 }
 
 // Remove deletes the ruleset (used on shutdown so that a stopped daemon

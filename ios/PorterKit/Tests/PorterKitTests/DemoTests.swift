@@ -39,6 +39,17 @@ final class DemoTests: XCTestCase {
         let stored = try await router.config()
         XCTAssertEqual(stored.wifi[0].ssid, "Renamed")
         XCTAssertEqual(stored.rev, rev)
+        // A write built on the copy from before is refused, as it is by
+        // a real router, and changes nothing.
+        config.wifi[0].ssid = "Stale"
+        do {
+            _ = try await router.setConfig(config)
+            XCTFail("stale configuration accepted")
+        } catch let error as RouterError {
+            XCTAssertEqual(error.code, RouterError.conflict)
+        }
+        let kept = try await router.config()
+        XCTAssertEqual(kept, stored)
 
         let devices = try await router.devices()
         XCTAssertEqual(devices.count, 5)
@@ -80,5 +91,12 @@ final class DemoTests: XCTestCase {
         try await router.setDevice(DeviceSettings(mac: devices[0].mac, name: "Renamed"))
         _ = try await router.generateKey()
         _ = try await router.parseWireGuard(conf: "ignored")
+        // Reading a pasted VPN configuration does not depend on a VPN
+        // profile being there.
+        var bare = try await router.config()
+        bare.vpns = []
+        _ = try await router.setConfig(bare)
+        let parsed = try await router.parseWireGuard(conf: "ignored")
+        XCTAssertEqual(parsed.peers.count, 1)
     }
 }

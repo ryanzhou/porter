@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -86,8 +85,11 @@ type STA struct {
 	scanDone chan struct{}
 
 	// Band steering; see Steer.
-	ids      map[string]netIDs // saved network name -> its blocks
-	enabled  map[int]bool      // blocks switched on in wpa_supplicant
+	ids     map[string]netIDs // saved network name -> its blocks
+	enabled map[int]bool      // blocks switched on in wpa_supplicant
+	// liveSSID and liveFreq are the connection as Status last found it.
+	liveSSID string
+	liveFreq int
 	band     map[string]string // the band settled on: "5" or "2.4"
 	both     map[string]bool   // the network was last seen on both bands
 	lastScan time.Time
@@ -167,6 +169,10 @@ func wpaConf(spec STASpec, ctrlDir string) (string, map[string]netIDs) {
 	// to the network's channel first, and a second scan would only delay
 	// the connection further.
 	w("scan_res_valid_for_connect=20")
+	// What was seen is remembered for longer than the time between two
+	// looks for a better band, or the band not in use would be forgotten
+	// in between and the choice made on half the picture.
+	w("bss_expiration_age=%d", int(2*steerRecheck/time.Second))
 	five, two := freqLists(spec.Only5)
 	next := 0
 	block := func(n config.WifiNetwork, freqs string, off bool, priority int) int {
@@ -198,7 +204,14 @@ func wpaConf(spec STASpec, ctrlDir string) (string, map[string]netIDs) {
 	ids := map[string]netIDs{}
 	for _, n := range spec.Networks {
 		if n.Hidden {
-			ids[n.SSID] = netIDs{five: -1, two: -1, any: block(n, "", false, 2*n.Priority)}
+			// A hidden network cannot be seen in a scan, so it has one
+			// block for both bands. On a shared radio it is kept to the
+			// channels the access point may use as well.
+			freqs := ""
+			if spec.Only5 != nil {
+				freqs = strings.TrimSpace(five + " " + two)
+			}
+			ids[n.SSID] = netIDs{five: -1, two: -1, any: block(n, freqs, spec.Shared, 2*n.Priority)}
 			continue
 		}
 		id := netIDs{any: -1, five: -1}
@@ -249,6 +262,14 @@ func (s *STA) Start(spec STASpec) (changed bool, err error) {
 		Name: "wpa-" + spec.Iface, Log: s.Log,
 		Argv:   []string{"wpa_supplicant", "-i", spec.Iface, "-D", "nl80211", "-c", path},
 		OnLine: s.onLine,
+		// It starts again by itself, from the file: every network
+		// switched off once more, whatever was switched on before.
+		OnExit: func(error) {
+			s.mu.Lock()
+			s.enabled = map[int]bool{}
+			s.lastScan, s.scanGap = time.Time{}, 0
+			s.mu.Unlock()
+		},
 	}
 	s.mu.Lock()
 	s.p = p
@@ -288,7 +309,7 @@ func (s *STA) onLine(line string) {
 		notify = true
 		// Power saving on an uplink costs latency and, on several
 		// adapters, packets. A router is not on a battery.
-		go exec.Command("iw", "dev", s.spec.Iface, "set", "power_save", "off").Run()
+		go tool(5*time.Second, "iw", "dev", s.spec.Iface, "set", "power_save", "off").Run()
 	case strings.Contains(line, "CTRL-EVENT-DISCONNECTED"):
 		notify = true
 	case strings.Contains(line, "CTRL-EVENT-SSID-TEMP-DISABLED"):
@@ -327,7 +348,7 @@ func (s *STA) cli(args ...string) (string, error) {
 		return "", errors.New("station is not running")
 	}
 	argv := append([]string{"-p", s.ctrlDir(), "-i", iface}, args...)
-	out, err := exec.Command("wpa_cli", argv...).Output()
+	out, err := tool(4*time.Second, "wpa_cli", argv...).Output()
 	if err != nil {
 		return "", err
 	}
@@ -360,6 +381,12 @@ func (s *STA) Status() STAStatus {
 		st.BSSID = kv["bssid"]
 		st.Freq, _ = strconv.Atoi(kv["freq"])
 	}
+	s.mu.Lock()
+	s.liveSSID, s.liveFreq = "", 0
+	if st.State == "connected" {
+		s.liveSSID, s.liveFreq = st.SSID, st.Freq
+	}
+	s.mu.Unlock()
 	if st.State == "connected" {
 		if sig, err := s.cli("signal_poll"); err == nil {
 			st.Signal, _ = strconv.Atoi(parseKV(sig)["RSSI"])
@@ -412,6 +439,11 @@ func (s *STA) KnownInRange() (freq int, ok bool) {
 	nets := append([]config.WifiNetwork(nil), s.spec.Networks...)
 	sort.SliceStable(nets, func(i, j int) bool { return nets[i].Priority > nets[j].Priority })
 	for _, n := range nets {
+		if n.SSID == s.failed {
+			// It has just turned the router away. The access point is not
+			// moved for a network that cannot be joined.
+			continue
+		}
 		sight := see(list, n.SSID, s.spec.Only5)
 		switch {
 		case n.Hidden && sight.any:
@@ -538,6 +570,13 @@ func (s *STA) look() ([]bss, bool) {
 			continue
 		}
 		s.both[n.SSID] = v.have5 && v.have2
+		if s.spec.Shared && n.SSID == s.liveSSID && is5(s.liveFreq) && band != "5" {
+			// On a shared radio a change of band takes the access point,
+			// and every device on it, along. Up to 5 GHz that is worth
+			// it. Down from a 5 GHz connection that still holds it is
+			// not: if it really fails, it ends by itself.
+			continue
+		}
 		if band != s.band[n.SSID] {
 			s.Log.Info("upstream Wi-Fi band", "network", n.SSID, "band", band, "signal_5", v.level5, "signal_2.4", v.level2, "has_5", v.have5, "has_2.4", v.have2)
 			s.band[n.SSID] = band
@@ -577,6 +616,15 @@ func (s *STA) Steer(hold bool) {
 	s.mu.Lock()
 	for ssid, id := range s.ids {
 		if id.any >= 0 {
+			// A hidden network is on unless the station is to keep quiet.
+			if s.spec.Shared && s.enabled[id.any] == hold {
+				c := change{id.any, !hold}
+				if hold {
+					off = append(off, c)
+				} else {
+					on = append(on, c)
+				}
+			}
 			continue
 		}
 		for _, want := range []change{{id.five, s.band[ssid] == "5" && !hold}, {id.two, s.band[ssid] == "2.4" && !hold}} {
@@ -630,6 +678,17 @@ func (s *STA) Steer(hold bool) {
 		ssid := unescapeSSID(kv["ssid"])
 		due = !is5(freq) && s.both[ssid] && now.Sub(s.lastScan) >= steerRecheck
 	case "INACTIVE", "DISCONNECTED":
+		if kv["wpa_state"] == "INACTIVE" {
+			// Inactive means that no network is switched on. If the
+			// record here says otherwise, the record is wrong (the
+			// program restarted, or dropped the setting); forget it, and
+			// the next pass switches them on again.
+			for id, on := range s.enabled {
+				if on {
+					delete(s.enabled, id)
+				}
+			}
+		}
 		if s.scanGap == 0 {
 			s.scanGap = 5 * time.Second
 		}
@@ -685,8 +744,10 @@ func securityOf(flags string) string {
 func parseKV(text string) map[string]string {
 	out := map[string]string{}
 	for _, line := range strings.Split(text, "\n") {
-		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
-			out[k] = v
+		// Values are taken as they are: a network's name may end in a
+		// space.
+		if k, v, ok := strings.Cut(strings.TrimRight(line, "\r"), "="); ok {
+			out[strings.TrimSpace(k)] = v
 		}
 	}
 	return out

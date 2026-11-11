@@ -452,7 +452,12 @@ struct SoftwarePage: View {
         }
         .navigationTitle("Software")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await check() }
+        .task {
+            // An installation may be under way already, begun before
+            // this page was opened or from another phone.
+            await model.refreshFirmwareProgress()
+            await check()
+        }
         .confirmationDialog("Install " + (info?.latest ?? ""), isPresented: $asking, titleVisibility: .visible) {
             Button("Install and restart") {
                 Task { await model.attempt { try await $0.firmwareInstall() } }

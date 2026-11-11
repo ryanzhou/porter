@@ -3,6 +3,7 @@
 package wifi
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 type Channel struct {
@@ -67,6 +70,17 @@ const sysPhy = "/sys/class/ieee80211"
 // Discover lists the radios present.
 func Discover() []Radio {
 	entries, _ := os.ReadDir(sysPhy)
+	phyMu.Lock()
+	defer phyMu.Unlock()
+	for phy := range phyInfo {
+		gone := true
+		for _, e := range entries {
+			gone = gone && e.Name() != phy
+		}
+		if gone {
+			delete(phyInfo, phy)
+		}
+	}
 	var out []Radio
 	for _, e := range entries {
 		phy := e.Name()
@@ -101,9 +115,18 @@ func Discover() []Radio {
 		default:
 			continue
 		}
-		if info, err := exec.Command("iw", "phy", phy, "info").Output(); err == nil {
-			parsePhyInfo(string(info), &r)
+		// What a radio can do changes with the regulatory domain and
+		// otherwise not at all, so it is not asked for on every pass. And
+		// when asking fails for once, what was last known stands: a radio
+		// that seemed to have lost every ability would be switched off.
+		known := phyInfo[phy]
+		if known.text == "" || time.Since(known.at) > time.Minute {
+			if info, err := tool(5*time.Second, "iw", "phy", phy, "info").Output(); err == nil && len(info) > 0 {
+				known = phyText{text: string(info), at: time.Now()}
+				phyInfo[phy] = known
+			}
 		}
+		parsePhyInfo(known.text, &r)
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -317,10 +340,42 @@ func BandOfFreq(freq int) string {
 
 // SetRegDomain sets the regulatory domain for all radios.
 func SetRegDomain(country string) error {
-	return exec.Command("iw", "reg", "set", country).Run()
+	err := tool(5*time.Second, "iw", "reg", "set", country).Run()
+	Forget()
+	return err
+}
+
+// Forget makes the next Discover ask the radios afresh what they can do.
+func Forget() {
+	phyMu.Lock()
+	phyInfo = map[string]phyText{}
+	phyMu.Unlock()
 }
 
 // Unblock clears soft rfkill on all radios (Wi-Fi and Bluetooth).
 func Unblock() {
-	_ = exec.Command("rfkill", "unblock", "all").Run()
+	_ = tool(5*time.Second, "rfkill", "unblock", "all").Run()
+}
+
+type phyText struct {
+	text string
+	at   time.Time
+}
+
+var (
+	phyMu   sync.Mutex
+	phyInfo = map[string]phyText{}
+)
+
+// tool prepares a run of one of the short-lived programs the router
+// drives its radios with. None of them should take longer than a moment;
+// one that hangs (a driver that has stopped answering) is killed instead
+// of taking the control loop down with it.
+func tool(limit time.Duration, name string, args ...string) *exec.Cmd {
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
+	// The context is released when the time is up at the latest.
+	time.AfterFunc(limit+2*time.Second, cancel)
+	return cmd
 }

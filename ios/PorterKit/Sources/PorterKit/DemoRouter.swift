@@ -30,6 +30,11 @@ public enum DemoRouter {
             case "config.set":
                 struct Params: Decodable { let config: RouterConfig }
                 var next = try RouterConnection.makeDecoder().decode(Params.self, from: params).config
+                // As with a real router: a write built on a copy that
+                // is no longer the current one is refused.
+                guard next.rev == config.rev else {
+                    throw RouterError(code: RouterError.conflict, msg: "the configuration changed; reload and try again")
+                }
                 next.rev = config.rev + 1
                 config = next
                 return Data("{\"rev\":\(next.rev)}".utf8)
@@ -104,7 +109,9 @@ public enum DemoRouter {
             case "vpn.genkey":
                 return Data(#"{"private_key":"YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=","public_key":"MDEyMzQ1Njc4OWFiY2RlZmdoaWprbG1ub3BxcnN0dXY="}"#.utf8)
             case "vpn.parse":
-                return try RouterConnection.makeEncoder().encode(config.vpns[0].wireguard)
+                // Always the same sample, whatever was pasted: the VPN
+                // profiles in the configuration may all have been deleted.
+                return Data(DemoRouter.wireGuardJSON.utf8)
             case "system.set_time":
                 return Data(#"{"adjusted":false}"#.utf8)
             default:
@@ -157,6 +164,12 @@ public enum DemoRouter {
                 {"mac":"98:b6:e9:52:1c:d0","name":"Games console","route":"","paused":true,"no_adblock":false},
                 {"mac":"a6:3c:11:5e:90:21","name":"","route":"","paused":false,"no_adblock":false}],
      "speedtest":{"download_url":"https://speed.cloudflare.com/__down?bytes=50000000","upload_url":"https://speed.cloudflare.com/__up"}}
+    """
+
+    /// What reading a pasted WireGuard configuration gives.
+    static let wireGuardJSON = """
+    {"private_key":"YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=","addresses":["10.8.0.2/32","fd08::2/128"],"dns":["10.8.0.1"],"mtu":0,
+     "peers":[{"public_key":"MDEyMzQ1Njc4OWFiY2RlZmdoaWprbG1ub3BxcnN0dXY=","endpoint":"home.example.net:51820","allowed_ips":["0.0.0.0/0","::/0"],"keepalive":25}]}
     """
 
     static func status(now: Int64, rev: UInt64, name: String) -> String {

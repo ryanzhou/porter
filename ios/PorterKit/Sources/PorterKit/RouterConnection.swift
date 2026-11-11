@@ -30,6 +30,11 @@ public actor RouterConnection {
     private let demo: ((String, Data) throws -> Data)?
     private var nextID: UInt32 = 1
     private var pending: [UInt32: CheckedContinuation<Data, Error>] = [:]
+    /// The deadline running for each call that is waiting for its reply.
+    private var deadlines: [UInt32: Task<Void, Never>] = [:]
+    /// How long one second of a deadline lasts, in nanoseconds. Only
+    /// tests change it, to not wait as long as a person would.
+    private var deadlineUnit: UInt64 = 1_000_000_000
     private var closedError: Error?
     private var sendChain: Task<Void, Never>?
     private var readTask: Task<Void, Never>?
@@ -133,6 +138,7 @@ public actor RouterConnection {
             return
         }
         guard let id = envelope.id, let continuation = pending.removeValue(forKey: id) else { return }
+        deadlines.removeValue(forKey: id)?.cancel()
         if let error = envelope.e {
             continuation.resume(throwing: error)
         } else {
@@ -145,6 +151,8 @@ public actor RouterConnection {
         closedError = error
         for (_, continuation) in pending { continuation.resume(throwing: error) }
         pending.removeAll()
+        for (_, deadline) in deadlines { deadline.cancel() }
+        deadlines.removeAll()
         eventSink.finish()
         session?.close()
         for handler in closeHandlers { handler(error) }
@@ -154,6 +162,34 @@ public actor RouterConnection {
     public func close() {
         fail(SessionError.closed)
         readTask?.cancel()
+    }
+
+    /// How long a call may wait for its reply, in seconds. Most answers
+    /// come at once; a few are of work the router does first.
+    private static func deadline(for method: String) -> UInt64 {
+        switch method {
+        case "speedtest.run": return 90
+        case "firmware.check", "firmware.install": return 45
+        // Answered by the router's control loop, which may be in the
+        // middle of restarting a radio when asked.
+        case "config.set", "config.check", "wifi.uplink", "wifi.scan": return 45
+        default: return 30
+        }
+    }
+
+    /// The deadline of a call has passed. If its reply is still missing
+    /// the router has stopped answering, and a connection like that is
+    /// worth nothing: it ends as it does when the link is lost, so that
+    /// everything waiting on it hears and the app can connect again.
+    private func expire(id: UInt32) {
+        // The reply may have arrived just as the deadline passed.
+        guard pending[id] != nil else { return }
+        fail(SessionError.timeout)
+    }
+
+    /// Makes a second of the deadlines last this long, for tests.
+    func setDeadlineUnit(nanoseconds: UInt64) {
+        deadlineUnit = nanoseconds
     }
 
     private struct Request<P: Encodable>: Encodable {
@@ -183,8 +219,19 @@ public actor RouterConnection {
         payload.append(paramData)
         payload.append(Data("}".utf8))
 
+        let limit: UInt64 = Self.deadline(for: method) * deadlineUnit
         let reply: Data = try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
+            // A reply that never comes must not leave the caller waiting
+            // for ever. The deadline is cancelled when the reply arrives.
+            deadlines[id] = Task { [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: limit)
+                } catch {
+                    return // cancelled: the call has ended
+                }
+                await self?.expire(id: id)
+            }
             // Sends are chained so that messages never interleave.
             let previous = sendChain
             sendChain = Task {

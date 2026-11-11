@@ -32,6 +32,9 @@ const (
 	Table     = "porter"
 
 	// Rule priorities and routing tables.
+	// PrefOwnBase: what the router itself sends for a tunnel (see
+	// syncRules), ahead of everything else.
+	PrefOwnBase  = 60
 	PrefMain     = 100
 	PrefVPNBase  = 110
 	PrefUplink   = 140

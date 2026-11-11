@@ -14,6 +14,20 @@ public enum SessionError: Error, Equatable {
     case routerKeyMismatch
     case messageTooLarge
     case closed
+    /// A request went unanswered past its deadline; the connection is
+    /// given up, as when the link is lost.
+    case timeout
+}
+
+extension SessionError: LocalizedError {
+    /// Only the timeout has words of its own. The others are for the app
+    /// to describe, which it does all in the same way.
+    public var errorDescription: String? {
+        switch self {
+        case .timeout: return "The router stopped answering."
+        case .routerKeyMismatch, .messageTooLarge, .closed: return nil
+        }
+    }
 }
 
 /// An authenticated, encrypted channel to a router.

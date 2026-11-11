@@ -35,6 +35,8 @@ type apiSession struct {
 	paired bool
 	local  bool
 	out    chan []byte
+	// trust tells the link that the session has become a paired one.
+	trust func()
 }
 
 // Serve runs one control session over an established packet link.
@@ -50,6 +52,16 @@ func (c *Core) Serve(pc proto.PacketConn, local bool) {
 	if sess.paired && !local {
 		c.pairings.Touch(s.Remote)
 	}
+	// The link may want to know whose session this is (see ble).
+	trust := func() {
+		if t, ok := pc.(interface{ Trust() }); ok {
+			t.Trust()
+		}
+	}
+	if sess.paired {
+		trust()
+	}
+	sess.trust = trust
 	c.sessMu.Lock()
 	c.sessions[sess] = struct{}{}
 	c.sessMu.Unlock()
@@ -480,6 +492,7 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 				return
 			}
 			sess.paired = true
+			sess.trust()
 			// One press, one phone.
 			c.pairingUntil = time.Time{}
 			c.addEvent("pairing", "Paired with "+name, "")
@@ -913,8 +926,16 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		if perr != nil {
 			return nil, perr
 		}
+		mac := ""
+		if p.MAC != "" {
+			hw, err := net.ParseMAC(p.MAC)
+			if err != nil || len(hw) != 6 {
+				return nil, proto.Errf(proto.ErrInvalid, "not a device address")
+			}
+			mac = hw.String()
+		}
 		c.do(func() {
-			c.portalDev, c.portalManual = strings.ToLower(p.MAC), p.MAC != ""
+			c.portalDev, c.portalManual = mac, mac != ""
 			c.Kick()
 		})
 		return nil, nil
@@ -1034,19 +1055,24 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		return nil, nil
 
 	case "system.factory_reset":
-		// Wipes all settings, pairings and the router's identity.
-		entries, _ := os.ReadDir(c.opt.DataDir)
-		for _, e := range entries {
-			os.RemoveAll(filepath.Join(c.opt.DataDir, e.Name()))
-		}
-		// And the iPhones that were told to trust the router, which
-		// usbmuxd keeps in a directory of its own.
-		if c.opt.PhoneRecords != "" {
-			records, _ := os.ReadDir(c.opt.PhoneRecords)
-			for _, e := range records {
-				os.RemoveAll(filepath.Join(c.opt.PhoneRecords, e.Name()))
+		// Wipes all settings, pairings and the router's identity. Done on
+		// the control loop, which is what would otherwise write some of
+		// it back before the restart.
+		c.do(func() {
+			c.resetting = true
+			entries, _ := os.ReadDir(c.opt.DataDir)
+			for _, e := range entries {
+				os.RemoveAll(filepath.Join(c.opt.DataDir, e.Name()))
 			}
-		}
+			// And the iPhones that were told to trust the router, which
+			// usbmuxd keeps in a directory of its own.
+			if c.opt.PhoneRecords != "" {
+				records, _ := os.ReadDir(c.opt.PhoneRecords)
+				for _, e := range records {
+					os.RemoveAll(filepath.Join(c.opt.PhoneRecords, e.Name()))
+				}
+			}
+		})
 		go func() { time.Sleep(500 * time.Millisecond); system.Reboot() }()
 		return nil, nil
 	}
@@ -1077,7 +1103,7 @@ func (c *Core) check(next *config.Config) CheckResult {
 		out.Error = err.Error()
 		return out
 	}
-	if err := next.Consistent(); err != nil {
+	if err := next.Consistent(); err != nil && c.cfg.Consistent() == nil {
 		out.Error = err.Error()
 		return out
 	}

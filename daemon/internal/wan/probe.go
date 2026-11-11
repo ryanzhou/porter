@@ -97,6 +97,11 @@ func Probe(ifname string, p config.Probe, dnsServers []string) ProbeResult {
 	if res.StatusCode == http.StatusOK && strings.Contains(string(body), p.Expect) {
 		return ProbeResult{State: StOnline}
 	}
+	if res.StatusCode >= 500 {
+		// The probe's own server, or a proxy on the way, having a bad
+		// moment. A sign-in page does not look like this.
+		return ProbeResult{State: StLimited, Detail: res.Status}
+	}
 	portal := p.URL
 	if loc := res.Header.Get("Location"); loc != "" {
 		if lu, err := u.Parse(loc); err == nil && (lu.Scheme == "http" || lu.Scheme == "https") {
@@ -108,7 +113,9 @@ func Probe(ifname string, p config.Probe, dnsServers []string) ProbeResult {
 
 func resolve(ctx context.Context, d *net.Dialer, host string, servers []string) ([]string, error) {
 	if len(servers) == 0 {
-		return nil, errors.New("uplink has no DNS servers")
+		// An uplink with a fixed address and no resolver typed in. Its
+		// reachability is still worth knowing.
+		servers = []string{"1.1.1.1", "9.9.9.9"}
 	}
 	var lastErr error
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {

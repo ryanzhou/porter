@@ -58,6 +58,27 @@ type NetRoute struct {
 type VPNDNS struct {
 	Mark    uint32
 	Servers []config.Upstream
+	// Up: the tunnel has a live session. KillSwitch: its traffic never
+	// leaves any other way. Together they say where a query goes while
+	// the tunnel is down, which has to be where the traffic would go.
+	Up         bool
+	KillSwitch bool
+	// Public: the tunnel carries traffic to the internet at large, not
+	// just to a few networks behind it, so a public resolver can be
+	// reached through it.
+	Public bool
+}
+
+// PublicProbe is an address a tunnel has to carry for Public to hold.
+var PublicProbe = netip.MustParseAddr("1.1.1.1")
+
+// tunnelFallback is asked, through the tunnel, when a VPN profile names
+// no resolver and none is configured: the resolver the upstream network
+// handed out is not reachable there, and asking it outside the tunnel
+// would tell that network every name the device looks up.
+var tunnelFallback = []config.Upstream{
+	{Proto: "udp", Addr: netip.MustParseAddrPort("1.1.1.1:53")},
+	{Proto: "udp", Addr: netip.MustParseAddrPort("9.9.9.9:53")},
 }
 
 type Rule struct {
@@ -181,11 +202,13 @@ type path struct {
 // first rule that would claim traffic from this client to this name wins,
 // then the device's own route, then its network's, then the default.
 func (p *Policy) decide(mac string, ip netip.Addr, name string) path {
-	if mac != "" && p.PortalDevs[mac] {
-		return path{kind: "wan", servers: p.WAN}
-	}
+	// Paused comes first, as in the packet classifier: a paused device
+	// is not let through to sign in for everybody else.
 	if mac != "" && p.Paused[mac] {
 		return path{kind: "refuse"}
+	}
+	if mac != "" && p.PortalDevs[mac] {
+		return path{kind: "wan", servers: p.WAN}
 	}
 	action := ""
 	for i := range p.Rules {
@@ -229,15 +252,25 @@ func (p *Policy) decide(mac string, ip netip.Addr, name string) path {
 			return path{kind: "refuse"}
 		}
 		switch {
+		case !v.Up && v.KillSwitch:
+			// Nothing of this device's gets out; say so at once instead
+			// of letting each lookup time out.
+			return path{kind: "refuse"}
+		case !v.Up:
+			// Its traffic leaves directly for now, and so do its lookups.
+			return path{kind: "direct", servers: p.Direct}
 		case len(v.Servers) > 0:
 			return path{kind: "vpn", vpn: id, servers: v.Servers, mark: v.Mark}
 		case p.DirectCustom:
 			// No resolver in the profile: send the configured upstreams
 			// through the tunnel.
 			return path{kind: "vpn", vpn: id, servers: p.Direct, mark: v.Mark}
+		case v.Public:
+			return path{kind: "vpn", vpn: id, servers: tunnelFallback, mark: v.Mark}
 		default:
-			// Only the local network's resolver is known, and it is not
-			// reachable through the tunnel.
+			// A tunnel to a few networks only, and no resolver named for
+			// it: names are looked up the way everything else of the
+			// device's that is not for those networks goes.
 			return path{kind: "direct", servers: p.Direct}
 		}
 	}

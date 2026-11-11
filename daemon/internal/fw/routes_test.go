@@ -80,6 +80,10 @@ func TestSyncRouting(t *testing.T) {
 	if !strings.Contains(rules, "100:\tfrom all lookup main suppress_prefixlength 0") || !strings.Contains(rules, "110:\tfrom all fwmark 0x10/0xff lookup 110") {
 		t.Errorf("rules: %q", rules)
 	}
+	// The router's own traffic for the tunnel goes by its table first.
+	if !strings.Contains(rules, "60:\tfrom all fwmark 0x10/0xff iif lo lookup 110") {
+		t.Errorf("no rule for the router's own traffic: %q", rules)
+	}
 
 	// Tunnel down, no kill switch: table empty so traffic falls back.
 	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: false, Allowed: v4only}}, nil); err != nil {
@@ -116,7 +120,7 @@ func TestSyncRouting(t *testing.T) {
 	// The uplink override: a table of its own, consulted after the
 	// tunnels' and before the main table's default route.
 	ipOut(t, "addr", "add", "192.0.2.2/24", "dev", "peer0")
-	over := &UplinkOverride{If: "peer0", Gw4: netip.MustParseAddr("192.0.2.1")}
+	over := &UplinkOverride{If: "peer0", V4: true, Gw4: netip.MustParseAddr("192.0.2.1")}
 	for i := 0; i < 2; i++ {
 		if err := SyncRouting(nil, over); err != nil {
 			t.Fatal(err)
@@ -142,6 +146,22 @@ func TestSyncRouting(t *testing.T) {
 	}
 	if v4 := ipOut(t, "route", "show", "table", "105"); !strings.Contains(v4, "via 192.0.2.9") || strings.Contains(v4, "192.0.2.1 ") {
 		t.Errorf("override route after change: %q", v4)
+	}
+	// An uplink with an address but no gateway known is left to the main
+	// table; one with no IPv4 at all has IPv4 refused.
+	over.Gw4 = netip.Addr{}
+	if err := SyncRouting(nil, over); err != nil {
+		t.Fatal(err)
+	}
+	if v4, _ := exec.Command("ip", "route", "show", "table", "105").CombinedOutput(); strings.Contains(string(v4), "default") {
+		t.Errorf("override without a gateway: %q", v4)
+	}
+	over.V4 = false
+	if err := SyncRouting(nil, over); err != nil {
+		t.Fatal(err)
+	}
+	if v4 := ipOut(t, "route", "show", "table", "105"); !strings.Contains(v4, "unreachable default") {
+		t.Errorf("override for an uplink without IPv4: %q", v4)
 	}
 	if err := SyncRouting(nil, nil); err != nil {
 		t.Fatal(err)

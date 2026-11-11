@@ -132,7 +132,7 @@ func TestForwarderPaths(t *testing.T) {
 		Direct:       up(t, direct.addr),
 		DirectCustom: true,
 		WAN:          up(t, wan.addr),
-		VPN:          map[string]VPNDNS{"home": {Servers: up(t, vpn.addr)}},
+		VPN:          map[string]VPNDNS{"home": {Servers: up(t, vpn.addr), Up: true}},
 	}
 	s.SetPolicy(pol)
 
@@ -219,13 +219,34 @@ func TestForwarderPaths(t *testing.T) {
 	// the tunnel; network-provided ones cannot.
 	clientMAC.Store("02:00:00:00:00:02")
 	p2 := *pol
-	p2.VPN = map[string]VPNDNS{"home": {Mark: 0x10}}
+	p2.VPN = map[string]VPNDNS{"home": {Mark: 0x10, Up: true, Public: true}}
 	if pt := p2.decide("02:00:00:00:00:02", netip.Addr{}, "x.example"); pt.kind != "vpn" || pt.mark != 0x10 {
 		t.Errorf("custom upstreams via tunnel: %+v", pt)
 	}
+	// Only the upstream network's resolver is known: it is not reachable
+	// through the tunnel, and is not asked outside it either.
 	p2.DirectCustom = false
+	if pt := p2.decide("02:00:00:00:00:02", netip.Addr{}, "x.example"); pt.kind != "vpn" || pt.mark != 0x10 || pt.servers[0].Addr.Addr().String() != "1.1.1.1" {
+		t.Errorf("no resolver known for the tunnel: %+v", pt)
+	}
+	// A tunnel to a few networks only: a public resolver is not behind it.
+	p2.VPN = map[string]VPNDNS{"home": {Mark: 0x10, Up: true}}
 	if pt := p2.decide("02:00:00:00:00:02", netip.Addr{}, "x.example"); pt.kind != "direct" {
-		t.Errorf("network resolver cannot go through tunnel: %+v", pt)
+		t.Errorf("split tunnel without a resolver: %+v", pt)
+	}
+	// A tunnel that is down: lookups go where the traffic goes.
+	p2.VPN = map[string]VPNDNS{"home": {Mark: 0x10}}
+	if pt := p2.decide("02:00:00:00:00:02", netip.Addr{}, "x.example"); pt.kind != "direct" {
+		t.Errorf("tunnel down, no kill switch: %+v", pt)
+	}
+	p2.VPN = map[string]VPNDNS{"home": {Mark: 0x10, KillSwitch: true}}
+	if pt := p2.decide("02:00:00:00:00:02", netip.Addr{}, "x.example"); pt.kind != "refuse" {
+		t.Errorf("tunnel down, kill switch: %+v", pt)
+	}
+	// Paused wins over being the device that signs in.
+	p2.Paused = map[string]bool{"02:00:00:00:00:09": true}
+	if pt := p2.decide("02:00:00:00:00:09", netip.Addr{}, "x.example"); pt.kind != "refuse" {
+		t.Errorf("paused sign-in device: %+v", pt)
 	}
 
 	// Query log has recorded paths.

@@ -18,6 +18,15 @@ if ! writable; then
     fsck.ext4 -y "$DEV" >/dev/null 2>&1
     mount -o rw,noatime "$DEV" /data 2>/dev/null
     if ! writable; then
+        # Not while a new version is on trial. If it cannot use the data
+        # partition, that is far more likely the new version's fault than
+        # the partition's; erasing it would leave the version before with
+        # nothing to go back to. Failing here leaves the trial
+        # unconfirmed, and update-guard goes back.
+        if [ "$(od -An -v -tx1 /proc/device-tree/chosen/bootloader/tryboot 2>/dev/null | tr -d ' \n')" = 00000001 ]; then
+            echo "ensure-data: data partition unusable during the trial of an update; leaving it alone" >&2
+            exit 1
+        fi
         echo "ensure-data: data partition unusable, recreating it" >&2
         umount /data 2>/dev/null
         mkfs.ext4 -q -F -L porter-data "$DEV" || exit 1
@@ -27,9 +36,8 @@ fi
 mkdir -p /data/porter
 chmod 700 /data/porter
 # Where usbmuxd keeps the records of iPhones that trust the router; see
-# tmpfiles.d/porter.conf. Made here as well for a data partition that has
-# just been recreated.
-if [ ! -d /data/lockdown ]; then
-    mkdir -p /data/lockdown && chown usbmux:plugdev /data/lockdown 2>/dev/null
-fi
+# tmpfiles.d/porter.conf. Owned by whatever number the usbmux user has in
+# this version of the system, which need not be the one it had in the
+# version that wrote the records.
+mkdir -p /data/lockdown && chown -R usbmux:plugdev /data/lockdown 2>/dev/null
 exit 0

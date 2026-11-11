@@ -1,0 +1,14 @@
+[Unit]
+Description=Make sure the data partition is usable
+# /data is not required for the system to come up (see fstab), so nothing
+# waits for it by default. Everything that keeps files there waits for
+# this instead.
+After=local-fs.target data.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/porter/ensure-data
+
+[Install]
+WantedBy=multi-user.target

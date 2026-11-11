@@ -140,7 +140,15 @@ type Core struct {
 	wasCaptive   bool
 
 	// Fingerprints of what was last applied, to skip no-op work.
+	// cfgUnreadable: there were settings at start and they could not be
+	// used.
+	cfgUnreadable bool
+	// resetting: a factory reset has wiped the data directory and the
+	// router is about to restart.
+	resetting  bool
 	planKey    string
+	classKey   string // the part of planKey that decides where connections go
+	forwarding bool
 	routeKey   string
 	dnsKey     string
 	sysKey     string
@@ -185,6 +193,7 @@ func New(opt Options) (*Core, error) {
 	cfg, err := c.store.Load()
 	if err != nil {
 		c.log.Error("configuration", "err", err)
+		c.cfgUnreadable = true
 	}
 	if cfg == nil {
 		cfg = config.Default()
@@ -233,7 +242,16 @@ func New(opt Options) (*Core, error) {
 		c.addEvent("device", "New device joined", e.MAC)
 		c.Kick()
 	}
-	c.dns = dnsfwd.New(dnsfwd.Hooks{LookupMAC: c.devs.LookupMAC, Learn: c.fwm.Learn, AdBlocked: c.ads.Blocked}, c.log)
+	// A device that has only just arrived is not in the device table yet;
+	// the kernel knows it all the same, and rules by device have to hold
+	// from its first lookup.
+	whose := func(ip netip.Addr) string {
+		if mac := c.devs.LookupMAC(ip); mac != "" {
+			return mac
+		}
+		return netx.NeighborOf(ip, "br-")
+	}
+	c.dns = dnsfwd.New(dnsfwd.Hooks{LookupMAC: whose, Learn: c.fwm.Learn, AdBlocked: c.ads.Blocked}, c.log)
 	hookEnv := []string{HookSocketEnv + "=" + HookSocket(opt.RunDir)}
 	c.lan = &lan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.LeaseHook, HookEnv: hookEnv,
 		Verbose: c.log.Enabled(context.Background(), slog.LevelDebug)}
@@ -305,9 +323,6 @@ func (c *Core) addEvent(kind, msg, mac string) {
 
 // Run is the control loop. It returns when ctx is cancelled.
 func (c *Core) Run(ctx context.Context) error {
-	if err := fw.EnableForwarding(); err != nil {
-		c.log.Warn("enabling forwarding", "err", err)
-	}
 	wifi.Unblock()
 	_ = os.WriteFile(filepath.Join(c.opt.RunDir, "resolv.conf"), []byte("nameserver 127.0.0.1\n"), 0o644)
 	c.wan.Start()
@@ -334,6 +349,7 @@ func (c *Core) Run(ctx context.Context) error {
 	system.Notify("READY=1")
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
+	var fed time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -344,18 +360,26 @@ func (c *Core) Run(ctx context.Context) error {
 		case <-c.kick:
 			c.reconcile()
 		case <-tick.C:
-			system.Notify("WATCHDOG=1")
 			c.periodic()
 			c.reconcile()
+		}
+		// The loop has come round: that, and not the ticker having fired,
+		// is what the watchdog is told.
+		if time.Since(fed) >= time.Second {
+			fed = time.Now()
+			system.Notify("WATCHDOG=1")
 		}
 	}
 }
 
 func (c *Core) shutdown() {
 	c.log.Info("shutting down")
-	system.SaveClock(filepath.Join(c.opt.DataDir, "clock"))
-	c.devs.Save()
-	c.stats.Save()
+	if !c.resetting {
+		// After a factory reset nothing is written back.
+		system.SaveClock(filepath.Join(c.opt.DataDir, "clock"))
+		c.devs.Save()
+		c.stats.Save()
+	}
 	for _, ap := range c.aps {
 		ap.Stop()
 	}
@@ -383,15 +407,18 @@ func (c *Core) periodic() {
 		}
 	}
 	var stations []devices.Station
+	stationsKnown := true
 	for _, ap := range c.aps {
-		for _, s := range ap.Stations() {
+		list, ok := ap.Stations()
+		stationsKnown = stationsKnown && ok
+		for _, s := range list {
 			stations = append(stations, devices.Station{MAC: s.MAC, Iface: s.Iface, Signal: s.Signal})
 			if b, ok := ap.Bridge(s.Iface); ok {
 				home[s.MAC] = strings.TrimPrefix(b, "br-")
 			}
 		}
 	}
-	c.devs.Observe(neigh, stations, home)
+	c.devs.Observe(neigh, stations, home, stationsKnown)
 
 	// Read traffic counters often while someone is looking, rarely
 	// otherwise.
@@ -412,8 +439,9 @@ func (c *Core) periodic() {
 			c.log.Debug("reading connection table", "err", err)
 		}
 	}
-	if now.Sub(c.lastSave) >= 10*time.Minute {
+	if now.Sub(c.lastSave) >= 10*time.Minute && !c.resetting {
 		c.lastSave = now
+		c.devs.Prune(func(mac string) bool { return c.cfg.Device(mac) != nil })
 		c.devs.Save()
 		c.stats.Save()
 		system.SaveClock(filepath.Join(c.opt.DataDir, "clock"))
@@ -451,7 +479,10 @@ func (c *Core) setConfig(next *config.Config) error {
 	if err := next.Validate(); err != nil {
 		return err
 	}
-	if err := next.Consistent(); err != nil {
+	// A configuration that does not hang together is refused, unless the
+	// one in force does not either (it was not made here): then refusing
+	// would leave no way to mend it one step at a time.
+	if err := next.Consistent(); err != nil && c.cfg.Consistent() == nil {
 		return err
 	}
 	next.Rev = c.cfg.Rev + 1
@@ -508,8 +539,10 @@ func (c *Core) reconcile() {
 			c.log.Warn("setting regulatory domain", "err", err)
 		}
 		c.regdom = cfg.System.Country
-		// Channel availability depends on the domain.
+		// Channel availability depends on the domain. The kernel takes a
+		// moment to apply it, so it is looked at now and once more.
 		c.radios = wifi.Discover()
+		time.AfterFunc(1500*time.Millisecond, func() { wifi.Forget(); c.Kick() })
 	}
 	wantAP := map[string]wifi.APSpec{}
 	wantSTA := map[string]wifi.STASpec{}
@@ -551,6 +584,9 @@ func (c *Core) reconcile() {
 			}
 			spec := wifi.APSpec{Radio: *hw, Iface: hw.Iface, Country: cfg.System.Country, Width: rc.Width}
 			band, channel := rc.Band, rc.Channel
+			// must: the access point goes on exactly this channel or not
+			// at all, because the uplink is connected there.
+			must := false
 			if role == config.RoleAPWAN {
 				spec.Iface, spec.Virtual = wifi.VifName(hw.Phy, 0), true
 				// A shared radio has one channel, and the uplink decides
@@ -563,7 +599,7 @@ func (c *Core) reconcile() {
 				// connection, and is only worth it for an uplink.
 				freq := 0
 				if st := staStatus[rc.ID]; st.State == "connected" && st.Freq != 0 {
-					freq = st.Freq
+					freq, must = st.Freq, true
 				} else if sta := c.stas[rc.ID]; sta != nil {
 					if f, ok := sta.KnownInRange(); ok {
 						freq = f
@@ -575,6 +611,12 @@ func (c *Core) reconcile() {
 				if freq != 0 && hw.Band(wifi.BandOfFreq(freq)) != nil {
 					band, channel = wifi.BandOfFreq(freq), wifi.FreqToChannel(freq)
 					c.apShared[rc.ID] = freq
+				} else if must {
+					// Joined on a band this radio cannot broadcast on.
+					for _, w := range ssids {
+						c.offAir = append(c.offAir, w.ID)
+					}
+					continue
 				}
 			} else {
 				delete(c.apShared, rc.ID)
@@ -589,6 +631,16 @@ func (c *Core) reconcile() {
 			}
 			if b := hw.Band(band); b != nil {
 				ch, ok := wifi.PickChannel(b, channel)
+				if must && (!ok || ch != channel) {
+					// A channel the uplink may use and an access point may
+					// not. Starting it elsewhere would only knock the
+					// uplink off; the network stays off air until the
+					// uplink moves.
+					for _, w := range ssids {
+						c.offAir = append(c.offAir, w.ID)
+					}
+					continue
+				}
 				if !ok {
 					ch, ok = wifi.PickChannel(b, 0)
 				}
@@ -811,7 +863,7 @@ func (c *Core) reconcile() {
 			n.Address = next.String()
 			for d := range cfg.Devices {
 				if a, err := netip.ParseAddr(cfg.Devices[d].IP); err == nil && cur.Masked().Contains(a) {
-					if m, ok := lan.Remap(a, cur, next); ok {
+					if m, ok := lan.Remap(a, cur, next); ok && m != next.Addr() {
 						cfg.Devices[d].IP = m.String()
 					} else {
 						cfg.Devices[d].IP = ""
@@ -838,6 +890,9 @@ func (c *Core) reconcile() {
 			c.portalDev = ""
 			var first int64
 			for _, d := range devList {
+				if dc := cfg.Device(d.MAC); dc != nil && dc.Paused {
+					continue // it could not sign in anyway
+				}
 				if d.Online && (first == 0 || d.OnlineSince < first) {
 					first, c.portalDev = d.OnlineSince, d.MAC
 				}
@@ -911,9 +966,20 @@ func (c *Core) reconcile() {
 		if err := c.fwm.Apply(plan); err != nil {
 			c.log.Error("firewall", "err", err)
 		} else {
-			flush = c.planKey != ""
-			c.planKey = key
+			// Connections are only made to start over when something that
+			// decides their way has changed, not when, say, SSH is
+			// switched on or an uplink is plugged in.
+			class := fw.ClassKey(plan)
+			flush = c.planKey != "" && class != c.classKey
+			c.planKey, c.classKey = key, class
 		}
+	}
+	if !c.forwarding && c.planKey != "" {
+		// Nothing is forwarded until there are rules to forward by.
+		if err := fw.EnableForwarding(); err != nil {
+			c.log.Warn("enabling forwarding", "err", err)
+		}
+		c.forwarding = true
 	}
 	if !c.acctEnabled && c.planKey != "" {
 		// Per-connection byte counters for the flow list. The setting
@@ -923,11 +989,12 @@ func (c *Core) reconcile() {
 		c.acctEnabled = true
 	}
 	routes := c.vpn.Routes(running.VPNs)
-	// When the best-ranked uplink has an address but no way out, and a
-	// lower one works, traffic is sent past it.
+	// The uplink in use is named to the kernel outright (see
+	// fw.UplinkOverride), whether or not it is the one the main table
+	// would have picked.
 	var override *fw.UplinkOverride
-	if pref := wan.Preferred(states); active != nil && pref != nil && pref.If != active.If {
-		override = &fw.UplinkOverride{If: active.If, V6: active.HasV6}
+	if active != nil {
+		override = &fw.UplinkOverride{If: active.If, V4: active.IPv4 != "", V6: active.HasV6}
 		override.Gw4, _ = netip.ParseAddr(active.Gateway)
 		if active.HasV6 {
 			override.Gw6, _ = netx.DefaultRoute(active.If, unix.AF_INET6)
@@ -937,7 +1004,7 @@ func (c *Core) reconcile() {
 		c.overrideIf = ""
 		if override != nil {
 			c.overrideIf = override.If
-			c.log.Info("uplink override", "use", active.If, "instead_of", wan.Preferred(states).If)
+			c.log.Info("uplink in use", "if", active.If)
 		}
 	}
 	if key := fmt.Sprintf("%+v|%+v", routes, override); key != c.routeKey {
@@ -958,19 +1025,24 @@ func (c *Core) reconcile() {
 		}
 	}
 
-	c.applyDNS(&running, states, active, portalDevs, routerAddr)
+	c.applyDNS(&running, states, active, portalDevs, routerAddr, routes)
 	c.applySystem(cfg)
 
-	if changedCfg {
+	if changedCfg && !c.resetting {
 		cfg.Rev++
-		if err := c.store.Save(cfg); err != nil {
+		if err := cfg.Validate(); err != nil {
+			// What the router changed by itself must be as sound as what
+			// it accepts from the app; a file that does not load would
+			// cost every setting at the next start.
+			c.log.Error("the configuration as changed by the router is not valid; not saved", "err", err)
+		} else if err := c.store.Save(cfg); err != nil {
 			c.log.Error("saving configuration", "err", err)
 		}
 	}
 	c.publishStatus()
 }
 
-func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.State, portalDevs []string, router netip.Prefix) {
+func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.State, portalDevs []string, router netip.Prefix, routes []fw.VPNRoutes) {
 	pol := &dnsfwd.Policy{
 		Hosts:       map[string][]netip.Addr{},
 		Reverse:     map[netip.Addr]string{},
@@ -1007,7 +1079,14 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 	for _, a := range own {
 		pol.Reverse[a] = "porter." + cfg.LAN.Domain
 	}
-	for name, addrs := range c.devs.Hosts() {
+	hosts := c.devs.Hosts()
+	names := make([]string, 0, len(hosts))
+	for name := range hosts {
+		names = append(names, name)
+	}
+	sort.Strings(names) // names that differ only in case: always the same one wins
+	for _, name := range names {
+		addrs := hosts[name]
 		name = strings.ToLower(name)
 		if _, taken := pol.Hosts[name]; taken {
 			continue
@@ -1056,7 +1135,12 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 		pol.Direct = pol.WAN
 	}
 	for i, v := range cfg.VPNs {
-		vd := dnsfwd.VPNDNS{Mark: fw.MarkVPN(i)}
+		vd := dnsfwd.VPNDNS{Mark: fw.MarkVPN(i), KillSwitch: v.KillSwitch, Up: i < len(routes) && routes[i].Up}
+		if vd.Up {
+			for _, p := range routes[i].Allowed {
+				vd.Public = vd.Public || p.Contains(dnsfwd.PublicProbe)
+			}
+		}
 		for _, s := range v.WireGuard.DNS {
 			if u, err := config.ParseUpstream(s); err == nil {
 				vd.Servers = append(vd.Servers, u)
@@ -1213,7 +1297,14 @@ func wiredPorts() []wiredPort {
 		if b, err := os.ReadFile(filepath.Join(base, "device", "..", "product")); err == nil {
 			p.Label = strings.TrimSpace(string(b))
 		}
-		p.Phone = isPhone(name, driver, readTrim(filepath.Join(base, "address")))
+		// The address the device came with, not one the router has given
+		// it since: an Ethernet adapter told to use a private address is
+		// still an Ethernet adapter.
+		address := readTrim(filepath.Join(base, "address"))
+		if _, perm, err := netx.HardwareAddr(name); err == nil && perm != "" && perm != "00:00:00:00:00:00" {
+			address = perm
+		}
+		p.Phone = isPhone(name, driver, address)
 		if p.Phone && p.Label == "" {
 			p.Label = "Phone"
 			if driver == "ipheth" {

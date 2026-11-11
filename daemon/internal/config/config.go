@@ -700,6 +700,23 @@ func networksAndOrder(doc map[string]any) error {
 	doc["lan"] = lan
 	doc["networks"] = []any{network}
 
+	// One radio at most joins other networks. Format 1 did not insist,
+	// and a configuration that says otherwise could never be changed
+	// again: every change is checked as a whole.
+	uplink := false
+	radios, _ := doc["radios"].([]any)
+	for _, r := range radios {
+		m, _ := r.(map[string]any)
+		role, _ := m["role"].(string)
+		if role != RoleWAN && role != RoleAPWAN {
+			continue
+		}
+		if uplink {
+			m["role"] = map[string]string{RoleWAN: RoleOff, RoleAPWAN: RoleAP}[role]
+		}
+		uplink = true
+	}
+
 	wan := section("wan")
 	var wired []any
 	ports, _ := doc["ethernet"].([]any)

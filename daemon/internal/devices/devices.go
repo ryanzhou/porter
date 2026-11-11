@@ -32,6 +32,8 @@ type Entry struct {
 	Signal  int    `json:"signal,omitempty"`
 	Up      uint64 `json:"up"`   // bytes sent by the device
 	Down    uint64 `json:"down"` // bytes sent to the device
+	// wireless: an access point has reported this device at some time.
+	wireless bool
 }
 
 type Table struct {
@@ -110,17 +112,18 @@ func (t *Table) Lease(action, mac, ip, hostname string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now().Unix()
-	e := t.get(mac, now)
 	a, err := netip.ParseAddr(ip)
 	if action == "del" {
+		// A lease running out is not a device turning up.
 		if err == nil && t.byIP[a] == mac {
 			delete(t.byIP, a)
 		}
-		if e.IPv4 == ip {
+		if e := t.entries[mac]; e != nil && e.IPv4 == ip {
 			e.IPv4 = ""
 		}
 		return
 	}
+	e := t.get(mac, now)
 	if err == nil {
 		t.byIP[a] = mac
 		e.IPv4 = ip
@@ -141,8 +144,14 @@ type Station struct {
 
 // Observe updates presence from the neighbour tables and the access
 // points' station lists. home says which network each device was seen
-// on.
-func (t *Table) Observe(neigh map[netip.Addr]string, stations []Station, home map[string]string) {
+// on. stationsKnown is false when an access point could not be asked for
+// its list this time.
+//
+// A Wi-Fi device is here for as long as an access point says so. The
+// kernel's neighbour table is no witness for it: with the few entries a
+// small network has, it remembers an address until something is sent
+// there and gets no answer, which for a phone that has left can be hours.
+func (t *Table) Observe(neigh map[netip.Addr]string, stations []Station, home map[string]string, stationsKnown bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now().Unix()
@@ -163,12 +172,19 @@ func (t *Table) Observe(neigh map[netip.Addr]string, stations []Station, home ma
 	wireless := map[string]Station{}
 	for _, s := range stations {
 		wireless[s.MAC] = s
-		seen[s.MAC] = true
-		t.get(s.MAC, now)
+		t.get(s.MAC, now).wireless = true
 	}
 	for mac, e := range t.entries {
 		was := e.Online
-		e.Online = seen[mac]
+		_, associated := wireless[mac]
+		switch {
+		case associated:
+			e.Online = true
+		case e.wireless:
+			e.Online = was && !stationsKnown
+		default:
+			e.Online = seen[mac]
+		}
 		if e.Online {
 			e.LastSeen = now
 			if s, ok := wireless[mac]; ok {
@@ -197,6 +213,24 @@ func (t *Table) Observe(neigh map[netip.Addr]string, stations []Station, home ma
 		if e := t.entries[mac]; e == nil || (!e.Online && e.IPv4 != ip.String()) {
 			delete(t.byIP, ip)
 		}
+	}
+}
+
+// Prune forgets devices that have not been seen for a long time and that
+// nothing is remembered about but that they once passed by: no name, and
+// keep (settings made for them) says no. A router that travels meets many
+// such.
+func (t *Table) Prune(keep func(mac string) bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	old := time.Now().Add(-30 * 24 * time.Hour).Unix()
+	for mac, e := range t.entries {
+		if e.Online || e.LastSeen > old || e.Hostname != "" || keep(mac) {
+			continue
+		}
+		delete(t.entries, mac)
+		delete(t.lastUp, mac)
+		t.dirty = true
 	}
 }
 
@@ -291,6 +325,11 @@ func (t *Table) Hosts() map[string][]netip.Addr {
 		if a, err := netip.ParseAddr(e.IPv4); err == nil {
 			out[e.Hostname] = append(out[e.Hostname], a)
 		}
+	}
+	// Two devices can go by one name. The order is fixed so that the
+	// same devices always give the same answer.
+	for _, addrs := range out {
+		sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
 	}
 	return out
 }

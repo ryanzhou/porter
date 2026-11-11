@@ -73,11 +73,14 @@ DEBKEYS=/usr/share/keyrings/debian-archive-keyring.gpg
 if ! { [ -r "$DEBKEYS" ] && curl -fsS "https://deb.debian.org/debian/dists/$SUITE/InRelease" \
         | gpgv --keyring "$DEBKEYS" >/dev/null 2>&1; }; then
     # The host's Debian keyring is missing or too old to know this release
-    # (typical on Ubuntu). Fetch the current keyring package from Debian.
+    # (typical on Ubuntu). Fetch Debian's keyring package: the one pinned
+    # in debian-keyring.pin, checked against the hash recorded there.
     echo "    host keyring does not cover $SUITE; fetching debian-archive-keyring"
-    deb=$(curl -fsS "https://deb.debian.org/debian/dists/$SUITE/main/binary-all/Packages.xz" | xz -dc \
-        | awk '/^Package: debian-archive-keyring$/{p=1} p&&/^Filename:/&&!f{f=$2} END{print f}')
-    curl -fsS -o "$WORK/keyring.deb" "https://deb.debian.org/debian/$deb"
+    . "$HERE/debian-keyring.pin"
+    curl -fsS -o "$WORK/keyring.deb" "https://deb.debian.org/debian/$DEBIAN_KEYRING_DEB" \
+        || { echo "could not fetch $DEBIAN_KEYRING_DEB: if Debian has published a newer keyring, update image/debian-keyring.pin" >&2; exit 1; }
+    echo "$DEBIAN_KEYRING_SHA256  $WORK/keyring.deb" | sha256sum -c --quiet - \
+        || { echo "the Debian keyring package does not have the hash in image/debian-keyring.pin" >&2; exit 1; }
     dpkg-deb -x "$WORK/keyring.deb" "$WORK/keyring"
     DEBKEYS=$WORK/keyring/usr/share/keyrings/debian-archive-keyring.gpg
 fi
@@ -126,6 +129,9 @@ mmdebstrap --architectures=arm64 --variant=minbase --mode=root \
     --dpkgopt='path-exclude=/usr/share/doc/*' \
     --dpkgopt='path-include=/usr/share/doc/*/copyright' \
     --dpkgopt='path-exclude=/usr/share/locale/*' \
+    --dpkgopt='path-exclude=/usr/lib/firmware/ath11k/*' \
+    --dpkgopt='path-exclude=/usr/lib/firmware/ath12k/*' \
+    --dpkgopt='path-exclude=/usr/lib/firmware/wil6210*' \
     --essential-hook='mkdir -p "$1/etc/initramfs-tools" && echo update_initramfs=no > "$1/etc/initramfs-tools/update-initramfs.conf"' \
     "$SUITE" "$ROOT" \
     "deb https://deb.debian.org/debian $SUITE main contrib non-free non-free-firmware" \
@@ -134,9 +140,18 @@ mmdebstrap --architectures=arm64 --variant=minbase --mode=root \
     "deb https://archive.raspberrypi.com/debian $SUITE main"
 
 echo "==> customising"
-cp -a "$HERE/rootfs/." "$ROOT/"
-chown -R 0:0 "$ROOT/etc/systemd" "$ROOT/usr/lib/porter" "$ROOT/etc/bluetooth" "$ROOT/etc/ssh/sshd_config.d" "$ROOT/etc/modprobe.d" \
-    "$ROOT/etc/sysctl.d" "$ROOT/etc/tmpfiles.d" "$ROOT/etc/fstab" "$ROOT/etc/hostname" "$ROOT/etc/hosts"
+# The files of image/rootfs, as root's and writable by nobody else,
+# whoever checked the repository out and with whatever umask. Directories
+# that are already there (/etc, /usr) keep the owner and mode they have.
+tar -C "$HERE/rootfs" --owner=0 --group=0 --numeric-owner --mode='go-w' -cf - . \
+    | tar -C "$ROOT" --no-overwrite-dir -xpf -
+# The on-board radio's firmware comes in two builds; see "Built-in radio
+# client limit" in docs/DEVELOPMENT.md.
+if [ -n "${PORTER_WIFI_FIRMWARE:-}" ]; then
+    update-alternatives --root "$ROOT" --set cyfmac43455-sdio.bin \
+        "/usr/lib/firmware/cypress/cyfmac43455-sdio-$PORTER_WIFI_FIRMWARE.bin"
+    echo "    on-board radio firmware: $PORTER_WIFI_FIRMWARE"
+fi
 install -m 755 "$WORK/bin/porterd" "$ROOT/usr/sbin/porterd"
 install -m 755 "$WORK/bin/porterctl" "$ROOT/usr/sbin/porterctl"
 install -m 755 "$WORK/mpquic" "$ROOT/usr/lib/porter/mpquic"
@@ -183,7 +198,7 @@ $SYSTEMCTL mask hostapd.service wpa_supplicant.service sshd-keygen.service \
     e2scrub_reap.service systemd-pstore.service systemd-random-seed.service \
     systemd-update-utmp.service systemd-machine-id-commit.service 2>/dev/null || true
 $SYSTEMCTL disable ssh.service ssh.socket 2>/dev/null || true
-$SYSTEMCTL enable porterd.service porter-update-guard.service bluetooth.service systemd-timesyncd.service
+$SYSTEMCTL enable porterd.service porter-data.service porter-update-guard.service bluetooth.service systemd-timesyncd.service
 
 # A phone on USB is only an uplink if the kernel has the driver for it,
 # as a module or built in. An image without one would ship a feature that

@@ -92,6 +92,9 @@ func (p *Proc) runOnce() error {
 	if len(p.Env) > 0 {
 		cmd.Env = append(os.Environ(), p.Env...)
 	}
+	// A child the program left behind must not keep Wait from returning
+	// by holding the output open.
+	cmd.WaitDelay = 3 * time.Second
 	// Own process group, and die with the router daemon.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
 	pr, pw := io.Pipe()

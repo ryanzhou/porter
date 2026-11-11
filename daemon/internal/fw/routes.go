@@ -21,14 +21,17 @@ type VPNRoutes struct {
 
 const backstopMetric = 1 << 30
 
-// UplinkOverride sends everything that would leave by the main table's
-// default route through another uplink instead. It is how the router
-// steps past its best-ranked uplink when that one has an address but no
-// way to the internet.
+// UplinkOverride names the uplink in use, in a routing table of its own
+// that is consulted before the main table's default routes. The main
+// table is not left to choose, because what it chooses is not what the
+// router means: it prefers by metric, not by the configured order; it
+// goes on using a route with a fixed address after the cable is pulled;
+// and it decides IPv4 and IPv6 separately, so that one family can follow
+// an uplink that has been stepped past.
 type UplinkOverride struct {
 	If       string
-	Gw4, Gw6 netip.Addr // invalid: none for that family
-	V6       bool       // the uplink has IPv6 at all
+	Gw4, Gw6 netip.Addr // invalid: no gateway known for that family
+	V4, V6   bool       // the uplink has an address of that family
 }
 
 // SyncRouting makes the policy-routing rules, the per-VPN tables and the
@@ -88,6 +91,21 @@ func syncRules(family int, vpns []VPNRoutes) error {
 		mask := ClassMask
 		r.Mask = &mask
 		want[key{r.Priority, r.Table, r.Mark}] = r
+		// What the router sends itself for a tunnel (the lookups of the
+		// devices routed there, mostly) goes by the tunnel's table before
+		// the main table is looked at. Otherwise a tunnel's resolver
+		// whose address happens to lie in the upstream network's range
+		// (192.168.1.1 at home, and the hotel uses 192.168.1.0/24) would
+		// be asked over the uplink, in the clear, or with a kill switch
+		// not at all.
+		o := netlink.NewRule()
+		o.Family = family
+		o.Priority = PrefOwnBase + v.Index
+		o.Table = TableVPN(v.Index)
+		o.Mark = MarkVPN(v.Index)
+		o.Mask = &mask
+		o.IifName = "lo"
+		want[key{o.Priority, o.Table, o.Mark}] = o
 	}
 	have, err := netlink.RuleList(family)
 	if err != nil {
@@ -95,7 +113,7 @@ func syncRules(family int, vpns []VPNRoutes) error {
 	}
 	for i := range have {
 		h := have[i]
-		if h.Priority < PrefMain || h.Priority >= PrefVPNBase+32 {
+		if h.Priority < PrefOwnBase || h.Priority >= PrefVPNBase+32 {
 			continue
 		}
 		k := key{h.Priority, h.Table, h.Mark}
@@ -117,38 +135,37 @@ func syncRules(family int, vpns []VPNRoutes) error {
 }
 
 // syncUplink fills or empties the override table for one address family.
+// A family the uplink has a gateway for goes there. A family it has no
+// address for is refused, so that clients fall back to the other at once
+// instead of waiting on another uplink's route. A family it has an
+// address but no gateway for (a point-to-point link) is left to the main
+// table.
 func syncUplink(family int, o *UplinkOverride) error {
 	v6 := family == unix.AF_INET6
 	var want *netlink.Route
 	if o != nil {
-		gw := o.Gw4
+		gw, has := o.Gw4, o.V4
 		if v6 {
-			gw = o.Gw6
+			gw, has = o.Gw6, o.V6
+		}
+		def := netip.PrefixFrom(netip.IPv4Unspecified(), 0)
+		if v6 {
+			def = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
 		}
 		switch {
-		case v6 && !o.V6:
-			// The uplink in use has no IPv6. Without this, IPv6 would
-			// still follow the skipped uplink's route and hang; refused
-			// at once, clients fall back to IPv4.
-			want = &netlink.Route{Dst: ipnet(netip.PrefixFrom(netip.IPv6Unspecified(), 0)), Table: TableUplink, Type: unix.RTN_UNREACHABLE, Family: family}
-		default:
+		case !has:
+			want = &netlink.Route{Dst: ipnet(def), Table: TableUplink, Type: unix.RTN_UNREACHABLE, Family: family}
+		case gw.IsValid():
 			link, err := netlink.LinkByName(o.If)
 			if err != nil {
 				return err
 			}
-			def := netip.PrefixFrom(netip.IPv4Unspecified(), 0)
-			if v6 {
-				def = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
-			}
-			want = &netlink.Route{LinkIndex: link.Attrs().Index, Dst: ipnet(def), Table: TableUplink, Family: family}
-			if gw.IsValid() {
-				want.Gw = gw.AsSlice()
-			} else {
-				want.Scope = netlink.SCOPE_LINK
-			}
+			want = &netlink.Route{LinkIndex: link.Attrs().Index, Dst: ipnet(def), Table: TableUplink, Family: family, Gw: gw.AsSlice()}
 		}
-		if err := netlink.RouteReplace(want); err != nil {
-			return err
+		if want != nil {
+			if err := netlink.RouteReplace(want); err != nil {
+				return err
+			}
 		}
 	}
 	have, err := netlink.RouteListFiltered(family, &netlink.Route{Table: TableUplink}, netlink.RT_FILTER_TABLE)

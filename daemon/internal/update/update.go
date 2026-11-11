@@ -490,12 +490,22 @@ func (s *System) Install(ctx context.Context, client *http.Client, base string, 
 	if err := s.snapshot(); err != nil {
 		return fmt.Errorf("saving the settings: %w", err)
 	}
-	note, _ := json.Marshal(pending{Version: m.Version, Slot: target.Name, From: from, At: time.Now().Unix()})
-	if err := writeSynced(s.Pending, note); err != nil {
+	// From here on a failure has to take back the note and the copy of
+	// the settings: left behind, they would be taken at the next start,
+	// whenever that is, for a trial that did not come up, and the
+	// settings of today put back over whatever they are by then.
+	undo := func(err error) error {
+		_ = os.Remove(s.Pending)
+		_ = os.RemoveAll(s.Backup)
+		_ = s.writeSelector(cur, cur)
 		return err
 	}
+	note, _ := json.Marshal(pending{Version: m.Version, Slot: target.Name, From: from, At: time.Now().Unix()})
+	if err := writeSynced(s.Pending, note); err != nil {
+		return undo(err)
+	}
 	if err := s.writeSelector(cur, target); err != nil {
-		return err
+		return undo(err)
 	}
 	progress("restart", 100)
 	return s.Restart(true)

@@ -124,6 +124,52 @@ final class VectorTests: XCTestCase {
         }
     }
 
+    /// A router that takes a request and never answers it must not keep
+    /// the connection, or what waits on it, for ever.
+    func testUnansweredCallEndsTheConnection() async throws {
+        let v = try loadVectors()
+        let identity = try Identity(privateKey: Data(hex: v.app_static_private))
+        // Nothing reads from this transport once the handshake is done,
+        // so the router is silent from then on.
+        let transport = ReplayTransport(incoming: [Data(hex: v.handshake[1])])
+        let session = try await SecureSession.open(
+            transport: transport, identity: identity, expectedRouterKey: nil,
+            ephemeral: Data(hex: v.app_ephemeral_private))
+        let connection = RouterConnection(session: session)
+        // 25 seconds become 50 ms.
+        await connection.setDeadlineUnit(nanoseconds: 2_000_000)
+
+        // Fulfilled a second time, it would fail the test.
+        let closed = expectation(description: "the connection ended")
+        await connection.onClose { _ in closed.fulfill() }
+        // Two calls wait at once; both must hear, each once.
+        async let second: RouterStatus = connection.status()
+        do {
+            _ = try await connection.hello()
+            XCTFail("a call was answered by a silent router")
+        } catch let error as SessionError {
+            XCTAssertEqual(error, .timeout)
+            XCTAssertEqual(error.errorDescription, "The router stopped answering.")
+        }
+        do {
+            _ = try await second
+            XCTFail("a call was answered by a silent router")
+        } catch let error as SessionError {
+            XCTAssertEqual(error, .timeout)
+        }
+        await fulfillment(of: [closed], timeout: 5)
+
+        // The connection is over: the event stream has ended and a new
+        // call fails at once.
+        for await _ in connection.events {}
+        do {
+            _ = try await connection.hello()
+            XCTFail("a call went out on a connection that has ended")
+        } catch let error as SessionError {
+            XCTAssertEqual(error, .timeout)
+        }
+    }
+
     func testFragmentation() throws {
         let v = try loadVectors().fragmentation
         let packet = Data(hex: v.packet)

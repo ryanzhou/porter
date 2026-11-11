@@ -74,18 +74,19 @@ type State struct {
 }
 
 type uplink struct {
-	cfg     Uplink
-	static  string // the last problem applying fixed addresses, for logging once
-	dhcpcd  *proc.Proc
-	conf    string
-	dns4    []string
-	dns6    map[string][]string // per env source
-	api     string
-	st      State
-	lastOK  time.Time
-	fails   int // probes that got no answer, in a row
-	probeAt time.Time
-	probing bool
+	cfg    Uplink
+	static string // the last problem applying fixed addresses, for logging once
+	dhcpcd *proc.Proc
+	dns4   []string
+	dns6   map[string][]string // per env source
+	api    string
+	st     State
+	lastOK time.Time
+	fails  int // probes that got no answer, in a row
+	// captives counts sign-in pages seen in a row.
+	captives int
+	probeAt  time.Time
+	probing  bool
 }
 
 type Manager struct {
@@ -257,6 +258,11 @@ func (m *Manager) startDHCP(u *uplink) {
 	if err := netx.Up(u.cfg.If); err != nil {
 		m.Log.Warn("uplink not available yet", "if", u.cfg.If, "err", err)
 	}
+	// A route out of a port whose cable has been pulled is not a route.
+	// The kernel keeps using it otherwise, which matters for fixed
+	// addresses: nothing takes those away when the link goes.
+	netx.Sysctl("net/ipv4/conf/"+u.cfg.If+"/ignore_routes_with_linkdown", "1")
+	netx.Sysctl("net/ipv6/conf/"+u.cfg.If+"/ignore_routes_with_linkdown", "1")
 	if u.cfg.IP.V4.Static() || u.cfg.IP.V6.Static() {
 		m.Log.Info("uplink with fixed addresses", "if", u.cfg.If, "ipv4", u.cfg.IP.V4.Address, "ipv6", u.cfg.IP.V6.Address)
 		m.mu.Lock()
@@ -466,20 +472,43 @@ func (m *Manager) runProbe(u *uplink, p config.Probe, dns []string) {
 	next := 5 * time.Second
 	switch res.State {
 	case StOnline:
-		u.lastOK, u.fails = now, 0
+		u.lastOK, u.fails, u.captives = now, 0, 0
 		u.st.Internet, u.st.PortalURL = StOnline, ""
 		next = 45 * time.Second
+		// With somewhere else to go, a dead uplink is worth noticing
+		// sooner.
+		others := 0
+		for _, o := range m.uplinks {
+			if o != u && o.st.Carrier && (o.st.IPv4 != "" || o.st.HasV6) {
+				others++
+			}
+		}
+		if others > 0 {
+			next = 15 * time.Second
+		}
 	case StCaptive:
 		u.fails = 0
+		u.captives++
+		if prev == StOnline && u.captives < 2 {
+			// A working uplink does not turn into a sign-in page on the
+			// strength of one odd answer: the device chosen to sign in
+			// would be let past the VPN for it. Ask again first.
+			next = 2 * time.Second
+			break
+		}
 		u.st.Internet, u.st.PortalURL = StCaptive, res.PortalURL
 		next = 4 * time.Second
 	default:
-		// One lost probe does not make a working uplink "limited"; three
-		// in a row, some twenty seconds of nothing, do. Another uplink can
-		// then take over.
+		// One lost probe does not make a working uplink "limited", nor
+		// end a sign-in that is under way; three in a row do. Another
+		// uplink can then take over.
 		u.fails++
-		if prev == StOnline && u.fails < 3 {
+		u.captives = 0
+		if (prev == StOnline || prev == StCaptive) && u.fails < 3 {
 			next = 3 * time.Second
+			if u.fails == 1 {
+				next = time.Second
+			}
 		} else if u.st.Internet != StDown && u.st.Internet != StConnecting {
 			u.st.Internet, u.st.PortalURL = StLimited, ""
 		}

@@ -400,6 +400,30 @@ func Neighbors(name string) map[netip.Addr]string {
 	return out
 }
 
+// NeighborOf returns the hardware address the kernel has for ip on an
+// interface whose name starts with prefix, or "".
+func NeighborOf(ip netip.Addr, prefix string) string {
+	family := unix.AF_INET
+	if ip.Is6() {
+		family = unix.AF_INET6
+	}
+	list, err := netlink.NeighList(0, family)
+	if err != nil {
+		return ""
+	}
+	for _, n := range list {
+		a, ok := netip.AddrFromSlice(n.IP)
+		if !ok || a.Unmap() != ip || len(n.HardwareAddr) != 6 ||
+			n.State&(netlink.NUD_FAILED|netlink.NUD_INCOMPLETE|netlink.NUD_NOARP|netlink.NUD_PERMANENT) != 0 {
+			continue
+		}
+		if l, err := netlink.LinkByIndex(n.LinkIndex); err == nil && strings.HasPrefix(l.Attrs().Name, prefix) {
+			return n.HardwareAddr.String()
+		}
+	}
+	return ""
+}
+
 // Sysctl writes a value under /proc/sys, ignoring missing keys.
 func Sysctl(path, value string) {
 	_ = os.WriteFile("/proc/sys/"+path, []byte(value), 0)

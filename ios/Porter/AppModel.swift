@@ -54,7 +54,17 @@ final class AppModel: ObservableObject {
     private var confirmedConfig: RouterConfig?
     private var pendingEdits: [(id: Int, edit: (inout RouterConfig) -> Void)] = []
     private var nextEditID = 0
+    /// The update started last. The next one waits for it to finish, so
+    /// that each is written on top of what the one before it left on the
+    /// router and none finds the router a revision ahead of it.
+    private var updateTail: Task<Bool, Never>?
     private var connectTask: Task<Void, Never>?
+    /// Counts the attempts to connect and the disconnects. An attempt
+    /// whose number is no longer this one has been cancelled or replaced,
+    /// and leaves everything to whatever came after it.
+    private var generation = 0
+    /// How many attempts nobody asked for have failed in a row.
+    private var automaticFailures = 0
     private var eventTask: Task<Void, Never>?
     private var subscriptions: Set<AnyCancellable> = []
     /// Set when the user disconnects on purpose, to stop auto-reconnect.
@@ -111,22 +121,52 @@ final class AppModel: ObservableObject {
     private func autoConnect(_ routers: [DiscoveredRouter]) {
         guard !isDemo, phase == .searching, connectTask == nil, !holdOff else { return }
         guard let match = routers.first(where: { seen in knownRouters.contains { $0.peripheral == seen.id } }) else { return }
-        connect(to: match)
+        connect(to: match, automatic: true)
     }
 
-    func connect(to router: DiscoveredRouter) {
+    /// Connects to a router. `automatic` marks the attempt nobody asked
+    /// for, made because the paired router came into view.
+    func connect(to router: DiscoveredRouter, automatic: Bool = false) {
         holdOff = false
-        connectTask?.cancel()
+        if !automatic { automaticFailures = 0 }
+        if connectTask != nil {
+            // An attempt still under way is replaced, and what it has
+            // opened so far goes now rather than when it next looks.
+            connectTask?.cancel()
+            connectTask = nil
+            teardown()
+        }
+        generation += 1
+        let attempt: Int = generation
         connectTask = Task { [weak self] in
-            await self?.runConnection(peripheral: router.id, name: router.name)
-            self?.connectTask = nil
+            await self?.runConnection(peripheral: router.id, name: router.name, attempt: attempt, automatic: automatic)
+            // An attempt that was cancelled or replaced has no task to
+            // clear: the one stored by now belongs to a newer attempt.
+            guard let self, self.generation == attempt else { return }
+            self.connectTask = nil
         }
     }
 
-    private func runConnection(peripheral: UUID, name: String) async {
+    /// Whether a connection attempt is still the one under way. One that
+    /// is not has been cancelled or replaced: the link it opened itself,
+    /// if any, is dropped here, and the caller returns without touching
+    /// anything else.
+    private func isCurrent(_ attempt: Int, link: BLELink?) -> Bool {
+        if attempt == generation && !Task.isCancelled { return true }
+        link?.abandon(BLEError.disconnected)
+        return false
+    }
+
+    private func runConnection(peripheral: UUID, name: String, attempt: Int, automatic: Bool) async {
+        guard isCurrent(attempt, link: nil) else { return }
         phase = .connecting(name: name)
+        // The link this attempt opens. Cancel may come before the model
+        // has it, and then nothing but the attempt itself can drop it.
+        var opened: BLELink? = nil
         do {
             let link = try await central.connect(to: peripheral)
+            opened = link
+            guard isCurrent(attempt, link: link) else { return }
             self.link = link
             let known = knownRouters.first { $0.peripheral == peripheral }
             // The secure handshake and the first exchange get a deadline of
@@ -143,8 +183,10 @@ final class AppModel: ObservableObject {
             defer { deadline.cancel() }
             let connection = try await RouterConnection.connect(
                 transport: link, identity: try store.identity(), expectedRouterKey: known?.publicKey)
+            guard isCurrent(attempt, link: link) else { return }
             self.connection = connection
             var hello = try await connection.hello()
+            guard isCurrent(attempt, link: link) else { return }
             deadline.cancel()
 
             // Not paired yet: ask, and keep asking while the user goes to
@@ -152,10 +194,14 @@ final class AppModel: ObservableObject {
             while !hello.paired {
                 do {
                     try await connection.pair(name: UIDevice.current.name)
+                    guard isCurrent(attempt, link: link) else { return }
                     hello = try await connection.hello()
+                    guard isCurrent(attempt, link: link) else { return }
                 } catch let error as RouterError where error.code == RouterError.pairingClosed {
+                    guard isCurrent(attempt, link: link) else { return }
                     phase = .awaitingPairing(name: hello.name)
                     try await Task.sleep(nanoseconds: 1_500_000_000)
+                    guard isCurrent(attempt, link: link) else { return }
                 }
             }
             let router = KnownRouter(id: hello.id, name: hello.name, publicKey: connection.routerKey, peripheral: peripheral)
@@ -163,35 +209,58 @@ final class AppModel: ObservableObject {
             knownRouters = store.routers()
 
             try? await connection.setTime()
+            guard isCurrent(attempt, link: link) else { return }
             // A router of another generation: nothing of it can be shown,
             // but it can still be reached, which is enough to update it.
             let format = try await connection.configFormat()
+            guard isCurrent(attempt, link: link) else { return }
             if format != RouterConfig.format {
                 mismatch = format < RouterConfig.format ? .routerOlder : .appOlder
                 phase = .connected
+                automaticFailures = 0
                 central.stopScanning()
                 listen(to: connection)
                 return
             }
             mismatch = nil
             try await reload()
-            activity = (try? await connection.activity()) ?? []
+            guard isCurrent(attempt, link: link) else { return }
+            let recent: [ActivityEvent] = (try? await connection.activity()) ?? []
+            guard isCurrent(attempt, link: link) else { return }
+            activity = recent
             phase = .connected
+            automaticFailures = 0
             central.stopScanning()
             listen(to: connection)
-        } catch is CancellationError {
-            teardown()
-        } catch SessionError.routerKeyMismatch {
-            // No automatic retry after a failure: it would fail the same
-            // way and put the message up again every few seconds. The
-            // user taps the router to try again.
+        } catch {
+            // However it ended, an attempt that was cancelled or replaced
+            // says nothing: the model is no longer its to clear.
+            guard isCurrent(attempt, link: opened) else { return }
+            if let sessionError = error as? SessionError, sessionError == .routerKeyMismatch {
+                // No automatic retry after a failure: it would fail the same
+                // way and put the message up again every few seconds. The
+                // user taps the router to try again.
+                holdOff = true
+                teardown()
+                errorMessage = "This router's identity is different from the one this phone paired with. If you reset the router, forget it here and pair again. Otherwise something may be impersonating it."
+                return
+            }
+            if automatic {
+                // A router restarting after a software update is seen
+                // before it answers, and the first tries can run out of
+                // time. Four in a row end quietly: scanning goes on, and
+                // the next sight of the router starts another. The fifth
+                // is told like any other failure.
+                automaticFailures += 1
+                if automaticFailures < 5 {
+                    teardown()
+                    return
+                }
+            }
+            // Told once, and no automatic retry after it, as above.
             holdOff = true
             teardown()
-            errorMessage = "This router's identity is different from the one this phone paired with. If you reset the router, forget it here and pair again. Otherwise something may be impersonating it."
-        } catch {
-            if !Task.isCancelled { holdOff = true }
-            teardown()
-            if !Task.isCancelled { errorMessage = describe(error) }
+            errorMessage = describe(error)
         }
     }
 
@@ -239,6 +308,10 @@ final class AppModel: ObservableObject {
         status = nil
         mismatch = nil
         pendingEdits.removeAll()
+        // Updates still waiting their turn find their edits gone and
+        // send nothing.
+        updateTail?.cancel()
+        updateTail = nil
         setConfirmed(nil)
         devices = []
         radios = []
@@ -252,6 +325,7 @@ final class AppModel: ObservableObject {
     /// router again.
     func disconnect() {
         holdOff = true
+        generation += 1
         connectTask?.cancel()
         connectTask = nil
         teardown()
@@ -277,10 +351,17 @@ final class AppModel: ObservableObject {
 
     func reload() async throws {
         let connection = try requireConnection()
-        status = try await connection.status()
-        setConfirmed(try await connection.config())
-        devices = try await connection.devices()
-        radios = try await connection.radios()
+        let status: RouterStatus = try await connection.status()
+        let config: RouterConfig = try await connection.config()
+        let devices: [DeviceInfo] = try await connection.devices()
+        let radios: [RadioInfo] = try await connection.radios()
+        // The connection may have been dropped while the router answered.
+        // What it said is then about nothing the model still holds.
+        guard self.connection === connection else { throw BLEError.disconnected }
+        self.status = status
+        setConfirmed(config)
+        self.devices = devices
+        self.radios = radios
     }
 
     private func reloadConfig() async throws {
@@ -293,6 +374,16 @@ final class AppModel: ObservableObject {
 
     func refreshRadios() async throws {
         radios = try await requireConnection().radios()
+    }
+
+    /// Asks the router how far an installation is. Progress otherwise
+    /// only arrives as it changes, which says nothing to a page opened
+    /// in the middle of one. A failure is not announced.
+    func refreshFirmwareProgress() async {
+        let found: FirmwareProgress? = await fetchQuietly { try await $0.firmwareStatus() }
+        if let found {
+            firmwareProgress = found
+        }
     }
 
     /// Pull-to-refresh entry point for views.
@@ -325,12 +416,32 @@ final class AppModel: ObservableObject {
     /// Applies an edit to the configuration. The edit shows at once and is
     /// taken back if the router refuses it. If the router's copy changed
     /// in the meantime the edit is re-applied to the fresh copy once.
+    /// Updates reach the router one at a time, in the order they were
+    /// made.
     @discardableResult
     func update(_ edit: @escaping (inout RouterConfig) -> Void) async -> Bool {
         let id = nextEditID
         nextEditID += 1
         pendingEdits.append((id: id, edit: edit))
         showConfig()
+        // Written at the same time, two updates would both build on the
+        // same copy and the router would refuse the later one; a third
+        // could be refused twice and fail.
+        let previous: Task<Bool, Never>? = updateTail
+        let work: Task<Bool, Never> = Task {
+            _ = await previous?.value
+            return await self.write(id: id, edit: edit)
+        }
+        updateTail = work
+        return await work.value
+    }
+
+    /// Sends one pending edit to the router and takes what the router
+    /// then holds as the new truth.
+    private func write(id: Int, edit: @escaping (inout RouterConfig) -> Void) async -> Bool {
+        // The connection was dropped while the edit waited its turn, and
+        // the edit with it: there is nothing to send.
+        guard pendingEdits.contains(where: { $0.id == id }) else { return false }
         let ok = await attempt { connection in
             for attemptNumber in 0..<2 {
                 // The first try builds on the copy already here, which

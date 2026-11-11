@@ -313,7 +313,7 @@ func TestFormat1Carries(t *testing.T) {
 	ip := `{"v4":{"mode":"auto","address":"","gateway":"","dns":[]},"v6":{"mode":"auto","address":"","gateway":"","dns":[]}}`
 	old := `{"version":1,"rev":7,
  "system":{"name":"Porter","country":"AU","ssh":{"enabled":false,"authorized_keys":[]}},
- "radios":[{"id":"builtin","role":"ap+wan","band":"5","channel":0,"width":0}],
+ "radios":[{"id":"builtin","role":"ap+wan","band":"5","channel":0,"width":0},{"id":"usb:02:00:00:00:00:77","role":"wan","band":"","channel":0,"width":0}],
  "ethernet":[{"name":"eth0","role":"wan","ip":` + ip + `},{"name":"end0","role":"lan","ip":` + ip + `}],
  "ap":{"ssid":"Travel","passphrase":"correct horse","security":"wpa2+wpa3","hidden":false,"isolate":true},
  "wan":{"networks":[{"ssid":"Hotel","psk":"","hidden":false,"priority":1,"ip":` + ip + `}],
@@ -331,6 +331,11 @@ func TestFormat1Carries(t *testing.T) {
 	c, err := NewStore(dir).Load()
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Format 1 let two radios be uplinks; only the first still is, so
+	// that the configuration can be changed at all.
+	if c.Radios[0].Role != RoleAPWAN || c.Radios[1].Role != RoleOff || c.Consistent() != nil {
+		t.Errorf("radios after migration: %+v (%v)", c.Radios, c.Consistent())
 	}
 	w := c.Wifi[0]
 	if len(c.Wifi) != 1 || w.ID != MainSSID || w.SSID != "Travel" || w.Passphrase != "correct horse" || w.Security != SecWPA2WPA3 || !w.Isolate || !w.Enabled || w.Network != MainNetwork {
@@ -430,6 +435,36 @@ func TestNetworks(t *testing.T) {
 	}
 	if c.Policy.Rules[0].Src.Any() {
 		t.Error("a rule for one network matches everything")
+	}
+}
+
+// A list of networks sent in another order is refused; the main one is
+// not quietly made out of whichever came first.
+func TestFirstIDsAreNotRewritten(t *testing.T) {
+	c := ready()
+	c.Networks = append(c.Networks, Network{ID: "guest", Name: "Guest", Address: "10.99.0.1/24", Isolated: true})
+	c.Normalize()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c.Networks[0], c.Networks[1] = c.Networks[1], c.Networks[0]
+	c.Normalize()
+	if c.Networks[0].ID != "guest" {
+		t.Errorf("first network renamed to %q", c.Networks[0].ID)
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("networks in another order accepted")
+	}
+	// Addresses nothing can have.
+	c = ready()
+	c.Networks[0].Address = "10.83.0.255/24"
+	if err := c.Validate(); err == nil {
+		t.Error("router on the broadcast address accepted")
+	}
+	c = ready()
+	c.Devices = []Device{{MAC: "02:00:00:00:00:01", IP: "10.83.0.255"}}
+	if err := c.Validate(); err == nil {
+		t.Error("reservation of the broadcast address accepted")
 	}
 }
 

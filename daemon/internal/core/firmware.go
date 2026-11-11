@@ -96,9 +96,13 @@ func (c *Core) firmwareInstall() *proto.Error {
 	if !c.updatable() {
 		return proto.Errf(proto.ErrInvalid, "This card was flashed before updates existed. Flash the newest image once; after that the router updates itself.")
 	}
-	_, m, perr := c.firmwareCheck()
+	info, m, perr := c.firmwareCheck()
 	if perr != nil {
 		return perr
+	}
+	if !info.Newer {
+		// Asked twice, or by an app that looked a while ago.
+		return proto.Errf(proto.ErrInvalid, "The router already runs the newest version.")
 	}
 	c.firmware.mu.Lock()
 	if c.firmware.progress.State == "installing" {
@@ -132,6 +136,13 @@ func (c *Core) firmwareInstall() *proto.Error {
 // new version that got this far is kept; one that did not is reported.
 func (c *Core) settleUpdate(ctx context.Context) {
 	if c.opt.Update == nil || !c.opt.Update.Unsettled() {
+		return
+	}
+	if c.cfgUnreadable {
+		// A version that cannot read the settings it was handed is not
+		// one to keep. Left unconfirmed, the router goes back to the
+		// version before, and to its settings.
+		c.log.Error("this version could not read the settings; the update is not confirmed")
 		return
 	}
 	select {

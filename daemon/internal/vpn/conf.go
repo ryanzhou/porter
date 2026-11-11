@@ -94,5 +94,18 @@ func parseConf(text string) (config.WireGuard, error) {
 	if len(wg.Peers) == 0 {
 		return wg, fmt.Errorf("no [Peer] section")
 	}
+	// Lists that are empty are sent as empty lists, which is what the app
+	// expects of every list.
+	if wg.Addresses == nil {
+		wg.Addresses = []string{}
+	}
+	if wg.DNS == nil {
+		wg.DNS = []string{}
+	}
+	for i := range wg.Peers {
+		if wg.Peers[i].AllowedIPs == nil {
+			wg.Peers[i].AllowedIPs = []string{}
+		}
+	}
 	return wg, nil
 }

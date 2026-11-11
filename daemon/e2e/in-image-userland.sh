@@ -55,9 +55,12 @@ fi
 echo "==> root file system from image/packages"
 # Ubuntu's copy of the Debian keyring is often too old for the current
 # release, so take the keyring from Debian itself.
-deb=$(curl -fsS "https://deb.debian.org/debian/dists/$SUITE/main/binary-all/Packages.xz" | xz -dc \
-    | awk '/^Package: debian-archive-keyring$/{p=1} p&&/^Filename:/&&!f{f=$2} END{print f}')
-curl -fsS -o "$WORK/keyring.deb" "https://deb.debian.org/debian/$deb"
+# release, so take the keyring from Debian itself: the package pinned for
+# the image, checked against its hash.
+. "$REPO/image/debian-keyring.pin"
+curl -fsS -o "$WORK/keyring.deb" "https://deb.debian.org/debian/$DEBIAN_KEYRING_DEB"
+echo "$DEBIAN_KEYRING_SHA256  $WORK/keyring.deb" | sha256sum -c --quiet - \
+    || { echo "the Debian keyring package does not have the hash in image/debian-keyring.pin" >&2; exit 1; }
 dpkg-deb -x "$WORK/keyring.deb" "$WORK/keyring"
 PACKAGES=$(grep -vE '^\s*(#|$)' "$REPO/image/packages" \
     | grep -vE '^(raspberrypi-archive-keyring|linux-image-|raspi-firmware|firmware-|bluez-firmware)' | paste -sd,)
