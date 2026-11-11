@@ -127,6 +127,8 @@ type Core struct {
 	// radio carries, and ports the wired ports as last seen.
 	offAir []string
 	ports  []wiredPort
+	// apStarted is when each access point was last (re)started, by radio.
+	apStarted map[string]time.Time
 
 	reqs chan func()
 	kick chan struct{}
@@ -164,18 +166,19 @@ func New(opt Options) (*Core, error) {
 	}
 	c := &Core{
 		opt: opt, log: opt.Log,
-		store:    config.NewStore(opt.DataDir),
-		fwm:      fw.NewManager(),
-		aps:      map[string]*wifi.AP{},
-		apKeys:   map[string]string{},
-		stas:     map[string]*wifi.STA{},
-		staMAC:   map[string]string{},
-		apAuto:   map[string]int{},
-		apShared: map[string]int{},
-		reqs:     make(chan func(), 64),
-		kick:     make(chan struct{}, 1),
-		started:  time.Now(),
-		sessions: map[*apiSession]struct{}{},
+		store:     config.NewStore(opt.DataDir),
+		fwm:       fw.NewManager(),
+		aps:       map[string]*wifi.AP{},
+		apKeys:    map[string]string{},
+		stas:      map[string]*wifi.STA{},
+		staMAC:    map[string]string{},
+		apAuto:    map[string]int{},
+		apShared:  map[string]int{},
+		apStarted: map[string]time.Time{},
+		reqs:      make(chan func(), 64),
+		kick:      make(chan struct{}, 1),
+		started:   time.Now(),
+		sessions:  map[*apiSession]struct{}{},
 	}
 	system.RestoreClock(filepath.Join(opt.DataDir, "clock"), opt.BuildTime, c.log)
 
@@ -242,6 +245,23 @@ func New(opt Options) (*Core, error) {
 			return false, "No path to the server"
 		}
 		return true, ""
+	}
+	// An access point that is up has its interfaces in their bridges.
+	// hostapd puts them there as it starts, but can take one out again
+	// (see wifi.STA.Steer) and not put it back.
+	lan.APPorts = func(bridge string) []string {
+		var out []string
+		for _, ap := range c.aps {
+			if ap.Status().State != "up" {
+				continue
+			}
+			for _, iface := range ap.Ifaces() {
+				if b, ok := ap.Bridge(iface); ok && b == bridge {
+					out = append(out, iface)
+				}
+			}
+		}
+		return out
 	}
 	lan.APBridge = func(name string) (string, bool) {
 		// Only this package's goroutine mutates aps, but the bridge sync
@@ -497,9 +517,6 @@ func (c *Core) reconcile() {
 	for id, sta := range c.stas {
 		staStatus[id] = sta.Status()
 	}
-	// Whether a station has to wait for its radio's access point; see
-	// wifi.STA.Steer.
-	knownFreq := map[string]int{}
 	c.offAir = nil
 	if ready {
 		plan := planRadios(cfg, c.radios)
@@ -549,7 +566,7 @@ func (c *Core) reconcile() {
 					freq = st.Freq
 				} else if sta := c.stas[rc.ID]; sta != nil {
 					if f, ok := sta.KnownInRange(); ok {
-						freq, knownFreq[rc.ID] = f, f
+						freq = f
 					}
 				}
 				if freq == 0 {
@@ -715,20 +732,25 @@ func (c *Core) reconcile() {
 			sta = &wifi.STA{Log: c.log, RunDir: c.opt.RunDir, OnChange: c.Kick}
 			c.stas[id] = sta
 		}
-		if err := sta.Start(spec); err != nil {
+		restarted, err := sta.Start(spec)
+		if err != nil {
 			c.log.Error("starting station", "err", err)
 		}
-		// On a shared radio the station joins a network only once the
-		// access point is on that network's channel (or has shown that it
-		// cannot be: the uplink matters more than being tidy).
+		// On a shared radio the station keeps quiet while the access
+		// point starts or moves: see wifi.STA.Steer. It waits until the
+		// access point is up, or has shown that it cannot be, or has had
+		// long enough: the uplink matters more than being tidy.
 		hold := false
-		if ap, shared := wantAP[id]; shared && knownFreq[id] != 0 && staStatus[id].State != "connected" {
-			settled := false
-			if cur := c.aps[id]; cur != nil && c.apKeys[id] == apKey(ap) {
+		connected := staStatus[id].State == "connected" && !restarted
+		if ap, shared := wantAP[id]; shared && !connected {
+			cur := c.aps[id]
+			switch {
+			case cur == nil || c.apKeys[id] != apKey(ap):
+				hold = true // about to be started, further down
+			default:
 				st := cur.Status().State
-				settled = st == "up" || st == "failed"
+				hold = st != "up" && st != "failed" && time.Since(c.apStarted[id]) < 25*time.Second
 			}
-			hold = !settled
 		}
 		sta.Steer(hold)
 	}
@@ -750,6 +772,7 @@ func (c *Core) reconcile() {
 		}
 		ap.Start(spec)
 		c.apKeys[id] = key
+		c.apStarted[id] = time.Now()
 	}
 
 	states := c.wan.States()

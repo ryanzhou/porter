@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/fw"
@@ -63,12 +64,17 @@ type Manager struct {
 	lastConf string
 	swept    bool
 	bridges  map[string]bool
+	strays   map[string]time.Time // access point interfaces last found outside their bridge
 }
 
 // APBridge is consulted so that access point interfaces attached to a
 // bridge by hostapd are not thrown out when syncing wired ports. It
 // returns the bridge an access point interface belongs to.
 var APBridge = func(iface string) (bridge string, ok bool) { return "", false }
+
+// APPorts lists the interfaces of running access points that belong in a
+// bridge. They are put (back) into it like wired ports.
+var APPorts = func(bridge string) []string { return nil }
 
 // macFor gives the i-th network's bridge its address.
 func macFor(base string, i int) string {
@@ -107,7 +113,19 @@ func (m *Manager) Apply(d Desired) (addrChanged bool, err error) {
 			b, ok := APBridge(name)
 			return ok && b == bridge
 		}
-		if err := netx.SetBridgePorts(n.Bridge, n.Ports, keep); err != nil {
+		ports := append([]string(nil), n.Ports...)
+		for _, iface := range APPorts(n.Bridge) {
+			if !netx.InBridge(iface, n.Bridge) && time.Since(m.strays[iface]) > time.Minute {
+				// Said once a minute at most, should putting it back not work.
+				if m.strays == nil {
+					m.strays = map[string]time.Time{}
+				}
+				m.strays[iface] = time.Now()
+				m.Log.Warn("access point interface was not in its bridge; putting it back", "iface", iface, "bridge", n.Bridge)
+			}
+			ports = append(ports, iface)
+		}
+		if err := netx.SetBridgePorts(n.Bridge, ports, keep); err != nil {
 			m.Log.Warn("bridge ports", "bridge", n.Bridge, "err", err)
 		}
 	}

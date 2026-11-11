@@ -122,6 +122,16 @@ func Bridges(prefix string) []string {
 	return out
 }
 
+// InBridge reports whether an interface is a member of a bridge.
+func InBridge(name, bridge string) bool {
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		return false
+	}
+	br, err := netlink.LinkByName(bridge)
+	return err == nil && l.Attrs().MasterIndex == br.Attrs().Index
+}
+
 // DeleteLink removes a virtual interface.
 func DeleteLink(name string) {
 	if l, err := netlink.LinkByName(name); err == nil {

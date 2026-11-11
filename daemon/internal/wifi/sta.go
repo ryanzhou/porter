@@ -211,8 +211,10 @@ func wpaConf(spec STASpec, ctrlDir string) (string, map[string]netIDs) {
 	return b.String(), ids
 }
 
-// Start runs (or reconfigures) the station.
-func (s *STA) Start(spec STASpec) error {
+// Start runs (or reconfigures) the station. changed reports that it was
+// started or given a new configuration, either of which drops whatever
+// connection it had.
+func (s *STA) Start(spec STASpec) (changed bool, err error) {
 	conf, ids := wpaConf(spec, s.ctrlDir())
 	path := filepath.Join(s.RunDir, "wpa-"+spec.Iface+".conf")
 	s.mu.Lock()
@@ -229,17 +231,17 @@ func (s *STA) Start(spec STASpec) error {
 	}
 	s.mu.Unlock()
 	if unchanged {
-		return nil
+		return false, nil
 	}
 	if err := os.WriteFile(path, []byte(conf), 0o600); err != nil {
-		return err
+		return false, err
 	}
 	if same {
 		s.mu.Lock()
 		s.failed, s.failWhy = "", ""
 		s.mu.Unlock()
 		if _, err := s.cli("reconfigure"); err == nil {
-			return nil
+			return true, nil
 		}
 	}
 	s.Stop()
@@ -254,7 +256,7 @@ func (s *STA) Start(spec STASpec) error {
 	s.conf = conf
 	s.mu.Unlock()
 	p.Start()
-	return nil
+	return true, nil
 }
 
 func (s *STA) Stop() {
@@ -553,10 +555,16 @@ func (s *STA) look() ([]bss, bool) {
 // all switched off to begin with, and Steer switches on the one for the
 // band chosen. Call it regularly.
 //
-// With hold, nothing is switched on: the radio's access point is not yet
-// on the channel the network is on, and a station that tries to join
-// before it is gets refused, after which wpa_supplicant leaves the
-// network alone for a while.
+// With hold, the station is kept quiet: every network is switched off
+// and nothing is scanned for. The radio's access point is starting, and
+// two things go wrong if the station is busy meanwhile. A station that
+// tries to join a network before the access point is on that network's
+// channel is refused, after which wpa_supplicant leaves the network alone
+// for a while. And hostapd, which scans as it starts, cannot while the
+// station scans; its way out is to take the access point's interface out
+// of access point mode for the scan, which also takes it out of the
+// router's bridge, where it does not return: a network devices can join
+// and get nothing from.
 func (s *STA) Steer(hold bool) {
 	if _, ok := s.look(); !ok {
 		return
@@ -571,7 +579,7 @@ func (s *STA) Steer(hold bool) {
 		if id.any >= 0 {
 			continue
 		}
-		for _, want := range []change{{id.five, s.band[ssid] == "5"}, {id.two, s.band[ssid] == "2.4"}} {
+		for _, want := range []change{{id.five, s.band[ssid] == "5" && !hold}, {id.two, s.band[ssid] == "2.4" && !hold}} {
 			if want.id < 0 || s.enabled[want.id] == want.on {
 				continue
 			}
@@ -600,9 +608,6 @@ func (s *STA) Steer(hold bool) {
 	}
 
 	if hold {
-		// Where the network is is known, and the radio's access point is
-		// on its way there. A scan now would only get in its way: hostapd
-		// scans as it starts, and cannot while the station does.
 		return
 	}
 	// Scanning. With a block switched on, wpa_supplicant scans by itself
