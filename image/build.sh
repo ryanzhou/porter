@@ -185,11 +185,15 @@ $SYSTEMCTL mask hostapd.service wpa_supplicant.service sshd-keygen.service \
 $SYSTEMCTL disable ssh.service ssh.socket 2>/dev/null || true
 $SYSTEMCTL enable porterd.service porter-update-guard.service bluetooth.service systemd-timesyncd.service
 
-# A phone on USB is only an uplink if the kernel has the driver for it.
+# A phone on USB is only an uplink if the kernel has the driver for it,
+# as a module or built in. An image without one would ship a feature that
+# cannot work, so that is a failed build.
 for mod in ipheth rndis_host cdc_ncm; do
-    find "$ROOT/lib/modules" "$ROOT/usr/lib/modules" -name "$mod.ko*" 2>/dev/null | grep -q . \
-        || echo "WARNING: the kernel in this image has no $mod module; phones that need it cannot share their connection over USB" >&2
+    cat "$ROOT"/lib/modules/*/modules.dep "$ROOT"/lib/modules/*/modules.builtin 2>/dev/null \
+        | grep -Eq "(^|/)$mod\.ko" \
+        || { echo "the kernel in this image has no $mod driver; phones that need it could not share their connection over USB" >&2; exit 1; }
 done
+echo "==> kernel has the drivers for phones on USB"
 
 # Trim what was only needed to install packages.
 rm -rf "$ROOT"/var/lib/apt/lists/* "$ROOT"/var/cache/apt/* "$ROOT"/var/log/*.log "$ROOT"/var/log/apt
