@@ -8,7 +8,9 @@ struct RootView: View {
         Group {
             switch model.phase {
             case .connected:
-                if model.status?.ready == false {
+                if let mismatch = model.mismatch {
+                    NavigationStack { MismatchView(mismatch: mismatch) }
+                } else if model.status?.ready == false {
                     NavigationStack { SetupView() }
                 } else if let screen = model.demoScreen {
                     DemoScreen(name: screen)
@@ -88,5 +90,48 @@ struct DemoScreen: View {
         default:
             MainTabs(initial: name)
         }
+    }
+}
+
+/// Shown in place of everything else when the router's software and the
+/// app are of different generations. An older router can be updated from
+/// here; a newer one needs a newer app.
+struct MismatchView: View {
+    @EnvironmentObject private var model: AppModel
+    let mismatch: AppModel.Mismatch
+
+    private var title: String {
+        mismatch == .routerOlder ? "The router needs an update" : "This app is out of date"
+    }
+
+    private var explanation: String {
+        if mismatch == .routerOlder {
+            return "Its software is older than this app. Update it here; the app carries on once the router has restarted."
+        }
+        return "The router's software is newer than this app. Install the app again from the current source."
+    }
+
+    var body: some View {
+        List {
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(title)
+                        .font(.headline)
+                    Text(explanation)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+            if mismatch == .routerOlder {
+                Section {
+                    NavigationLink("Update the router") { SoftwarePage() }
+                }
+            }
+            Section {
+                Button("Disconnect") { model.disconnect() }
+            }
+        }
+        .navigationTitle("Porter")
     }
 }

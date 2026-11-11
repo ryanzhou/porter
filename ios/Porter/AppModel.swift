@@ -17,7 +17,18 @@ final class AppModel: ObservableObject {
         case connected
     }
 
+    /// The router's software and this app are of different generations
+    /// and cannot read each other's settings.
+    enum Mismatch {
+        /// The router has to be updated; the app can still tell it to.
+        case routerOlder
+        /// The app has to be installed again from newer source.
+        case appOlder
+    }
+
     @Published private(set) var phase: Phase = .searching
+    /// Set while connected to a router this app cannot work with.
+    @Published private(set) var mismatch: Mismatch?
     @Published private(set) var status: RouterStatus?
     @Published private(set) var config: RouterConfig?
     @Published private(set) var devices: [DeviceInfo] = []
@@ -152,6 +163,17 @@ final class AppModel: ObservableObject {
             knownRouters = store.routers()
 
             try? await connection.setTime()
+            // A router of another generation: nothing of it can be shown,
+            // but it can still be reached, which is enough to update it.
+            let format = try await connection.configFormat()
+            if format != RouterConfig.format {
+                mismatch = format < RouterConfig.format ? .routerOlder : .appOlder
+                phase = .connected
+                central.stopScanning()
+                listen(to: connection)
+                return
+            }
+            mismatch = nil
             try await reload()
             activity = (try? await connection.activity()) ?? []
             phase = .connected
@@ -215,6 +237,7 @@ final class AppModel: ObservableObject {
         link = nil
         Task { await old?.close() }
         status = nil
+        mismatch = nil
         pendingEdits.removeAll()
         setConfirmed(nil)
         devices = []

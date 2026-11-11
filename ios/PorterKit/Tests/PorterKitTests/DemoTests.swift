@@ -8,6 +8,9 @@ final class DemoTests: XCTestCase {
         let hello = try await router.hello()
         XCTAssertTrue(hello.paired && hello.ready)
 
+        let format = try await router.configFormat()
+        XCTAssertEqual(format, RouterConfig.format)
+
         let status = try await router.status()
         XCTAssertEqual(status.internet, "online")
         XCTAssertEqual(status.wan.map(\.key), ["eth:end0", "wifi", "phone"])

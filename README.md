@@ -311,8 +311,11 @@ settings and pairings. Re-flashing the card does the same.
   settings. The card holds the system twice: the update goes into the
   spare copy, and if the new version does not come up properly the
   router goes back to the one before. The router only looks for updates
-  when you open that page. Update the app from the same version of the
-  source. (A card flashed before v0.1.0 has to be flashed once more.)
+  when you open that page. The app and the router's software go
+  together: after updating one, update the other from the same version.
+  An app that is ahead of the router still connects, and offers the
+  router's update. (A card flashed before v0.1.0 has to be flashed once
+  more.)
 - **What the router contacts by itself:** a time server; one small page
   on `captive.apple.com` to detect sign-in pages (the same check an
   iPhone makes); your chosen ad block lists, daily, when ad blocking is

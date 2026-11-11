@@ -165,6 +165,10 @@ public struct NetworkConfig: Codable, Equatable, Identifiable {
 }
 
 public extension RouterConfig {
+    /// The format of the configuration document this version of the app
+    /// reads and writes (`version` in the document).
+    static let format = 2
+
     /// Ids of the Wi-Fi network and the network that always exist.
     static let mainWifi = "main"
     static let mainNetwork = "lan"
@@ -843,6 +847,15 @@ public extension RouterConnection {
     func pair(name: String) async throws { try await run("pair", ["name": name]) }
     func status() async throws -> RouterStatus { try await call("status.get") }
     func config() async throws -> RouterConfig { try await call("config.get") }
+
+    /// The format of the router's configuration document, read without
+    /// decoding the rest of it: a router of another generation than the
+    /// app has a document the app cannot read, and this is how to tell.
+    func configFormat() async throws -> Int {
+        struct Head: Decodable { let version: Int }
+        let head: Head = try await call("config.get")
+        return head.version
+    }
 
     /// Writes the configuration; returns the new revision.
     func setConfig(_ config: RouterConfig) async throws -> UInt64 {
