@@ -56,6 +56,8 @@ type Manager struct {
 	// has no other way of knowing where to report: dnsmasq starts it by
 	// its bare name.
 	HookEnv []string
+	// Verbose has dnsmasq log every DHCP exchange.
+	Verbose bool
 
 	dnsmasq  *proc.Proc
 	lastConf string
@@ -182,9 +184,11 @@ func (m *Manager) dnsmasqConf(d Desired) string {
 	w("no-hosts")
 	w("keep-in-foreground")
 	w("log-facility=-")
-	w("quiet-dhcp")
-	w("quiet-dhcp6")
-	w("quiet-ra")
+	if !m.Verbose {
+		w("quiet-dhcp")
+		w("quiet-dhcp6")
+		w("quiet-ra")
+	}
 	if _, err := user.Lookup("dnsmasq"); err != nil {
 		w("user=root")
 	}

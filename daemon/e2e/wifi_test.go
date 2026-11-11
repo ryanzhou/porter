@@ -72,6 +72,15 @@ func TestWifi(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if t.Failed() {
+			for _, cmd := range []string{
+				"ip -n " + nsRouter + " -br link", "ip netns exec " + nsRouter + " bridge link", "ip -n " + nsRouter + " -4 addr",
+				"ip netns exec " + nsRouter + " iw dev", "ip -n " + nsRouter + " neigh", "ip -n " + nsClient + " addr",
+				"ip netns exec " + nsRouter + " nft list chain inet porter input", "cat " + filepath.Join(run, "dnsmasq.leases"),
+				"tail -30 " + filepath.Join(dir, "client-dhcpcd.log"),
+			} {
+				out, _ := exec.Command("sh", "-c", cmd).CombinedOutput()
+				t.Logf("%s:\n%s", cmd, out)
+			}
 			for _, name := range []string{"porterd.log", "hotel-hostapd.log", "hotel5-hostapd.log", "client-wpa.log"} {
 				if b, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
 					lines := strings.Split(string(b), "\n")

@@ -232,7 +232,8 @@ func New(opt Options) (*Core, error) {
 	}
 	c.dns = dnsfwd.New(dnsfwd.Hooks{LookupMAC: c.devs.LookupMAC, Learn: c.fwm.Learn, AdBlocked: c.ads.Blocked}, c.log)
 	hookEnv := []string{HookSocketEnv + "=" + HookSocket(opt.RunDir)}
-	c.lan = &lan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.LeaseHook, HookEnv: hookEnv}
+	c.lan = &lan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.LeaseHook, HookEnv: hookEnv,
+		Verbose: c.log.Enabled(context.Background(), slog.LevelDebug)}
 	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, HookEnv: hookEnv, OnChange: c.Kick}
 	c.mpq = &mpquic.Manager{Log: c.log, RunDir: opt.RunDir, Binaries: opt.MPQUIC, OnChange: c.Kick}
 	c.vpn = &vpn.Manager{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace, Resolve: c.resolveDirect}
