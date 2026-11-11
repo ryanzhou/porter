@@ -328,7 +328,9 @@ func uplinkLabel(kind: String, iface: String) -> String {
 /// What to call a radio.
 func radioTitle(_ radio: RadioInfo) -> String {
     if radio.id == "builtin" { return "Built-in Wi-Fi" }
-    return radio.product.isEmpty ? "USB adapter" : radio.product
+    // Adapters name themselves for a parts list, not for people.
+    let name = radio.product.replacingOccurrences(of: "_", with: " ").trimmingCharacters(in: .whitespaces)
+    return name.isEmpty ? "USB adapter" : name
 }
 
 /// The picture for a kind of uplink.
