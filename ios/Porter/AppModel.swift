@@ -191,6 +191,7 @@ final class AppModel: ObservableObject {
                 case .activity(let entry):
                     self.activity.append(entry)
                     if entry.kind == "device" { try? await self.refreshDevices() }
+                    if entry.kind == "radio" { try? await self.refreshRadios() }
                 case .speedTest(let progress):
                     self.speedTestProgress = progress.phase == "done" ? nil : progress
                 case .firmware(let progress):
@@ -443,6 +444,21 @@ final class AppModel: ObservableObject {
     func vpnName(_ id: String) -> String { config?.vpns.first { $0.id == id }?.name ?? "Unknown VPN" }
 
     func networkName(_ id: String) -> String { config?.networkName(id) ?? id }
+
+    /// What a radio is used for. The configuration says so first: it is
+    /// what the app has just changed, where the radio list is only as
+    /// fresh as the last time it was fetched.
+    func role(of radio: RadioInfo) -> RadioRole {
+        config?.radios.first(where: { $0.id == radio.id })?.role ?? radio.role
+    }
+
+    /// The radio that joins upstream Wi-Fi networks, if one is set to.
+    var uplinkRadio: RadioInfo? {
+        radios.first(where: { radio in
+            let role = self.role(of: radio)
+            return radio.present && (role == .wan || role == .apWan)
+        })
+    }
 
     /// More than one network exists, so it is worth saying which one
     /// something belongs to.

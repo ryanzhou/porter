@@ -10,23 +10,20 @@ struct InternetView: View {
     @State private var scanning = false
     @State private var switching = false
 
-    /// The radio that joins upstream networks, if one is set to.
-    private var uplinkRadio: RadioInfo? {
-        model.radios.first(where: { $0.present && ($0.role == .wan || $0.role == .apWan) })
-    }
+    private var uplinkRadio: RadioInfo? { model.uplinkRadio }
 
     /// The radio that would join, were Wi-Fi turned on as a source: a
     /// spare one, else an adapter rather than the built-in radio.
     private var candidate: RadioInfo? {
         let able: [RadioInfo] = model.radios.filter { $0.present && $0.sta }
-        if let spare = able.first(where: { $0.role == .off }) { return spare }
+        if let spare = able.first(where: { model.role(of: $0) == .off }) { return spare }
         if let adapter = able.first(where: { $0.id != "builtin" }) { return adapter }
         return able.first
     }
 
     private var offNote: String {
         guard let radio = candidate else { return "No Wi-Fi radio." }
-        let others: [RadioInfo] = model.radios.filter { $0.present && $0.id != radio.id && $0.role == .ap }
+        let others: [RadioInfo] = model.radios.filter { $0.present && $0.id != radio.id && model.role(of: $0) == .ap }
         if let other = others.first {
             return "\(radioTitle(radio)) joins; your own network stays on \(radioTitle(other))."
         }
@@ -441,9 +438,7 @@ private struct WifiUplinkPage: View {
 
     private var able: [RadioInfo] { model.radios.filter { $0.present && $0.sta } }
 
-    private var current: RadioInfo? {
-        able.first(where: { $0.role == .wan || $0.role == .apWan })
-    }
+    private var current: RadioInfo? { model.uplinkRadio }
 
     private var selection: Binding<String> {
         Binding(
@@ -454,7 +449,7 @@ private struct WifiUplinkPage: View {
 
     private var note: String {
         guard let current else { return "" }
-        if current.role == .apWan {
+        if model.role(of: current) == .apWan {
             return "This radio carries your own network too, which follows the uplink's channel. With a second radio the two stay apart, and both are faster."
         }
         return "Your own network is on the other radio."
