@@ -250,6 +250,13 @@ func relativeTime(_ unix: Int64) -> String {
     return formatter.localizedString(for: date, relativeTo: Date())
 }
 
+/// The same for the middle of a sentence: "just now", "5 min. ago".
+func relativeTimeInline(_ unix: Int64) -> String {
+    let text: String = relativeTime(unix)
+    if text == "Just now" || text == "Never" { return text.lowercased() }
+    return text
+}
+
 func formatDate(_ unix: Int64) -> String {
     guard unix > 0 else { return "Never" }
     let date = Date(timeIntervalSince1970: TimeInterval(unix))
@@ -350,6 +357,15 @@ func joinFailureLabel(_ reason: String?) -> String {
     }
 }
 
+/// A Wi-Fi network that turned the router away, as one line.
+func joinFailureText(ssid: String, reason: String?) -> String {
+    switch reason ?? "" {
+    case "wrong_password": return "Wrong password for " + ssid
+    case "rejected": return ssid + " rejected the router"
+    default: return "Could not join " + ssid
+    }
+}
+
 func vpnStateLabel(_ status: VPNStatus) -> String {
     switch status.state {
     case "off": return "Off"
@@ -357,7 +373,7 @@ func vpnStateLabel(_ status: VPNStatus) -> String {
     case "up": return "Connected"
     case "error":
         if let error = status.error, !error.isEmpty { return error }
-        return "Error"
+        return "Could not connect"
     default: return status.state
     }
 }
@@ -387,6 +403,29 @@ func validNetworkName(_ text: String) -> Bool {
 func validRouterName(_ text: String) -> Bool {
     let trimmed = text.trimmingCharacters(in: .whitespaces)
     return !trimmed.isEmpty && trimmed.utf8.count <= 20
+}
+
+// A limit on what can be typed is said only once it has been broken:
+// these give the sentence for that, and nil while there is nothing to say.
+
+func passphraseProblem(_ text: String) -> String? {
+    if text.isEmpty || validPassphrase(text) { return nil }
+    let count: Int = text.utf8.count
+    if count < 8 { return "A Wi-Fi password has at least 8 characters." }
+    if count > 63 { return "A Wi-Fi password has at most 63 characters." }
+    return "Use only letters, digits and symbols from an English keyboard."
+}
+
+func networkNameProblem(_ text: String) -> String? {
+    if text.utf8.count <= 32 { return nil }
+    return "This name is too long. A Wi-Fi name has at most 32 characters."
+}
+
+/// For the names `validRouterName` checks: the router's and a network's.
+func shortNameProblem(_ text: String) -> String? {
+    let trimmed = text.trimmingCharacters(in: .whitespaces)
+    if trimmed.utf8.count <= 20 { return nil }
+    return "This name is too long. Use at most 20 characters."
 }
 
 /// Six colon-separated hex bytes that do not form a multicast address.
@@ -434,13 +473,15 @@ extension AppModel {
 // MARK: - Shared views
 
 /// A list section that edits an array of strings: rows that can be swiped
-/// away, and a field to add one.
+/// away, and a field to add one. `emptyText` is a row that says what an
+/// empty list means, where that is not nothing.
 struct StringListEditor: View {
     let title: String
     @Binding var items: [String]
     var placeholder: String = ""
     var keyboard: UIKeyboardType = .default
     var footer: String = ""
+    var emptyText: String = ""
 
     @State private var draft: String = ""
 
@@ -450,6 +491,10 @@ struct StringListEditor: View {
 
     var body: some View {
         Section {
+            if items.isEmpty && !emptyText.isEmpty {
+                Text(emptyText)
+                    .foregroundStyle(.secondary)
+            }
             ForEach(Array(items.enumerated()), id: \.offset) { item in
                 Text(item.element)
                     .lineLimit(2)
@@ -469,6 +514,7 @@ struct StringListEditor: View {
                     Image(systemName: "plus.circle.fill")
                 }
                 .buttonStyle(.borderless)
+                .accessibilityLabel(Text("Add"))
                 .disabled(trimmed.isEmpty)
             }
         } header: {

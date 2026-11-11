@@ -10,7 +10,7 @@ struct SettingsView: View {
             RouterSettingsSection()
             Section {
                 SettingsLink(symbol: "arrow.down.circle.fill", title: "Software", value: model.status?.version ?? "") { SoftwarePage() }
-                SettingsLink(symbol: "iphone", title: "Phones") { PairedPhonesPage() }
+                SettingsLink(symbol: "iphone", title: "Paired phones") { PairedPhonesPage() }
                 SettingsLink(symbol: "clock", title: "Activity") { ActivityPage() }
                 SettingsLink(symbol: "text.alignleft", title: "Logs") { LogsPage() }
             }
@@ -41,7 +41,7 @@ private struct RouterSettingsSection: View {
             SettingsLink(symbol: "server.rack", title: "DNS") { DNSPage() }
         }
         Section {
-            SettingsLink(symbol: "wifi.router.fill", title: "Name", value: model.config?.system.name ?? "") { RouterNamePage() }
+            SettingsLink(symbol: "wifi.router.fill", title: "Router name", value: model.config?.system.name ?? "") { RouterNamePage() }
             SettingsLink(symbol: "globe.europe.africa.fill", title: "Country", value: countryName) { CountryPage() }
             SettingsLink(symbol: "terminal.fill", title: "SSH", value: onOff(model.config?.system.ssh.enabled)) { SSHPage() }
             SettingsLink(symbol: "speedometer", title: "Speed test server") { SpeedTestServerPage() }
@@ -174,7 +174,10 @@ private struct RouterNameFields: View {
         Section {
             TextField("Name", text: $name)
         } footer: {
-            Text("Up to 20 characters.")
+            if let problem = shortNameProblem(name) {
+                Text(problem)
+                    .foregroundStyle(.red)
+            }
         }
     }
 }
@@ -200,7 +203,7 @@ private struct CountryFields: View {
         Section {
             CountryPicker(selection: $country)
         } footer: {
-            Text("Sets the legal Wi-Fi channels.")
+            Text("The country decides which Wi-Fi channels the router is allowed to use.")
         }
     }
 }
@@ -222,25 +225,34 @@ private struct DNSPage: View {
 private struct DNSFields: View {
     @Binding var dns: DNSConfig
 
+    /// The router takes eight servers at most: said once there are more.
+    private var serversNote: String {
+        if dns.upstreams.count > 8 {
+            return "The router uses at most 8 DNS servers. Remove some to save."
+        }
+        return "Devices that go online through a VPN use the DNS servers that come with the VPN, if it has any. An encrypted server is written as tls://1.1.1.1#cloudflare-dns.com or https://cloudflare-dns.com/dns-query#1.1.1.1."
+    }
+
     var body: some View {
         StringListEditor(
-            title: "Servers",
+            title: "DNS servers",
             items: $dns.upstreams,
             placeholder: "1.1.1.1",
             keyboard: .URL,
-            footer: "Empty uses the upstream network's. Also tls://1.1.1.1#name and https://name/dns-query#1.1.1.1."
+            footer: serversNote,
+            emptyText: "Using the servers of the network the router joins"
         )
         Section {
-            Toggle("Capture all DNS", isOn: $dns.intercept)
+            Toggle("Override DNS servers set on devices", isOn: $dns.intercept)
         } footer: {
-            Text("Devices with their own resolver set still go through the router.")
+            Text("A device set to use a DNS server of its own is answered by the router anyway, so ad blocking and rules for domains still apply to it. Encrypted DNS in a browser or an app is not affected.")
         }
         StringListEditor(
             title: "Blocked domains",
             items: $dns.blocked,
             placeholder: "example.com",
             keyboard: .URL,
-            footer: ""
+            footer: "No device can open these domains or their subdomains."
         )
     }
 }
@@ -264,9 +276,9 @@ private struct SSHFields: View {
 
     private var enableHelp: String {
         if ssh.enabled && ssh.authorizedKeys.isEmpty {
-            return "Add a key first."
+            return "Add a key below before you save. SSH does not accept passwords."
         }
-        return "From your own network, keys only."
+        return "With SSH allowed, you can sign in to the router from your own network with one of the keys below. Passwords are not accepted."
     }
 
     var body: some View {
@@ -276,7 +288,7 @@ private struct SSHFields: View {
             Text(enableHelp)
         }
         StringListEditor(
-            title: "Keys",
+            title: "Public keys",
             items: $ssh.authorizedKeys,
             placeholder: "ssh-ed25519 AAAA… name",
             keyboard: .asciiCapable,
@@ -286,7 +298,7 @@ private struct SSHFields: View {
             Button {
                 paste()
             } label: {
-                Label("Paste key", systemImage: "doc.on.clipboard")
+                Label("Paste a key from the clipboard", systemImage: "doc.on.clipboard")
             }
         }
     }
@@ -338,7 +350,7 @@ private struct SpeedTestServerFields: View {
         } header: {
             Text("Download")
         } footer: {
-            Text("Returns a large file.")
+            Text("The router measures download speed by fetching a large file from this address.")
         }
         Section {
             TextField("Upload address", text: $speedtest.uploadUrl, prompt: Text(verbatim: "https://example.com/upload"))
@@ -348,7 +360,7 @@ private struct SpeedTestServerFields: View {
         } header: {
             Text("Upload")
         } footer: {
-            Text("Accepts POST.")
+            Text("The router measures upload speed by sending data to this address, which has to accept uploads.")
         }
     }
 }
@@ -374,7 +386,7 @@ struct SoftwarePage: View {
     /// One line under the version: what there is to know right now.
     private var summary: String {
         if installing { return "Installing " + (progress?.version ?? "") }
-        if checking && info == nil { return "Checking" }
+        if checking && info == nil { return "Checking for updates" }
         guard let info else { return "" }
         if info.newer, let latest = info.latest {
             let size: String = formatBytes(UInt64(max(info.download ?? 0, 0)))
@@ -386,7 +398,7 @@ struct SoftwarePage: View {
     private var phaseLabel: String {
         switch progress?.phase ?? "" {
         case "download": return "Downloading"
-        case "verify": return "Checking"
+        case "verify": return "Checking the download"
         case "restart": return "Restarting"
         default: return "Working"
         }
@@ -423,7 +435,7 @@ struct SoftwarePage: View {
                     }
                     .padding(.vertical, 4)
                 } footer: {
-                    Text("Keep the router powered. It restarts by itself.")
+                    Text("Keep the router plugged in. It restarts by itself when the update is in place, and your devices are offline for a minute or two.")
                 }
             } else if available {
                 installSection
@@ -458,13 +470,13 @@ struct SoftwarePage: View {
             await model.refreshFirmwareProgress()
             await check()
         }
-        .confirmationDialog("Install " + (info?.latest ?? ""), isPresented: $asking, titleVisibility: .visible) {
+        .confirmationDialog("Install " + (info?.latest ?? "the update") + "?", isPresented: $asking, titleVisibility: .visible) {
             Button("Install and restart") {
                 Task { await model.attempt { try await $0.firmwareInstall() } }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Settings are kept. The network is down for a minute or two.")
+            Text("Your settings are kept. While the router restarts, your devices are offline for a minute or two.")
         }
     }
 
@@ -486,7 +498,7 @@ struct SoftwarePage: View {
             }
         } else {
             Section {
-                Label("This card was flashed before the router could update itself. Flash the newest image once.", systemImage: "sdcard")
+                Label("This SD card was written before the router could update itself. Write the newest image to it once, which also erases the router's settings.", systemImage: "sdcard")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -520,14 +532,14 @@ private struct PairedPhonesPage: View {
                     PairedPhoneRow(phone: phone)
                         .swipeActions {
                             if !phone.isSelf {
-                                Button("Revoke", role: .destructive) { revoke(phone.key) }
+                                Button("Remove", role: .destructive) { revoke(phone.key) }
                             }
                         }
                 }
             }
             Section {
                 if model.status?.pairing == true {
-                    Label("Open for 2 minutes", systemImage: "dot.radiowaves.left.and.right")
+                    Label("Ready to pair a new phone", systemImage: "dot.radiowaves.left.and.right")
                         .foregroundStyle(.green)
                 } else {
                     Button {
@@ -537,10 +549,10 @@ private struct PairedPhonesPage: View {
                     }
                 }
             } footer: {
-                Text("Or press the router's power button briefly.")
+                Text("Adding a phone gives another phone two minutes to pair: open Porter on it near the router and choose this router. A short press of the router's power button does the same.")
             }
         }
-        .navigationTitle("Phones")
+        .navigationTitle("Paired phones")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
     }
@@ -565,7 +577,8 @@ private struct PairedPhoneRow: View {
     let phone: PairedPhone
 
     private var detail: String {
-        relativeTime(phone.lastSeen)
+        if phone.lastSeen <= 0 { return "Has not connected yet" }
+        return "Last connected " + relativeTimeInline(phone.lastSeen)
     }
 
     var body: some View {
@@ -593,8 +606,12 @@ struct ActivityPage: View {
     var body: some View {
         List {
             if events.isEmpty {
-                ContentUnavailableView("Nothing yet", systemImage: "clock")
-                    .listRowBackground(Color.clear)
+                ContentUnavailableView(
+                    "No activity yet",
+                    systemImage: "clock",
+                    description: Text("What the router notices is listed here, such as a new device joining or a network asking for a sign-in.")
+                )
+                .listRowBackground(Color.clear)
             }
             ForEach(Array(events.enumerated()), id: \.offset) { item in
                 ActivityLine(event: item.element)
@@ -658,13 +675,28 @@ private struct SystemSection: View {
     var body: some View {
         Section {
             HStack(spacing: 10) {
-                PowerButton(symbol: "arrow.clockwise", title: "Restart", message: "The network is down for about a minute.") {
+                PowerButton(
+                    symbol: "arrow.clockwise",
+                    title: "Restart",
+                    question: "Restart the router?",
+                    message: "Your devices are offline for about a minute while it restarts."
+                ) {
                     Task { await model.attempt { try await $0.reboot() } }
                 }
-                PowerButton(symbol: "power", title: "Power off", message: "Unplug and replug to start it again.") {
+                PowerButton(
+                    symbol: "power",
+                    title: "Power off",
+                    question: "Turn the router off?",
+                    message: "Your Wi-Fi goes away and your devices are offline. To start the router again, press its power button, or unplug it and plug it back in."
+                ) {
                     Task { await model.attempt { try await $0.powerOff() } }
                 }
-                PowerButton(symbol: "trash", title: "Reset", message: "Erases all settings, networks, VPNs and paired phones.") {
+                PowerButton(
+                    symbol: "trash",
+                    title: "Reset",
+                    question: "Erase the router?",
+                    message: "All settings are erased, including your Wi-Fi, saved networks, VPNs, rules and paired phones. The router restarts as new and has to be set up again."
+                ) {
                     factoryReset()
                 }
             }
@@ -672,7 +704,7 @@ private struct SystemSection: View {
             .listRowBackground(Color.clear)
         }
         Section {
-            Button("Disconnect") { model.disconnect() }
+            Button("Disconnect from the router") { model.disconnect() }
         }
     }
 
@@ -690,9 +722,11 @@ private struct SystemSection: View {
 }
 
 /// A destructive action as a tile: icon above its name, asking first.
+/// `question` heads the confirmation, `message` says what will happen.
 private struct PowerButton: View {
     let symbol: String
     let title: String
+    let question: String
     let message: String
     let action: () -> Void
 
@@ -714,7 +748,7 @@ private struct PowerButton: View {
             .background(Surface.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
-        .confirmationDialog(title, isPresented: $asking, titleVisibility: .visible) {
+        .confirmationDialog(question, isPresented: $asking, titleVisibility: .visible) {
             Button(title, role: .destructive) { action() }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -739,7 +773,7 @@ private struct AboutSection: View {
         Section {
             LabeledContent("ID", value: model.status?.id ?? "")
             LabeledContent("Version", value: model.status?.version ?? "")
-            LabeledContent("Country data", value: countryDatabase)
+            LabeledContent("Country database", value: countryDatabase)
         } footer: {
             Text(verbatim: "IP geolocation by DB-IP (https://db-ip.com)")
         }

@@ -178,7 +178,7 @@ final class AppModel: ObservableObject {
                 } catch {
                     return // cancelled: the router answered
                 }
-                link?.abandon(BLEError.stalled("the secure handshake"))
+                link?.abandon(BLEError.stalled("securing the connection"))
             }
             defer { deadline.cancel() }
             let connection = try await RouterConnection.connect(
@@ -242,7 +242,7 @@ final class AppModel: ObservableObject {
                 // user taps the router to try again.
                 holdOff = true
                 teardown()
-                errorMessage = "This router's identity is different from the one this phone paired with. If you reset the router, forget it here and pair again. Otherwise something may be impersonating it."
+                errorMessage = "This router's identity is different from the one this phone paired with. If you have reset the router, forget it under Paired routers and connect again. If you have not, another device may be pretending to be it."
                 return
             }
             if automatic {
@@ -556,7 +556,7 @@ final class AppModel: ObservableObject {
     private func describe(_ error: Error) -> String {
         if let error = error as? RouterError { return error.msg }
         if let error = error as? LocalizedError, let text = error.errorDescription { return text }
-        if error is NoiseError || error is SessionError { return "The secure connection to the router failed." }
+        if error is NoiseError || error is SessionError { return "The secure connection to the router failed. Move closer to the router and try again." }
         return error.localizedDescription
     }
 

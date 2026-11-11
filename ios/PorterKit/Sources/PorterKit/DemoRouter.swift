@@ -52,7 +52,7 @@ public enum DemoRouter {
                 var check = ConfigCheck()
                 let extra = next.wifi.dropFirst().filter(\.enabled)
                 if let first = extra.first {
-                    check.notes = ["“\(first.ssid)” will not be on air: this radio broadcasts one network at a time. A USB Wi-Fi adapter that can carry several, or a second radio for it, would."]
+                    check.notes = ["“\(first.ssid)” will not be broadcast: this radio can broadcast one Wi-Fi network at a time. A second radio, or a USB Wi-Fi adapter that can broadcast several, would carry it."]
                 }
                 if next.wifi != config.wifi || next.radios != config.radios {
                     check.effects = ["Your Wi-Fi restarts. Devices reconnect by themselves within a few seconds."]
@@ -226,10 +226,10 @@ public enum DemoRouter {
 
     static func events(now: Int64) -> String {
         """
-        [{"t":\(now - 5_520),"kind":"portal","msg":"Captive portal detected on the upstream network","mac":"\(phone)"},
-         {"t":\(now - 5_440),"kind":"portal","msg":"Captive portal cleared; internet is reachable"},
+        [{"t":\(now - 5_520),"kind":"portal","msg":"The network the router joined asks for a sign-in before it lets anything online","mac":"\(phone)"},
+         {"t":\(now - 5_440),"kind":"portal","msg":"Signed in. The router is online."},
          {"t":\(now - 5_100),"kind":"device","msg":"New device joined","mac":"\(reader)"},
-         {"t":\(now - 3_600),"kind":"lan","msg":"LAN moved to 10.83.0.0/24: 192.168.8.0/24 is in use upstream"},
+         {"t":\(now - 3_600),"kind":"lan","msg":"Main now uses the addresses 10.83.0.0/24. The network the router joined uses 192.168.8.0/24 as well."},
          {"t":\(now - 900),"kind":"pairing","msg":"Paired with iPad"}]
         """
     }

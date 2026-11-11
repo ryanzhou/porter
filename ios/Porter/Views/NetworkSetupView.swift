@@ -342,7 +342,7 @@ private struct ChangesSection: View {
                 NoticeRow(symbol: "arrow.triangle.2.circlepath", color: Color.secondary, text: effect)
             }
             if quiet {
-                NoticeRow(symbol: "pencil", color: Color.secondary, text: checking ? "Checking" : "Not applied yet")
+                NoticeRow(symbol: "pencil", color: Color.secondary, text: checking ? "Checking the changes" : "Nothing changes on the router until you tap Apply.")
             }
         }
     }
@@ -373,7 +373,7 @@ private struct WifiSection: View {
                 } label: {
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(wifi.ssid.isEmpty ? "Not set" : wifi.ssid)
+                            Text(wifi.ssid.isEmpty ? "No name yet" : wifi.ssid)
                                 .lineLimit(1)
                             if setup.networks.count > 1 {
                                 Text(setup.networkName(wifi.network))
@@ -386,7 +386,7 @@ private struct WifiSection: View {
                             Text("Off")
                                 .foregroundStyle(.secondary)
                         } else if offAir.contains(wifi.id) {
-                            Badge(text: "Off air", color: Color.orange)
+                            Badge(text: "Not broadcast", color: Color.orange)
                         }
                     }
                 }
@@ -395,7 +395,7 @@ private struct WifiSection: View {
                 Button("Add Wi-Fi network") { add() }
             }
         } header: {
-            Text("Wi-Fi")
+            Text("Your Wi-Fi")
         }
     }
 }
@@ -430,6 +430,12 @@ private struct WifiNetworkEditor: View {
         return name.isEmpty ? "Wi-Fi" : name
     }
 
+    /// What is wrong with the name or the password as typed, if anything.
+    private var problem: String? {
+        guard let current = setup.wifi.first(where: { $0.id == id }) else { return nil }
+        return networkNameProblem(current.ssid) ?? passphraseProblem(current.passphrase)
+    }
+
     var body: some View {
         Form {
             Section {
@@ -450,6 +456,7 @@ private struct WifiNetworkEditor: View {
                         Image(systemName: showPassword ? "eye.slash" : "eye")
                     }
                     .buttonStyle(.borderless)
+                    .accessibilityLabel(Text(showPassword ? "Hide password" : "Show password"))
                 }
                 Picker("Security", selection: field(\.security, WifiSecurity.wpa2)) {
                     ForEach(WifiSecurity.allCases) { option in
@@ -457,7 +464,10 @@ private struct WifiNetworkEditor: View {
                     }
                 }
             } footer: {
-                Text("Password: 8 to 63 characters.")
+                if let problem {
+                    Text(problem)
+                        .foregroundStyle(.red)
+                }
             }
             if setup.networks.count > 1 {
                 Section {
@@ -469,15 +479,15 @@ private struct WifiNetworkEditor: View {
                 }
             }
             Section {
-                Toggle("Hidden", isOn: field(\.hidden, false))
-                Toggle("Keep devices apart", isOn: field(\.isolate, false))
+                Toggle("Hidden network", isOn: field(\.hidden, false))
+                Toggle("Keep its devices apart from each other", isOn: field(\.isolate, false))
             }
             if !isMain {
                 Section {
-                    Toggle("On", isOn: field(\.enabled, true))
+                    Toggle("Enabled", isOn: field(\.enabled, true))
                 }
                 Section {
-                    Button("Remove", role: .destructive) { remove() }
+                    Button("Remove this Wi-Fi network", role: .destructive) { remove() }
                 }
             }
         }
@@ -527,7 +537,7 @@ private struct NetworksSection: View {
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 8)
-                        Text("\(online(network.id))")
+                        Text("\(online(network.id)) online")
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
@@ -537,11 +547,33 @@ private struct NetworksSection: View {
                 Button("Add network") { add() }
             }
         } header: {
-            Text("Networks")
+            Text("Your networks")
         } footer: {
-            Text("Each has its own addresses. Rules and routes can apply to one.")
+            Text("A network is a group of your devices with addresses of its own, such as one for guests. Each Wi-Fi network and wired port puts its devices on one of them.")
         }
     }
+}
+
+/// What is wrong with a network's address as typed; nil while it is empty
+/// (the router then chooses one) or looks usable.
+private func networkAddressProblem(_ text: String) -> String? {
+    if text.isEmpty { return nil }
+    let hint: String = "Use a private address followed by its size, /16 to /28, such as 10.84.0.1/24."
+    let halves: [Substring] = text.split(separator: "/", omittingEmptySubsequences: false)
+    guard halves.count == 2, let bits = Int(halves[1]), bits >= 16, bits <= 28 else { return hint }
+    let parts: [Substring] = halves[0].split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count == 4 else { return hint }
+    var octets: [Int] = []
+    for part in parts {
+        guard let value = Int(part), value >= 0, value <= 255 else { return hint }
+        octets.append(value)
+    }
+    let first: Int = octets[0]
+    let second: Int = octets[1]
+    if first == 10 { return nil }
+    if first == 172 && second >= 16 && second <= 31 { return nil }
+    if first == 192 && second == 168 { return nil }
+    return hint
 }
 
 private struct NetworkEditor: View {
@@ -578,6 +610,20 @@ private struct NetworkEditor: View {
         return names.isEmpty ? "None" : names.joined(separator: ", ")
     }
 
+    /// What is wrong with the name or the address as typed, if anything.
+    /// The router checks both fully before anything is applied.
+    private var problem: String? {
+        guard let current else { return nil }
+        return shortNameProblem(current.name) ?? networkAddressProblem(current.address)
+    }
+
+    /// What the network's devices do when it has no route of its own.
+    private var defaultRouteLabel: String {
+        "Default (" + model.actionLabel(model.config?.policy.`default` ?? "direct") + ")"
+    }
+
+    private var mainName: String { setup.networkName(RouterConfig.mainNetwork) }
+
     var body: some View {
         Form {
             Section {
@@ -593,32 +639,37 @@ private struct NetworkEditor: View {
                     LabeledContent("IPv6", value: prefix)
                 }
             } footer: {
-                Text("A private address, /16 to /28, like 10.84.0.1/24.")
+                if let problem {
+                    Text(problem)
+                        .foregroundStyle(.red)
+                }
             }
             Section {
-                Toggle("Keep apart", isOn: field(\.isolated, false))
+                Toggle("Keep apart from your other networks", isOn: field(\.isolated, false))
             } footer: {
-                Text("Its devices cannot reach the other networks. They can still be reached from them.")
+                Text("Devices on your other networks can still reach the ones on this network.")
             }
             Section {
                 Picker("Route", selection: field(\.route, "")) {
-                    Text("Default").tag("")
+                    Text(defaultRouteLabel).tag("")
                     ForEach(model.availableActions, id: \.self) { action in
                         Text(model.actionLabel(action.raw)).tag(action.raw)
                     }
                 }
             } footer: {
-                Text("For devices with no route of their own.")
+                Text("Route sets how devices on this network go online. A device's own route, and a rule on the VPN tab that fits its traffic, take priority.")
             }
             Section {
-                LabeledContent("Wi-Fi", value: wifiNames)
-                LabeledContent("Ports", value: portNames)
+                LabeledContent("Wi-Fi networks", value: wifiNames)
+                LabeledContent("Wired ports", value: portNames)
+            } footer: {
+                Text("Devices join this network through these. To change them, choose the network on a Wi-Fi network's page or under Wired ports.")
             }
             if !isMain {
                 Section {
-                    Button("Remove", role: .destructive) { remove() }
+                    Button("Remove this network", role: .destructive) { remove() }
                 } footer: {
-                    Text("Its Wi-Fi networks and ports go to the main network.")
+                    Text("Its Wi-Fi networks and wired ports move to \(mainName), and their devices with them.")
                 }
             }
         }
@@ -669,7 +720,10 @@ private struct AddSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 } footer: {
-                    Text("Password: 8 to 63 characters.")
+                    if let problem = networkNameProblem(name) ?? passphraseProblem(password) {
+                        Text(problem)
+                            .foregroundStyle(.red)
+                    }
                 }
                 Section {
                     Picker("Network", selection: $home) {
@@ -677,22 +731,32 @@ private struct AddSheet: View {
                             Text(network.name).tag(network.id)
                         }
                         if canAddNetwork {
-                            Text("A new one").tag("+")
+                            Text("A new network").tag("+")
                         }
                     }
                     if home == "+" {
                         TextField("Network name", text: $networkName)
-                        Toggle("Keep apart", isOn: $apart)
+                        Toggle("Keep apart from your other networks", isOn: $apart)
                     }
                 } footer: {
-                    Text(home == "+" && apart ? "For guests: online, but not able to reach your other devices." : "")
+                    if home == "+", let problem = shortNameProblem(networkName) {
+                        Text(problem)
+                            .foregroundStyle(.red)
+                    } else if home == "+" && apart {
+                        Text("This suits guests. Their devices get online but cannot reach the devices on your other networks.")
+                    }
                 }
             } else {
                 Section {
                     TextField("Name", text: $name)
-                    Toggle("Keep apart", isOn: $apart)
+                    Toggle("Keep apart from your other networks", isOn: $apart)
                 } footer: {
-                    Text("The router chooses its addresses. Give it a Wi-Fi network or a port afterwards.")
+                    if let problem = shortNameProblem(name) {
+                        Text(problem)
+                            .foregroundStyle(.red)
+                    } else {
+                        Text("Devices join a network through a Wi-Fi network or a wired port. Give this one either of them after adding it.")
+                    }
                 }
             }
         }
@@ -734,15 +798,15 @@ private struct AddSheet: View {
 // MARK: - Radios
 
 private func bandLabel(_ band: String) -> String {
-    band.isEmpty ? "Auto" : band + " GHz"
+    band.isEmpty ? "Automatic" : band + " GHz"
 }
 
 private func channelLabel(_ channel: Int) -> String {
-    channel == 0 ? "Auto" : String(channel)
+    channel == 0 ? "Automatic" : String(channel)
 }
 
 private func widthLabel(_ width: Int) -> String {
-    width == 0 ? "Auto" : "\(width) MHz"
+    width == 0 ? "Automatic" : "\(width) MHz"
 }
 
 /// One section for each radio: whether it carries the router's Wi-Fi and,
@@ -756,7 +820,7 @@ private struct RadiosSection: View {
     var body: some View {
         if present.isEmpty {
             Section("Radios") {
-                Text("No Wi-Fi radio")
+                Text("The router has no Wi-Fi radio.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -864,13 +928,23 @@ private struct RadioSetupRows: View {
 
     private var wanted: Int { setup.wifi.filter { $0.enabled }.count }
 
+    /// Why the switch or the channel settings are not there to use, and
+    /// how many Wi-Fi networks fit when more are wanted.
     private var note: String {
         var lines: [String] = []
-        if isUplink {
-            lines.append(broadcasts ? "Also the Wi-Fi uplink: your network follows the uplink's channel." : "The Wi-Fi uplink. Change that under Internet.")
+        if !radio.ap {
+            lines.append("This radio cannot broadcast Wi-Fi. It can only join a network.")
+        } else if isUplink {
+            if broadcasts {
+                lines.append("This radio also joins a Wi-Fi network for internet, so your Wi-Fi uses the same channel as that network.")
+            } else if radio.apSta {
+                lines.append("This radio joins a Wi-Fi network for internet. Which radio does that is chosen on the Internet tab.")
+            } else {
+                lines.append("This radio joins a Wi-Fi network for internet and cannot broadcast yours at the same time. Which radio joins is chosen on the Internet tab.")
+            }
         }
         if broadcasts && wanted > capacity {
-            lines.append(capacity == 1 ? "Carries one Wi-Fi network at a time." : "Carries \(capacity) Wi-Fi networks at a time.")
+            lines.append(capacity == 1 ? "This radio can broadcast one Wi-Fi network at a time." : "This radio can broadcast \(capacity) Wi-Fi networks at a time.")
         }
         return lines.joined(separator: " ")
     }
@@ -890,7 +964,7 @@ private struct RadioSetupRows: View {
                         Text(channelLabel(channel)).tag(channel)
                     }
                 }
-                Picker("Width", selection: widthBinding) {
+                Picker("Channel width", selection: widthBinding) {
                     ForEach(widthOptions, id: \.self) { width in
                         Text(widthLabel(width)).tag(width)
                     }
@@ -899,7 +973,9 @@ private struct RadioSetupRows: View {
         } header: {
             Text(radioTitle(radio))
         } footer: {
-            Text(note)
+            if !note.isEmpty {
+                Text(note)
+            }
         }
     }
 }
@@ -952,19 +1028,17 @@ private struct PortsSection: View {
             Section {
                 ForEach(ports) { port in
                     Picker(selection: choice(port.name)) {
-                        Text("Internet").tag("wan")
+                        Text("Internet source").tag("wan")
                         ForEach(setup.networks) { network in
-                            Text(network.name).tag("lan:" + network.id)
+                            Text("Devices on " + network.name).tag("lan:" + network.id)
                         }
-                        Text("Off").tag("off")
+                        Text("Not used").tag("off")
                     } label: {
                         Label(title(port.name), systemImage: "cable.connector")
                     }
                 }
             } header: {
                 Text("Wired ports")
-            } footer: {
-                Text("Internet: an uplink. A network: devices plugged in there join it.")
             }
         }
     }
@@ -998,21 +1072,23 @@ private struct CommonSection: View {
 
     var body: some View {
         Section {
-            Picker("Lease", selection: $lan.leaseMinutes) {
+            Picker("Devices keep an address for", selection: $lan.leaseMinutes) {
                 ForEach(leaseOptions, id: \.self) { minutes in
                     Text(leaseLabel(minutes)).tag(minutes)
                 }
             }
-            LabeledContent("Domain") {
+            LabeledContent("Local domain") {
                 TextField("lan", text: $lan.domain)
                     .multilineTextAlignment(.trailing)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             }
             Toggle("IPv6", isOn: $lan.ipv6)
-            Toggle("Move if upstream uses the same range", isOn: $lan.autoRenumber)
+            Toggle("Change addresses to avoid a clash", isOn: $lan.autoRenumber)
         } header: {
-            Text("All networks")
+            Text("All your networks")
+        } footer: {
+            Text("When the network the router joins uses the same addresses as one of yours, the router moves yours to different ones and its devices get new addresses.")
         }
     }
 }

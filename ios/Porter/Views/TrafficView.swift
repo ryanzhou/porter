@@ -118,7 +118,7 @@ struct TrafficChart: View {
 
     var body: some View {
         if isEmpty {
-            Text("No traffic yet")
+            Text("No traffic in this period")
                 .foregroundStyle(.secondary)
         } else {
             chart
@@ -166,8 +166,8 @@ private enum TrafficRange: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .hour: return "Hour"
-        case .days: return "3 days"
+        case .hour: return "Last hour"
+        case .days: return "Last 3 days"
         }
     }
 }
@@ -296,9 +296,9 @@ private struct TopDevicesSection: View {
     }
 
     var body: some View {
-        Section("24 hours") {
+        Section("Busiest devices, last 24 hours") {
             if loaded && shown.isEmpty {
-                Text("Nothing yet")
+                Text("The devices that use the most data are listed here.")
                     .foregroundStyle(.secondary)
             }
             ForEach(shown) { talker in
@@ -410,10 +410,10 @@ struct FlowsView: View {
     }
 
     private var emptyText: String {
-        if !query.isEmpty { return "No match" }
+        if !query.isEmpty { return "No connection matches your search." }
         switch filter {
-        case .active: return "Nothing open"
-        case .recent: return "Nothing recent"
+        case .active: return "No connections are open right now."
+        case .recent: return "Connections that ended recently are listed here."
         }
     }
 
@@ -499,7 +499,7 @@ private struct FlowListSection: View {
             }
         } footer: {
             if countriesMissing {
-                Text("No country database on this router.")
+                Text("The router has no country database, so connections are shown without a country.")
             }
         }
     }
@@ -517,10 +517,10 @@ private struct FlowRow: View {
 
     private var flag: String { countryFlag(flow.country) }
 
-    /// "tcp 443", then the device when the list covers all of them.
+    /// "TCP 443", then the device when the list covers all of them.
     private var detail: String {
         var parts: [String] = []
-        parts.append(flow.port > 0 ? flow.proto + " " + String(flow.port) : flow.proto)
+        parts.append(flow.port > 0 ? flow.proto.uppercased() + " " + String(flow.port) : flow.proto.uppercased())
         if showDevice {
             parts.append(model.deviceName(flow.mac))
         }
@@ -626,7 +626,7 @@ struct SpeedTestView: View {
                 }
                 .disabled(running)
             } footer: {
-                Text("Measured from the router, not from this phone.")
+                Text("The test runs on the router. It measures the internet connection itself, not the Wi-Fi between your devices and the router.")
             }
             Section {
                 Button {
@@ -796,7 +796,7 @@ private struct SpeedTestHistorySection: View {
                 ProgressView()
             }
         } else if !history.isEmpty {
-            Section("Earlier") {
+            Section("Earlier results") {
                 ForEach(Array(history.enumerated()), id: \.offset) { item in
                     SpeedTestHistoryRow(result: item.element)
                 }

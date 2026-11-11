@@ -22,12 +22,12 @@ struct InternetView: View {
     }
 
     private var offNote: String {
-        guard let radio = candidate else { return "No Wi-Fi radio." }
+        guard let radio = candidate else { return "The router has no Wi-Fi radio that can join a network." }
         let others: [RadioInfo] = model.radios.filter { $0.present && $0.id != radio.id && model.role(of: $0) == .ap }
         if let other = others.first {
-            return "\(radioTitle(radio)) joins; your own network stays on \(radioTitle(other))."
+            return "\(radioTitle(radio)) will join it. Your Wi-Fi stays on \(radioTitle(other))."
         }
-        return "\(radioTitle(radio)) does both. Your own network moves to the channel of the one it joins."
+        return "\(radioTitle(radio)) will join it and keep broadcasting your Wi-Fi. Your devices drop off for a moment while it changes over."
     }
 
     private var stations: [StationStatus] { model.status?.stas ?? [] }
@@ -38,8 +38,8 @@ struct InternetView: View {
     }
 
     private func note(for result: ScanResult) -> String {
-        if result.security == "enterprise" { return "Enterprise: not supported" }
-        if result.security == "wep" { return "WEP: not supported" }
+        if result.security == "enterprise" { return "Networks that need a username are not supported" }
+        if result.security == "wep" { return "WEP networks are not supported" }
         if stations.contains(where: { $0.state == "connected" && $0.ssid == result.ssid }) { return "Connected" }
         if stations.contains(where: { $0.state == "connecting" && $0.ssid == result.ssid }) { return "Joining" }
         if let refused = stations.first(where: { $0.failed == result.ssid }) { return joinFailureLabel(refused.failReason) }
@@ -53,7 +53,7 @@ struct InternetView: View {
                 nearbySection
                 SavedNetworksSection()
                 Section {
-                    NavigationLink("Wi-Fi uplink") { WifiUplinkPage() }
+                    NavigationLink("Wi-Fi source") { WifiUplinkPage() }
                 }
             } else {
                 offSection
@@ -86,7 +86,7 @@ struct InternetView: View {
                 }
             }
             if results.isEmpty {
-                Text(scanning ? "Looking" : "Nothing in range")
+                Text(scanning ? "Looking for networks" : "No Wi-Fi networks in range")
                     .foregroundStyle(.secondary)
             }
             Button("Other…") {
@@ -94,7 +94,7 @@ struct InternetView: View {
             }
         } header: {
             HStack {
-                Text("Networks")
+                Text("Wi-Fi networks nearby")
                 Spacer()
                 if scanning {
                     ProgressView()
@@ -253,8 +253,10 @@ private struct SourcesSection: View {
                 }
             }
             .onMove { from, to in move(from, to) }
+        } header: {
+            Text("Internet sources")
         } footer: {
-            Text("The first one that works is used.")
+            Text("The router gets online through the first source in this list that works, and moves to the next when it stops working. Tap Edit to change the order.")
         }
     }
 
@@ -307,13 +309,13 @@ private struct SourceRow: View {
     private var detail: String {
         if linked {
             if let address = uplink?.ipv4, !address.isEmpty { return address }
-            return "No address"
+            return "Waiting for an address"
         }
         switch source.kind {
         case "wifi":
             if let station {
                 if let failed = station.failed, !failed.isEmpty {
-                    return failed + ": " + joinFailureLabel(station.failReason)
+                    return joinFailureText(ssid: failed, reason: station.failReason)
                 }
                 switch station.state {
                 case "connecting": return "Joining"
@@ -324,7 +326,7 @@ private struct SourceRow: View {
             return "Off"
         case "phone":
             if uplink == nil { return "Not plugged in" }
-            return "Turn on the phone's hotspot. On an iPhone, tap Trust."
+            return "Turn on the phone's hotspot. If an iPhone asks whether to trust the router, tap Trust."
         default:
             return "No cable"
         }
@@ -450,9 +452,9 @@ private struct WifiUplinkPage: View {
     private var note: String {
         guard let current else { return "" }
         if model.role(of: current) == .apWan {
-            return "This radio carries your own network too, which follows the uplink's channel. With a second radio the two stay apart, and both are faster."
+            return "This radio also broadcasts your Wi-Fi. Your devices drop off for a moment whenever it joins a different network, and the two share its speed. A second radio avoids both."
         }
-        return "Your own network is on the other radio."
+        return ""
     }
 
     var body: some View {
@@ -466,19 +468,23 @@ private struct WifiUplinkPage: View {
                 .pickerStyle(.inline)
                 .labelsHidden()
             } header: {
-                Text("Joins with")
+                Text("Radio that joins Wi-Fi")
             } footer: {
-                Text(note)
+                if !note.isEmpty {
+                    Text(note)
+                }
             }
             Section("Hardware address") {
                 MACPolicyRows(title: "Address", kind: "wifi", policyPath: \.wan.wifiMac)
             }
             Section {
                 Button("Stop using Wi-Fi", role: .destructive) { choose("") }
+            } footer: {
+                Text("The router leaves the Wi-Fi network it has joined and gets online through its other sources only. Saved networks are kept.")
             }
         }
         .disabled(working)
-        .navigationTitle("Wi-Fi uplink")
+        .navigationTitle("Wi-Fi source")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -528,7 +534,7 @@ private struct SavedNetworksSection: View {
                     HStack {
                         Text(network.ssid)
                         if network.ip?.isAutomatic == false {
-                            Badge(text: "Manual")
+                            Badge(text: "Manual address")
                         }
                         Spacer()
                         Text(note(for: network.ssid))
@@ -541,7 +547,9 @@ private struct SavedNetworksSection: View {
                 }
             }
         } header: {
-            Text("Saved")
+            Text("Saved Wi-Fi networks")
+        } footer: {
+            Text("The router joins these again by itself when they are in range.")
         }
     }
 
@@ -700,17 +708,25 @@ private struct JoinNetworkSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     Toggle("Hidden network", isOn: $hidden)
+                } footer: {
+                    if let problem = networkNameProblem(typedName) {
+                        Text(problem)
+                            .foregroundStyle(.red)
+                    }
                 }
             }
             if target.secured {
                 Section {
-                    SecureField("Password", text: $password)
+                    SecureField("Password", text: $password, prompt: Text(target.other ? "Password, if it has one" : "Password"))
                 } footer: {
-                    Text(target.other ? "Empty for an open network." : "")
+                    if let problem = passphraseProblem(password) {
+                        Text(problem)
+                            .foregroundStyle(.red)
+                    }
                 }
             } else {
                 Section {
-                    Label("Open network: others nearby can see unencrypted traffic.", systemImage: "lock.open")
+                    Label("This network has no password. Others nearby can see any of your traffic that is not encrypted.", systemImage: "lock.open")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -754,7 +770,7 @@ private struct JoinNetworkSheet: View {
 
 private func macModeLabel(_ mode: MACMode) -> String {
     switch mode {
-    case .hardware: return "Hardware"
+    case .hardware: return "Built-in"
     case .random: return "Random"
     case .custom: return "Custom"
     }
@@ -772,7 +788,7 @@ private struct UpstreamIdentityPage: View {
             } header: {
                 Text("Wired")
             } footer: {
-                Text("A new random address makes the router look like a different device upstream.")
+                Text("The hardware address is how the network the router joins tells devices apart. With a new one the router looks like a device it has not seen before, so you may have to sign in there again.")
             }
         }
         .navigationTitle("Hardware addresses")
@@ -813,15 +829,15 @@ private struct MACPolicyRows: View {
             }
         }
         if shownMode == .random {
-            LabeledContent("Now", value: policy?.address ?? "")
-            Button("New address") { newRandom() }
+            LabeledContent("Current address", value: policy?.address ?? "")
+            Button("New random address") { newRandom() }
         }
         if shownMode == .custom {
             TextField("02:00:00:00:00:01", text: $custom)
                 .font(.body.monospaced())
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            Button("Use") { apply(mode: .custom, address: custom.lowercased()) }
+            Button("Use this address") { apply(mode: .custom, address: custom.lowercased()) }
                 .disabled(!customReady)
         }
     }

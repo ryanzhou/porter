@@ -17,9 +17,10 @@ struct SetupView: View {
         country.count == 2 && validRouterName(routerName) && validNetworkName(ssid) && validPassphrase(passphrase)
     }
 
-    /// Said only once the password is being typed and is not yet usable.
-    private var passwordProblem: Bool {
-        !passphrase.isEmpty && !validPassphrase(passphrase)
+    /// What is wrong with the name or the password as typed, said only
+    /// once one of them cannot be used.
+    private var wifiProblem: String? {
+        networkNameProblem(ssid) ?? passphraseProblem(passphrase)
     }
 
     var body: some View {
@@ -27,7 +28,7 @@ struct SetupView: View {
             Section {
                 VStack(spacing: 10) {
                     Glyph(symbol: "wifi.router.fill", size: 64, filled: true)
-                    Text("Name your network")
+                    Text("Name your Wi-Fi")
                         .font(.title2.weight(.bold))
                         .fontDesign(.rounded)
                 }
@@ -49,17 +50,26 @@ struct SetupView: View {
                         .autocorrectionDisabled()
                 }
             } footer: {
-                Text("8 to 63 characters")
-                    .foregroundStyle(passwordProblem ? Color.red : Color.secondary)
+                if let problem = wifiProblem {
+                    Text(problem)
+                        .foregroundStyle(.red)
+                }
             }
             Section {
-                CountryPicker(selection: $country)
-                LabeledContent("Router") {
+                LabeledContent("Router name") {
                     TextField("Name", text: $routerName)
                         .multilineTextAlignment(.trailing)
                 }
             } footer: {
-                Text("The country sets the legal Wi-Fi channels.")
+                if let problem = shortNameProblem(routerName) {
+                    Text(problem)
+                        .foregroundStyle(.red)
+                }
+            }
+            Section {
+                CountryPicker(selection: $country)
+            } footer: {
+                Text("The country decides which Wi-Fi channels the router is allowed to use.")
             }
             Section {
                 Button {

@@ -56,6 +56,10 @@ private struct VPNProfilesSection: View {
             } label: {
                 Label("Add VPN", systemImage: "plus")
             }
+        } footer: {
+            if profiles.isEmpty {
+                Text("Add a VPN from your provider or your own server. The rules below then decide which traffic goes through it.")
+            }
         }
     }
 }
@@ -72,7 +76,7 @@ private struct VPNProfileRow: View {
         guard let status else { return "Off" }
         var parts: [String] = [vpnStateLabel(status)]
         if status.isMPQUIC, let total = status.of, total > 0 {
-            parts.append("\(status.paths ?? 0)/\(total) paths")
+            parts.append("\(status.paths ?? 0) of \(total) paths")
         }
         if status.state == "up" {
             parts.append("↓ " + formatBytes(UInt64(clamping: status.rx)))
@@ -136,14 +140,14 @@ struct VPNDetailView: View {
     var body: some View {
         Form {
             if let profile {
-                Section("Name") {
+                Section {
                     TextField("Name", text: $name)
                 }
                 Section {
                     Toggle("Enabled", isOn: model.vpnEnabled(profileID))
                     Toggle("Kill switch", isOn: killSwitchBinding)
                 } footer: {
-                    Text("The kill switch stops this VPN's traffic while the tunnel is down.")
+                    Text("With the kill switch on, devices that use this VPN are offline while it is disconnected or turned off. With it off, they go online without the VPN instead.")
                 }
                 VPNLiveSection(status: model.status?.vpns.first(where: { $0.id == profileID }))
                 if profile.isMPQUIC {
@@ -154,7 +158,7 @@ struct VPNDetailView: View {
                 Section {
                     ConfirmedButton(
                         title: "Delete VPN",
-                        message: "Whatever used it goes direct.",
+                        message: "Rules and devices that use this VPN go online without it from now on. Its configuration is erased from the router.",
                         confirmTitle: "Delete"
                     ) {
                         delete()
@@ -208,6 +212,9 @@ struct VPNDetailView: View {
                 }
                 for index in cfg.policy.rules.indices where cfg.policy.rules[index].action == action {
                     cfg.policy.rules[index].action = "direct"
+                }
+                for index in cfg.networks.indices where cfg.networks[index].route == action {
+                    cfg.networks[index].route = ""
                 }
             }
             if ok {
@@ -275,36 +282,45 @@ private struct MPQUICFields: View {
             items: $config.servers,
             placeholder: "server.example.com:8388",
             keyboard: .URL,
-            footer: "The server, then any relays. One path each."
+            footer: "Add your mpquic server first, then any relays. The VPN uses all of them at once, each as a path of its own."
         )
-        Section("Password") {
+        Section {
             TextField("Password", text: $config.password)
                 .font(.body.monospaced())
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+        } header: {
+            Text("Password")
+        } footer: {
+            if !config.password.isEmpty && config.password.count < 8 {
+                Text("The password has at least 8 characters.")
+                    .foregroundStyle(.red)
+            }
         }
         Section {
-            RateField(label: "Download", text: $config.down, example: "95mbit")
-            RateField(label: "Upload", text: $config.up, example: "19mbit")
+            RateField(label: "Download", text: $config.down)
+            RateField(label: "Upload", text: $config.up)
         } header: {
-            Text("This line")
+            Text("Connection speed")
         } footer: {
-            Text("A little under the real rates. Empty measures them.")
+            Text("Left empty, the VPN measures the speed of the connection the router is on. To set it yourself, enter a little less than the real speed, such as 95mbit.")
         }
         Section {
             Toggle("Reliable UDP", isOn: $config.reliableUdp)
+        } footer: {
+            Text("The VPN sends again any UDP traffic that gets lost on the way, such as calls and games. That avoids gaps but can add delay.")
         }
     }
 }
 
+/// A rate that the VPN measures while the field is left empty.
 private struct RateField: View {
     let label: String
     @Binding var text: String
-    let example: String
 
     var body: some View {
         LabeledContent(label) {
-            TextField(label, text: $text, prompt: Text(verbatim: example))
+            TextField(label, text: $text, prompt: Text("Automatic"))
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -327,9 +343,9 @@ private struct MPQUICSummarySection: View {
                 LabeledContent(item.offset == 0 ? "Server" : "Relay", value: item.element)
             }
             if !mpquic.down.isEmpty || !mpquic.up.isEmpty {
-                LabeledContent("Line", value: "↓ " + (mpquic.down.isEmpty ? "–" : mpquic.down) + "  ↑ " + (mpquic.up.isEmpty ? "–" : mpquic.up))
+                LabeledContent("Connection speed", value: "↓ " + (mpquic.down.isEmpty ? "–" : mpquic.down) + "  ↑ " + (mpquic.up.isEmpty ? "–" : mpquic.up))
             }
-            NavigationLink("Change") {
+            NavigationLink("Change MPQUIC settings") {
                 MPQUICEditPage(profileID: profileID, initial: mpquic)
             }
         }
@@ -415,7 +431,7 @@ private struct AddVPNSheet: View {
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
             }
-            Section("Name") {
+            Section {
                 TextField("Name", text: $name)
             }
             if kind == "mpquic" {
@@ -459,7 +475,7 @@ private struct AddVPNSheet: View {
                     Button {
                         importing = true
                     } label: {
-                        Label("Import", systemImage: "folder")
+                        Label("Choose file", systemImage: "folder")
                             .frame(maxWidth: .infinity)
                     }
                 }
@@ -470,7 +486,9 @@ private struct AddVPNSheet: View {
                         .foregroundStyle(.red)
                 }
             } header: {
-                Text("WireGuard .conf")
+                Text("WireGuard configuration")
+            } footer: {
+                Text("Paste the configuration from your VPN provider or your own server, or choose its .conf file.")
             }
     }
 
@@ -488,10 +506,10 @@ private struct AddVPNSheet: View {
                     name = url.deletingPathExtension().lastPathComponent
                 }
             } else {
-                importProblem = "That file could not be read as text."
+                importProblem = "That file could not be read. Choose a WireGuard .conf file."
             }
         case .failure:
-            importProblem = "The file could not be opened."
+            importProblem = "The file could not be opened. Try choosing it again."
         }
     }
 
@@ -584,7 +602,7 @@ private struct RulesSection: View {
         } header: {
             Text("Rules")
         } footer: {
-            Text("First match wins.")
+            Text("Rules are tried from the top, and traffic follows the first one it fits. Tap Edit to change the order.")
         }
     }
 
@@ -631,7 +649,10 @@ private struct RulesSection: View {
     }
 
     private func addRule() {
-        let rule = PolicyRule(id: AppModel.newID(), name: "New rule")
+        // Added switched off: as it stands it would apply to everything,
+        // and it is not to take effect before it has been set up.
+        var rule = PolicyRule(id: AppModel.newID(), name: "New rule")
+        rule.enabled = false
         Task {
             await model.update { cfg in
                 cfg.policy.rules.append(rule)
@@ -680,12 +701,12 @@ private struct RuleRow: View {
     let rule: PolicyRule
     let number: Int
 
-    /// Who: "All", one device's name, or the first of several.
+    /// Who: "All devices", one device's name, or the first of several.
     private var source: String {
         var names: [String] = rule.src.networks.map { model.networkName($0) }
         names.append(contentsOf: rule.src.devices.map { model.deviceName($0) })
         names.append(contentsOf: rule.src.cidrs)
-        guard let first = names.first else { return "All" }
+        guard let first = names.first else { return "All devices" }
         return names.count == 1 ? first : first + " +\(names.count - 1)"
     }
 
@@ -771,40 +792,8 @@ struct RuleEditorView: View {
     var body: some View {
         Form {
             generalSection
-            if model.hasSeveralNetworks || !draft.src.networks.isEmpty {
-                sourceNetworksSection
-            }
-            sourceDevicesSection
-            StringListEditor(
-                title: "From addresses",
-                items: $draft.src.cidrs,
-                placeholder: "10.83.0.50 or 10.83.0.64/28",
-                keyboard: .numbersAndPunctuation,
-                footer: ""
-            )
-            StringListEditor(
-                title: "To domains",
-                items: $draft.dst.domains,
-                placeholder: "example.com",
-                keyboard: .URL,
-                footer: "Includes subdomains."
-            )
-            StringListEditor(
-                title: "To addresses",
-                items: $draft.dst.cidrs,
-                placeholder: "203.0.113.0/24",
-                keyboard: .numbersAndPunctuation,
-                footer: ""
-            )
-            countriesSection
-            protocolSection
-            StringListEditor(
-                title: "Ports",
-                items: $draft.dst.ports,
-                placeholder: "443 or 8000-8100",
-                keyboard: .numbersAndPunctuation,
-                footer: ""
-            )
+            sourceSections
+            destinationSections
         }
         .navigationTitle(draft.name.isEmpty ? "Rule" : draft.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -818,15 +807,125 @@ struct RuleEditorView: View {
         .onChange(of: model.config?.rev) { _, _ in sync() }
     }
 
+    /// Where the traffic comes from: all devices, or the networks,
+    /// devices and addresses chosen.
+    @ViewBuilder
+    private var sourceSections: some View {
+        sourceAllSection
+        if model.hasSeveralNetworks || !draft.src.networks.isEmpty {
+            sourceNetworksSection
+        }
+        if !deviceChoices.isEmpty {
+            sourceDevicesSection
+        }
+        StringListEditor(
+            title: "From addresses",
+            items: $draft.src.cidrs,
+            placeholder: "10.83.0.50 or 10.83.0.64/28",
+            keyboard: .numbersAndPunctuation,
+            footer: ""
+        )
+    }
+
+    /// Where it is going: anywhere, or the domains, addresses and
+    /// countries chosen, narrowed by protocol and ports.
+    @ViewBuilder
+    private var destinationSections: some View {
+        destinationAllSection
+        StringListEditor(
+            title: "To domains",
+            items: $draft.dst.domains,
+            placeholder: "example.com",
+            keyboard: .URL,
+            footer: "A domain covers its subdomains too, so example.com includes www.example.com."
+        )
+        StringListEditor(
+            title: "To addresses",
+            items: $draft.dst.cidrs,
+            placeholder: "203.0.113.0/24",
+            keyboard: .numbersAndPunctuation,
+            footer: ""
+        )
+        countriesSection
+        protocolSection
+        StringListEditor(
+            title: "Ports",
+            items: $draft.dst.ports,
+            placeholder: "443 or 8000-8100",
+            keyboard: .numbersAndPunctuation,
+            footer: "",
+            emptyText: "Any port"
+        )
+    }
+
     private var generalSection: some View {
         Section {
             TextField("Name", text: $draft.name)
             Toggle("Enabled", isOn: $draft.enabled)
-            Picker("Send to", selection: $draft.action) {
+            Picker("Route", selection: $draft.action) {
                 ForEach(model.availableActions, id: \.self) { action in
                     Text(model.actionLabel(action.raw)).tag(action.raw)
                 }
             }
+        }
+    }
+
+    /// No network, device or address is chosen: the rule is for traffic
+    /// from every device.
+    private var anySource: Bool {
+        draft.src.networks.isEmpty && draft.src.devices.isEmpty && draft.src.cidrs.isEmpty
+    }
+
+    /// No domain, address or country is chosen: the rule is for traffic
+    /// to anywhere.
+    private var anyDestination: Bool {
+        draft.dst.domains.isEmpty && draft.dst.cidrs.isEmpty && draft.dst.countries.isEmpty
+    }
+
+    /// Says outright what an empty source means. Choosing it clears the
+    /// networks, devices and addresses below.
+    private var sourceAllSection: some View {
+        Section {
+            Button {
+                draft.src.networks = []
+                draft.src.devices = []
+                draft.src.cidrs = []
+            } label: {
+                HStack {
+                    Text("All devices")
+                    Spacer()
+                    if anySource {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.tint)
+                    }
+                }
+            }
+            .foregroundStyle(.primary)
+        } header: {
+            Text("From")
+        }
+    }
+
+    /// The same for the destination: domains, addresses and countries.
+    private var destinationAllSection: some View {
+        Section {
+            Button {
+                draft.dst.domains = []
+                draft.dst.cidrs = []
+                draft.dst.countries = []
+            } label: {
+                HStack {
+                    Text("Anywhere")
+                    Spacer()
+                    if anyDestination {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.tint)
+                    }
+                }
+            }
+            .foregroundStyle(.primary)
+        } header: {
+            Text("To")
         }
     }
 
@@ -855,10 +954,6 @@ struct RuleEditorView: View {
 
     private var sourceDevicesSection: some View {
         Section {
-            if deviceChoices.isEmpty {
-                Text("All devices")
-                    .foregroundStyle(.secondary)
-            }
             ForEach(deviceChoices, id: \.self) { mac in
                 Button {
                     toggleDevice(mac)
@@ -876,8 +971,6 @@ struct RuleEditorView: View {
             }
         } header: {
             Text("From devices")
-        } footer: {
-            Text("Nothing ticked means all.")
         }
     }
 
@@ -888,7 +981,7 @@ struct RuleEditorView: View {
     private var countriesSection: some View {
         Section {
             if countriesMissing {
-                Label("This router has no country database.", systemImage: "exclamationmark.triangle.fill")
+                Label("The router has no country database. Until it has one, the countries in a rule are ignored.", systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
                     .foregroundStyle(.orange)
             }
@@ -898,7 +991,7 @@ struct RuleEditorView: View {
             .onDelete { offsets in
                 draft.dst.countries.remove(atOffsets: offsets)
             }
-            NavigationLink("Add country") {
+            NavigationLink("Choose countries") {
                 CountrySelectionList(selection: $draft.dst.countries)
             }
         } header: {
@@ -914,6 +1007,8 @@ struct RuleEditorView: View {
                 Text("UDP").tag("udp")
             }
             .pickerStyle(.segmented)
+        } header: {
+            Text("Protocol")
         }
     }
 
@@ -982,7 +1077,7 @@ private struct CountryRow: View {
     }
 }
 
-/// Every country, to tick the ones a rule should match.
+/// Every country, to choose the ones a rule is for.
 private struct CountrySelectionList: View {
     @Binding var selection: [String]
     @State private var search: String = ""
@@ -998,7 +1093,7 @@ private struct CountrySelectionList: View {
     var body: some View {
         List {
             if matches.isEmpty {
-                Text("No match")
+                Text("No country matches your search.")
                     .foregroundStyle(.secondary)
             }
             ForEach(matches) { choice in

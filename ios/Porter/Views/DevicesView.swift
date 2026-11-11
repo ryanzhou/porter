@@ -20,8 +20,12 @@ struct DevicesView: View {
     var body: some View {
         List {
             if model.devices.isEmpty {
-                ContentUnavailableView("No devices yet", systemImage: "laptopcomputer.and.iphone")
-                    .listRowBackground(Color.clear)
+                ContentUnavailableView(
+                    "No devices yet",
+                    systemImage: "laptopcomputer.and.iphone",
+                    description: Text("Devices are listed here once they join your Wi-Fi or are plugged into a wired port.")
+                )
+                .listRowBackground(Color.clear)
             }
             if !online.isEmpty {
                 Section("Online") {
@@ -172,7 +176,7 @@ struct DeviceDetailView: View {
                     Section {
                         ConfirmedButton(
                             title: "Forget device",
-                            message: "Its name, settings and history are removed.",
+                            message: "Its name, settings and traffic history are erased. If it joins again, it is listed as a new device.",
                             confirmTitle: "Forget"
                         ) {
                             forget()
@@ -197,25 +201,34 @@ struct DeviceDetailView: View {
         .task { await loadUsage() }
     }
 
+    /// The two fields Save is for, then the switches that apply at once,
+    /// then the route with what can overrule it.
+    @ViewBuilder
     private func settingsSection(_ device: DeviceInfo) -> some View {
         Section {
             TextField(device.hostname ?? "Name", text: $name)
-            Toggle("Pause", isOn: pausedBinding)
-            if model.config?.dns.adblock.enabled == true {
-                Toggle("Skip ad blocking", isOn: noAdblockBinding)
-            }
-            Picker("Route", selection: routeBinding) {
-                Text(defaultRouteLabel).tag("")
-                ForEach(model.availableActions, id: \.self) { action in
-                    Text(model.actionLabel(action.raw)).tag(action.raw)
-                }
-            }
             LabeledContent("Fixed address") {
                 TextField(device.ipv4 ?? "Automatic", text: $reservedIP)
                     .multilineTextAlignment(.trailing)
                     .keyboardType(.numbersAndPunctuation)
                     .autocorrectionDisabled()
             }
+        }
+        Section {
+            Toggle("Pause internet access", isOn: pausedBinding)
+            if model.config?.dns.adblock.enabled == true {
+                Toggle("Skip ad blocking", isOn: noAdblockBinding)
+            }
+        }
+        Section {
+            Picker("Route", selection: routeBinding) {
+                Text(defaultRouteLabel).tag("")
+                ForEach(model.availableActions, id: \.self) { action in
+                    Text(model.actionLabel(action.raw)).tag(action.raw)
+                }
+            }
+        } footer: {
+            Text("Route sets how this device goes online. A rule on the VPN tab that fits its traffic takes priority.")
         }
     }
 
@@ -239,7 +252,7 @@ struct DeviceDetailView: View {
             if loadingQueries {
                 ProgressView()
             } else if queries.isEmpty {
-                Text("None")
+                Text("The names this device looks up are listed here.")
                     .foregroundStyle(.secondary)
             }
             ForEach(Array(queries.enumerated()), id: \.offset) { item in
@@ -254,6 +267,7 @@ struct DeviceDetailView: View {
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
+                .accessibilityLabel(Text("Reload lookups"))
                 .disabled(loadingQueries)
             }
         }
@@ -375,8 +389,8 @@ private struct DeviceFactsSection: View {
             ForEach(addresses6, id: \.self) { address in
                 LabeledContent("IPv6", value: address)
             }
-            LabeledContent("Seen", value: seen)
-            LabeledContent("Since", value: formatDate(device.firstSeen))
+            LabeledContent("Last seen", value: seen)
+            LabeledContent("First seen", value: formatDate(device.firstSeen))
         }
     }
 }
@@ -392,16 +406,15 @@ private struct QueryRow: View {
         case "local": return "Router"
         case "refuse": return "Refused"
         default:
-            if let action = RouteAction(query.path), case .vpn(let id) = action {
-                return model.vpnName(id)
-            }
-            return query.path
+            // A VPN by its name, a lookup the block lists stopped as
+            // "Ad blocked".
+            return model.actionLabel(query.path)
         }
     }
 
     private var color: Color {
         switch query.path {
-        case "block", "refuse": return Color.red
+        case "block", "refuse", "adblock": return Color.red
         case "direct", "wan", "local": return Color.secondary
         default: return Color.blue
         }

@@ -106,9 +106,9 @@ struct MismatchView: View {
 
     private var explanation: String {
         if mismatch == .routerOlder {
-            return "Its software is older than this app. Update it here; the app carries on once the router has restarted."
+            return "The router's software is older than this app, so the app cannot show its settings yet. Update the router here, and the app carries on once it has restarted."
         }
-        return "The router's software is newer than this app. Install the app again from the current source."
+        return "The router's software is newer than this app, so the app cannot show its settings. Download the current version of Porter and install the app from it again."
     }
 
     var body: some View {
@@ -129,7 +129,7 @@ struct MismatchView: View {
                 }
             }
             Section {
-                Button("Disconnect") { model.disconnect() }
+                Button("Disconnect from the router") { model.disconnect() }
             }
         }
         .navigationTitle("Porter")

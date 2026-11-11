@@ -76,14 +76,14 @@ private struct PathCard: View {
 
     /// The upstream network by name: the Wi-Fi network, or "Ethernet".
     private var source: String {
-        guard let uplink else { return "No uplink" }
+        guard let uplink else { return "No internet source" }
         if uplink.kind == "wifi" {
             if let ssid = station?.ssid, !ssid.isEmpty { return ssid }
             return "Wi-Fi"
         }
         if uplink.kind == "phone" {
             if let label = uplink.label, !label.isEmpty { return label }
-            return "Phone"
+            return "Phone on USB"
         }
         return "Ethernet"
     }
@@ -92,7 +92,7 @@ private struct PathCard: View {
     private var refusal: String? {
         for sta in status.stas {
             if let failed = sta.failed, !failed.isEmpty {
-                return failed + ": " + joinFailureLabel(sta.failReason)
+                return joinFailureText(ssid: failed, reason: sta.failReason)
             }
         }
         return nil
@@ -167,7 +167,7 @@ private struct PathCard: View {
 
     private func addresses(_ uplink: UplinkStatus) -> some View {
         HStack(spacing: 8) {
-            Text(uplink.ipv4 ?? "No IPv4")
+            Text(uplink.ipv4 ?? "No IPv4 address")
                 .font(.footnote.monospaced())
                 .foregroundStyle(.secondary)
             if uplink.hasV6 {
@@ -247,7 +247,10 @@ private struct PortalCard: View {
     }
 
     private var who: String {
-        currentDevice.isEmpty ? "Join the router's Wi-Fi to sign in." : "Sign in on " + model.deviceName(currentDevice) + "."
+        if currentDevice.isEmpty {
+            return "Join your Wi-Fi with one device and sign in on it. All your devices are then online."
+        }
+        return "Sign in on " + model.deviceName(currentDevice) + ". Once it has, all your devices are online."
     }
 
     private var deviceBinding: Binding<String> {
@@ -281,6 +284,9 @@ private struct PortalCard: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Color.orange)
                 HStack(spacing: 8) {
+                    Text("Sign-in device")
+                        .font(.subheadline)
+                    Spacer()
                     Picker("Sign-in device", selection: deviceBinding) {
                         Text("Automatic").tag("")
                         if !currentDevice.isEmpty && !choices.contains(where: { $0.mac == currentDevice }) {
@@ -291,17 +297,26 @@ private struct PortalCard: View {
                         }
                     }
                     .labelsHidden()
-                    Spacer()
-                    Button("Reconnect") {
-                        Task { await model.attempt { try await $0.kickPortalDevice() } }
-                    }
-                    .disabled(currentDevice.isEmpty)
-                    Button("Recheck") {
-                        Task { await model.attempt { try await $0.recheckInternet() } }
-                    }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                HStack(spacing: 8) {
+                    Button("Reconnect device") {
+                        Task { await model.attempt { try await $0.kickPortalDevice() } }
+                    }
+                    .disabled(currentDevice.isEmpty)
+                    Button("Check again") {
+                        Task { await model.attempt { try await $0.recheckInternet() } }
+                    }
+                    Spacer()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                if !currentDevice.isEmpty {
+                    Text("If no sign-in page appears on that device, Reconnect device makes it rejoin your Wi-Fi so that the page comes up.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -337,7 +352,7 @@ private func accessPointDetail(_ ap: AccessPointStatus) -> String {
     default: parts.append("Off")
     }
     if !ap.band.isEmpty { parts.append(ap.band + " GHz") }
-    if ap.channel > 0 { parts.append("ch \(ap.channel)") }
+    if ap.channel > 0 { parts.append("channel \(ap.channel)") }
     return parts.joined(separator: " · ")
 }
 
@@ -393,7 +408,7 @@ private struct WifiCard: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                             if offAir.contains(other.id) {
-                                Badge(text: "Off air", color: Color.orange)
+                                Badge(text: "Not broadcast", color: Color.orange)
                             }
                         }
                     }
@@ -456,7 +471,7 @@ struct WifiShareSheet: View {
                         .frame(maxWidth: 240)
                         .padding(16)
                         .background(Color.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                        .accessibilityLabel(Text("Code to join the network"))
+                        .accessibilityLabel(Text("QR code to join this Wi-Fi"))
                 }
                 VStack(spacing: 6) {
                     Text(ap?.ssid ?? "")

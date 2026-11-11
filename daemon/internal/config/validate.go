@@ -348,7 +348,7 @@ func (c *Config) validateSpeedTest() error {
 	for what, raw := range map[string]string{"download": c.SpeedTest.DownloadURL, "upload": c.SpeedTest.UploadURL} {
 		u, err := url.Parse(raw)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || len(raw) > 512 || !printable(raw) {
-			return fmt.Errorf("speed test %s URL must be an http:// or https:// URL", what)
+			return fmt.Errorf("The speed test's %s address has to start with http:// or https://.", what)
 		}
 	}
 	return nil
@@ -366,21 +366,21 @@ func printable(s string) bool {
 func (c *Config) validateSystem() error {
 	s := c.System
 	if s.Name == "" || len(s.Name) > 20 || !printable(s.Name) {
-		return fmt.Errorf("system.name must be 1-20 printable characters")
+		return fmt.Errorf("The router's name needs 1 to 20 characters.")
 	}
 	if s.Country != "" && !reCountry.MatchString(s.Country) {
-		return fmt.Errorf("system.country must be a two-letter country code")
+		return fmt.Errorf("Choose the country the router is in.")
 	}
 	if len(s.SSH.AuthorizedKeys) > 8 {
-		return fmt.Errorf("too many SSH keys")
+		return fmt.Errorf("That is more SSH keys than the router keeps.")
 	}
 	for _, k := range s.SSH.AuthorizedKeys {
 		if len(k) > 2048 || !printable(k) || !(strings.HasPrefix(k, "ssh-") || strings.HasPrefix(k, "ecdsa-") || strings.HasPrefix(k, "sk-")) {
-			return fmt.Errorf("invalid SSH public key")
+			return fmt.Errorf("That is not an SSH public key.")
 		}
 	}
 	if s.SSH.Enabled && len(s.SSH.AuthorizedKeys) == 0 {
-		return fmt.Errorf("SSH needs at least one authorized key")
+		return fmt.Errorf("Add a key before allowing SSH.")
 	}
 	return nil
 }
@@ -443,7 +443,7 @@ func (c *Config) validateWifi() error {
 		return fmt.Errorf("the main Wi-Fi network is missing")
 	}
 	if len(c.Wifi) > MaxSSIDs {
-		return fmt.Errorf("at most %d Wi-Fi networks", MaxSSIDs)
+		return fmt.Errorf("The router has room for %d Wi-Fi networks.", MaxSSIDs)
 	}
 	ids, names := map[string]bool{}, map[string]bool{}
 	for i, a := range c.Wifi {
@@ -457,17 +457,17 @@ func (c *Config) validateWifi() error {
 		// Only the main one may be unnamed: that is a router that has not
 		// been set up yet.
 		if a.SSID == "" && i > 0 {
-			return fmt.Errorf("a Wi-Fi network needs a name")
+			return fmt.Errorf("A Wi-Fi network needs a name.")
 		}
 		if len(a.SSID) > 32 || !printable(a.SSID) {
-			return fmt.Errorf("network name must be 1-32 printable bytes")
+			return fmt.Errorf("A Wi-Fi name can be 32 characters long at most, fewer with accents or emoji.")
 		}
 		if a.Passphrase == "" && i > 0 {
-			return fmt.Errorf("%q needs a password", a.SSID)
+			return fmt.Errorf("“%s” needs a password.", a.SSID)
 		}
 		if a.Passphrase != "" {
 			if len(a.Passphrase) < 8 || len(a.Passphrase) > 63 || !asciiPrintable(a.Passphrase) {
-				return fmt.Errorf("Wi-Fi password must be 8-63 ASCII characters")
+				return fmt.Errorf("A Wi-Fi password needs 8 to 63 characters, without accents or emoji.")
 			}
 		}
 		switch a.Security {
@@ -479,7 +479,7 @@ func (c *Config) validateWifi() error {
 			return fmt.Errorf("%q belongs to a network that does not exist", a.SSID)
 		}
 		if a.SSID != "" && names[a.SSID] {
-			return fmt.Errorf("two Wi-Fi networks are both named %q", a.SSID)
+			return fmt.Errorf("Two of your Wi-Fi networks are named “%s”.", a.SSID)
 		}
 		names[a.SSID] = true
 	}
@@ -501,7 +501,7 @@ func validMACPolicy(p MACPolicy, what string) error {
 	case MACRandom, MACCustom:
 		hw, err := net.ParseMAC(p.Address)
 		if err != nil || len(hw) != 6 || hw[0]&1 != 0 || hw.String() == "00:00:00:00:00:00" {
-			return fmt.Errorf("%s: invalid MAC address", what)
+			return fmt.Errorf("%s: that is not a hardware address.", what)
 		}
 	default:
 		return fmt.Errorf("%s: invalid mode %q", what, p.Mode)
@@ -576,7 +576,7 @@ func (f IPFamily) validate(what string, v6, dnsOptional bool) error {
 	}
 	a := p.Addr()
 	if a.IsUnspecified() || a.IsLoopback() || a.IsMulticast() || a.IsLinkLocalUnicast() {
-		return fmt.Errorf("%s: %s is not an address an uplink can have", what, a)
+		return fmt.Errorf("%s: %s cannot be the router's address on that network", what, a)
 	}
 	if v6 {
 		if p.Bits() < 16 || p.Bits() > 128 {
@@ -590,7 +590,7 @@ func (f IPFamily) validate(what string, v6, dnsOptional bool) error {
 			// Not the network's own address, nor its broadcast address.
 			host := binary.BigEndian.Uint32(a.AsSlice()) & (1<<(32-p.Bits()) - 1)
 			if host == 0 || host == 1<<(32-p.Bits())-1 {
-				return fmt.Errorf("%s: %s is the network or broadcast address of %s", what, a, p.Masked())
+				return fmt.Errorf("%s: %s is the first or last address of %s, which no device can have", what, a, p.Masked())
 			}
 		}
 	}
@@ -599,12 +599,12 @@ func (f IPFamily) validate(what string, v6, dnsOptional bool) error {
 		return fmt.Errorf("%s: %s needs a gateway address", what, name)
 	}
 	if gw == a {
-		return fmt.Errorf("%s: the %s gateway cannot be the uplink's own address", what, name)
+		return fmt.Errorf("%s: the %s gateway cannot be the router's own address", what, name)
 	}
 	// The gateway has to be a neighbour: inside the uplink's own network
 	// or, for IPv6, a link-local address.
 	if !p.Masked().Contains(gw) && !(v6 && gw.IsLinkLocalUnicast()) {
-		return fmt.Errorf("%s: the gateway %s is not in %s", what, gw, p.Masked())
+		return fmt.Errorf("%s: the gateway %s is outside %s", what, gw, p.Masked())
 	}
 	if len(f.DNS) > 3 {
 		return fmt.Errorf("%s: at most 3 %s DNS servers", what, name)
@@ -616,7 +616,7 @@ func (f IPFamily) validate(what string, v6, dnsOptional bool) error {
 		}
 	}
 	if len(f.DNS) == 0 && !dnsOptional {
-		return fmt.Errorf("%s: a static IPv4 setup needs a DNS server (or set servers under DNS)", what)
+		return fmt.Errorf("%s: a fixed IPv4 address needs a DNS server, here or under Settings, DNS", what)
 	}
 	return nil
 }
@@ -624,19 +624,19 @@ func (f IPFamily) validate(what string, v6, dnsOptional bool) error {
 func (c *Config) validateWAN() error {
 	w := c.WAN
 	if len(w.Networks) > 64 {
-		return fmt.Errorf("too many saved networks")
+		return fmt.Errorf("That is more saved networks than the router keeps.")
 	}
 	seen := map[string]bool{}
 	for _, n := range w.Networks {
 		if n.SSID == "" || len(n.SSID) > 32 {
-			return fmt.Errorf("saved network: name must be 1-32 bytes")
+			return fmt.Errorf("A Wi-Fi name can be 32 characters long at most, fewer with accents or emoji.")
 		}
 		if seen[n.SSID] {
-			return fmt.Errorf("saved network %q listed twice", n.SSID)
+			return fmt.Errorf("“%s” is already saved.", n.SSID)
 		}
 		seen[n.SSID] = true
 		if n.PSK != "" && (len(n.PSK) < 8 || len(n.PSK) > 63 || !asciiPrintable(n.PSK)) {
-			return fmt.Errorf("saved network %q: password must be 8-63 ASCII characters", n.SSID)
+			return fmt.Errorf("The password for “%s” needs 8 to 63 characters.", n.SSID)
 		}
 		if n.Priority < 0 || n.Priority > 1000 {
 			return fmt.Errorf("saved network %q: invalid priority", n.SSID)
@@ -672,16 +672,16 @@ func (c *Config) validateWAN() error {
 func (c *Config) validateLAN() error {
 	l := c.LAN
 	if l.LeaseMinutes < 2 || l.LeaseMinutes > 7*24*60 {
-		return fmt.Errorf("lan.lease_minutes out of range")
+		return fmt.Errorf("Addresses can be kept for between 2 minutes and 7 days.")
 	}
 	if !validDomain(l.Domain) {
-		return fmt.Errorf("lan.domain is not a valid domain")
+		return fmt.Errorf("The local domain is not a valid domain name.")
 	}
 	if len(c.Networks) == 0 || c.Networks[0].ID != MainNetwork {
 		return fmt.Errorf("the main network is missing")
 	}
 	if len(c.Networks) > MaxNetworks {
-		return fmt.Errorf("at most %d networks", MaxNetworks)
+		return fmt.Errorf("The router has room for %d networks.", MaxNetworks)
 	}
 	ids := map[string]bool{}
 	var v4, v6 []netip.Prefix
@@ -694,7 +694,7 @@ func (c *Config) validateLAN() error {
 		}
 		ids[n.ID] = true
 		if n.Name == "" || len(n.Name) > 20 || !printable(n.Name) {
-			return fmt.Errorf("a network's name must be 1-20 characters")
+			return fmt.Errorf("A network's name needs 1 to 20 characters.")
 		}
 		p, err := netip.ParsePrefix(n.Address)
 		if err != nil || !p.Addr().Is4() {
@@ -704,7 +704,7 @@ func (c *Config) validateLAN() error {
 			return fmt.Errorf("%s: the prefix must be between /16 and /28", n.Name)
 		}
 		if !p.Addr().IsPrivate() {
-			return fmt.Errorf("%s: the address must be a private address", n.Name)
+			return fmt.Errorf("%s: the address must be a private one (10.x.x.x, 172.16 to 172.31.x.x or 192.168.x.x)", n.Name)
 		}
 		if p.Addr() == p.Masked().Addr() || p.Addr() == broadcast(p) {
 			return fmt.Errorf("%s: the address must be a host address, not the first or last of its range", n.Name)
@@ -752,7 +752,7 @@ func (c *Config) Consistent() error {
 		}
 	}
 	if uplinks > 1 {
-		return fmt.Errorf("Only one radio can connect to an upstream Wi-Fi network. Use the other for your own network, or turn it off.")
+		return fmt.Errorf("Only one radio can join another Wi-Fi network. Use the other for your Wi-Fi, or turn it off.")
 	}
 	if !c.Ready() {
 		return nil
@@ -771,10 +771,10 @@ func (c *Config) Consistent() error {
 	}
 	if wired == 0 && len(c.Radios) > 0 {
 		if broadcasting == 0 {
-			return fmt.Errorf("No radio would be left for your own Wi-Fi. Keep one for it, or let the uplink radio do both.")
+			return fmt.Errorf("No radio would be left to broadcast your Wi-Fi. Keep one for it, or let the radio that joins do both.")
 		}
 		if enabled == 0 {
-			return fmt.Errorf("Every Wi-Fi network is switched off, and there is no wired port to reach the router by.")
+			return fmt.Errorf("Every Wi-Fi network is switched off and no wired port is set up for your devices. Nothing could connect to the router.")
 		}
 	}
 	return nil
@@ -842,7 +842,7 @@ func parseAddrPort(s string, defPort int) (netip.AddrPort, error) {
 
 func (c *Config) validateDNS() error {
 	if len(c.DNS.Upstreams) > 8 {
-		return fmt.Errorf("too many DNS upstreams")
+		return fmt.Errorf("The router takes 8 DNS servers at most.")
 	}
 	for _, u := range c.DNS.Upstreams {
 		if _, err := ParseUpstream(u); err != nil {
@@ -850,37 +850,37 @@ func (c *Config) validateDNS() error {
 		}
 	}
 	if len(c.DNS.Blocked) > 5000 {
-		return fmt.Errorf("too many blocked domains")
+		return fmt.Errorf("That is more blocked domains than the router keeps.")
 	}
 	for _, d := range c.DNS.Blocked {
 		if !validDomain(d) {
-			return fmt.Errorf("blocked domain %q is not valid", d)
+			return fmt.Errorf("“%s” is not a domain name.", d)
 		}
 	}
 	ab := c.DNS.Adblock
 	if ab.Enabled && len(ab.Lists) == 0 {
-		return fmt.Errorf("ad blocking needs at least one block list")
+		return fmt.Errorf("Ad blocking needs at least one list.")
 	}
 	if len(ab.Lists) > 16 {
-		return fmt.Errorf("at most 16 block lists")
+		return fmt.Errorf("The router takes 16 lists at most.")
 	}
 	seen := map[string]bool{}
 	for _, raw := range ab.Lists {
 		u, err := url.Parse(raw)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || len(raw) > 512 || !printable(raw) {
-			return fmt.Errorf("block list %q is not an http:// or https:// URL", raw)
+			return fmt.Errorf("“%s” is not a web address starting with http:// or https://.", raw)
 		}
 		if seen[raw] {
-			return fmt.Errorf("block list %q is listed twice", raw)
+			return fmt.Errorf("“%s” is already on the list.", raw)
 		}
 		seen[raw] = true
 	}
 	if len(ab.Allow) > 1000 {
-		return fmt.Errorf("too many allowed domains")
+		return fmt.Errorf("That is more allowed domains than the router keeps.")
 	}
 	for _, d := range ab.Allow {
 		if !validDomain(d) {
-			return fmt.Errorf("allowed domain %q is not valid", d)
+			return fmt.Errorf("“%s” is not a domain name.", d)
 		}
 	}
 	return nil
@@ -936,7 +936,7 @@ func (m MPQUIC) validate(name string) error {
 
 func (c *Config) validateVPNs() error {
 	if len(c.VPNs) > 8 {
-		return fmt.Errorf("at most 8 VPN profiles")
+		return fmt.Errorf("The router has room for 8 VPNs.")
 	}
 	seen := map[string]bool{}
 	for _, v := range c.VPNs {
@@ -948,7 +948,7 @@ func (c *Config) validateVPNs() error {
 		}
 		seen[v.ID] = true
 		if v.Name == "" || len(v.Name) > 40 || !printable(v.Name) {
-			return fmt.Errorf("VPN name must be 1-40 characters")
+			return fmt.Errorf("A VPN's name needs 1 to 40 characters.")
 		}
 		if v.Type == VPNMPQUIC {
 			if err := v.MPQUIC.validate(v.Name); err != nil {
@@ -1075,7 +1075,7 @@ func (c *Config) validateDevices() error {
 		}
 		seen[d.MAC] = true
 		if len(d.Name) > 40 || !printable(d.Name) {
-			return fmt.Errorf("device name too long")
+			return fmt.Errorf("A device's name can be 40 characters long at most.")
 		}
 		if err := c.validAction(d.Route, true); err != nil {
 			return fmt.Errorf("device %s: %w", d.MAC, err)
@@ -1087,16 +1087,16 @@ func (c *Config) validateDevices() error {
 				home = c.NetworkOf(a)
 			}
 			if home == nil {
-				return fmt.Errorf("device %s: the reserved address %s is not inside any of the router's networks", d.MAC, d.IP)
+				return fmt.Errorf("The fixed address %s is not inside any of your networks.", d.IP)
 			}
 			if router, _ := home.Prefix(); a == router {
-				return fmt.Errorf("device %s: %s is the router's own address", d.MAC, d.IP)
+				return fmt.Errorf("%s is the router's own address.", d.IP)
 			}
 			if _, p := home.Prefix(); a == p.Addr() || a == broadcast(p) {
-				return fmt.Errorf("device %s: %s is the first or last address of its range, which no device can have", d.MAC, d.IP)
+				return fmt.Errorf("%s is the first or last address of its range, which no device can have.", d.IP)
 			}
 			if ips[d.IP] {
-				return fmt.Errorf("address %s reserved twice", d.IP)
+				return fmt.Errorf("Two devices have the fixed address %s.", d.IP)
 			}
 			ips[d.IP] = true
 		}
@@ -1128,7 +1128,7 @@ func (c *Config) validatePolicy() error {
 		return fmt.Errorf("policy.default: %w", err)
 	}
 	if len(c.Policy.Rules) > 100 {
-		return fmt.Errorf("at most 100 rules")
+		return fmt.Errorf("The router has room for 100 rules.")
 	}
 	seen := map[string]bool{}
 	for _, r := range c.Policy.Rules {
@@ -1140,14 +1140,14 @@ func (c *Config) validatePolicy() error {
 		}
 		seen[r.ID] = true
 		if len(r.Name) > 40 || !printable(r.Name) {
-			return fmt.Errorf("rule name too long")
+			return fmt.Errorf("A rule's name can be 40 characters long at most.")
 		}
 		if err := c.validAction(r.Action, false); err != nil {
 			return fmt.Errorf("rule %q: %w", r.Name, err)
 		}
 		for _, id := range r.Src.Networks {
 			if c.Network(id) == nil {
-				return fmt.Errorf("rule %q applies to a network that no longer exists", r.Name)
+				return fmt.Errorf("The rule “%s” applies to a network that no longer exists.", r.Name)
 			}
 		}
 		if len(r.Src.Networks) > MaxNetworks || len(r.Src.Devices) > 64 || len(r.Src.CIDRs) > 64 || len(r.Dst.Domains) > 256 || len(r.Dst.CIDRs) > 256 || len(r.Dst.Ports) > 32 || len(r.Dst.Countries) > 64 {

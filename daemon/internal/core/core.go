@@ -455,7 +455,7 @@ func (c *Core) pairingOpen() bool {
 
 func (c *Core) openPairing(d time.Duration) {
 	c.pairingUntil = time.Now().Add(d)
-	c.addEvent("pairing", "Pairing window opened", "")
+	c.addEvent("pairing", "Ready to pair a new phone for the next two minutes", "")
 	c.updateLED()
 }
 
@@ -507,7 +507,7 @@ func (c *Core) reconcile() {
 		if cfg.Radio(r.ID) == nil {
 			cfg.Radios = append(cfg.Radios, config.Radio{ID: r.ID, Role: config.RoleOff})
 			changedCfg = true
-			c.addEvent("radio", "New Wi-Fi adapter detected: "+r.Product, "")
+			c.addEvent("radio", "Wi-Fi adapter plugged in: "+r.Product, "")
 		}
 	}
 	c.ports = wiredPorts()
@@ -859,7 +859,7 @@ func (c *Core) reconcile() {
 			if !ok {
 				continue
 			}
-			c.addEvent("lan", fmt.Sprintf("%s moved to %s: %s is in use upstream", n.Name, next.Masked(), cur.Masked()), "")
+			c.addEvent("lan", fmt.Sprintf("%s now uses the addresses %s. The network the router joined uses %s as well.", n.Name, next.Masked(), cur.Masked()), "")
 			n.Address = next.String()
 			for d := range cfg.Devices {
 				if a, err := netip.ParseAddr(cfg.Devices[d].IP); err == nil && cur.Masked().Contains(a) {
@@ -899,11 +899,11 @@ func (c *Core) reconcile() {
 			}
 		}
 		if !c.wasCaptive {
-			c.addEvent("portal", "Captive portal detected on the upstream network", c.portalDev)
+			c.addEvent("portal", "The network the router joined asks for a sign-in before it lets anything online", c.portalDev)
 		}
 	} else {
 		if c.wasCaptive && active != nil && active.Internet == wan.StOnline {
-			c.addEvent("portal", "Captive portal cleared; internet is reachable", "")
+			c.addEvent("portal", "Signed in. The router is online.", "")
 		}
 		c.portalDev, c.portalManual = "", false
 	}
@@ -1397,13 +1397,13 @@ func planRadios(cfg *config.Config, radios []wifi.Radio) radioPlan {
 		if role == config.RoleAPWAN && !hw.APSTA {
 			// Not possible on this radio; the uplink matters more.
 			role = config.RoleWAN
-			p.notes = append(p.notes, radioName(hw)+" cannot broadcast your network and join another at the same time. It will only join.")
+			p.notes = append(p.notes, radioName(hw)+" cannot broadcast your Wi-Fi and join another network at the same time. It will only join.")
 		}
 		if (role == config.RoleWAN || role == config.RoleAPWAN) && !hw.STA {
 			role = config.RoleOff
 		}
 		if (role == config.RoleAP || role == config.RoleAPWAN) && !hw.AP {
-			p.notes = append(p.notes, radioName(hw)+" cannot broadcast a network.")
+			p.notes = append(p.notes, radioName(hw)+" cannot broadcast Wi-Fi. It can only join a network.")
 			role = map[string]string{config.RoleAP: config.RoleOff, config.RoleAPWAN: config.RoleWAN}[role]
 		}
 		p.role[rc.ID] = role
@@ -1431,9 +1431,9 @@ func planRadios(cfg *config.Config, radios []wifi.Radio) radioPlan {
 			most = max(most, c)
 		}
 		if most <= 1 {
-			p.notes = append(p.notes, fmt.Sprintf("“%s” will not be on air: this radio broadcasts one network at a time. A USB Wi-Fi adapter that can carry several, or a second radio for it, would.", w.SSID))
+			p.notes = append(p.notes, fmt.Sprintf("“%s” will not be broadcast: this radio can broadcast one Wi-Fi network at a time. A second radio, or a USB Wi-Fi adapter that can broadcast several, would carry it.", w.SSID))
 		} else {
-			p.notes = append(p.notes, fmt.Sprintf("“%s” will not be on air: the radios cannot carry that many networks.", w.SSID))
+			p.notes = append(p.notes, fmt.Sprintf("“%s” will not be broadcast: the radios cannot broadcast this many Wi-Fi networks at once.", w.SSID))
 		}
 	}
 	return p

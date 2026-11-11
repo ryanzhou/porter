@@ -29,6 +29,8 @@ struct AdblockPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var customURL: String = ""
     @State private var checking = false
+    /// Set by a tap on the only list left, which cannot be turned off.
+    @State private var triedLastList = false
 
     private var enabled: Bool { model.config?.dns.adblock.enabled ?? false }
     private var lists: [String] { model.config?.dns.adblock.lists ?? [] }
@@ -58,6 +60,8 @@ struct AdblockPage: View {
                         Text("Block ads and trackers")
                     }
                 }
+            } footer: {
+                Text("This applies to every device on your networks. Ads that come from the same place as the content, as on YouTube, still get through.")
             }
             if enabled {
                 statusSection
@@ -69,7 +73,7 @@ struct AdblockPage: View {
                 items: allowBinding,
                 placeholder: "example.com",
                 keyboard: .URL,
-                footer: ""
+                footer: "Add a domain here if a site stops working with ad blocking on. Its subdomains are allowed too."
             )
         }
         .navigationTitle("Ad blocking")
@@ -79,8 +83,8 @@ struct AdblockPage: View {
     private var statusSection: some View {
         Section {
             HStack(spacing: 0) {
-                CountFigure(value: status?.blocked ?? 0, caption: "blocked")
-                CountFigure(value: UInt64(status?.domains ?? 0), caption: "on the lists")
+                CountFigure(value: status?.blocked ?? 0, caption: "lookups blocked")
+                CountFigure(value: UInt64(status?.domains ?? 0), caption: "domains on the lists")
             }
             .padding(.vertical, 4)
             ForEach(status?.lists ?? []) { list in
@@ -90,12 +94,14 @@ struct AdblockPage: View {
                 checkNow()
             } label: {
                 HStack {
-                    Label("Update", systemImage: "arrow.clockwise")
+                    Label("Update the lists now", systemImage: "arrow.clockwise")
                     Spacer()
                     if checking { ProgressView() }
                 }
             }
             .disabled(checking)
+        } footer: {
+            Text("The router updates the lists by itself once a day.")
         }
     }
 
@@ -126,7 +132,7 @@ struct AdblockPage: View {
         } header: {
             Text("Lists")
         } footer: {
-            Text("One is usually enough.")
+            Text(listsNote)
         }
     }
 
@@ -165,6 +171,15 @@ struct AdblockPage: View {
         enabled && lists == [url]
     }
 
+    /// Under the lists: how many are worth having, or, after a tap on
+    /// the only one left, why that one stays.
+    private var listsNote: String {
+        if triedLastList && enabled && lists.count == 1 {
+            return "Ad blocking needs at least one list, so the last one stays on."
+        }
+        return "One list is usually enough. Each one added makes it more likely that a site stops working."
+    }
+
     private var allowBinding: Binding<[String]> {
         Binding(
             get: { model.config?.dns.adblock.allow ?? [] },
@@ -176,7 +191,11 @@ struct AdblockPage: View {
 
     private func toggle(_ url: String) {
         // The last list cannot be removed while blocking is on.
-        guard !isLastList(url) else { return }
+        guard !isLastList(url) else {
+            triedLastList = true
+            return
+        }
+        triedLastList = false
         Task {
             await model.update { cfg in
                 if let index = cfg.dns.adblock.lists.firstIndex(of: url) {
@@ -209,9 +228,9 @@ private struct BlockListStatusRow: View {
 
     private var detail: String {
         if let updated = list.updated {
-            return "\(list.domains.formatted()) · \(relativeTime(updated))"
+            return "\(list.domains.formatted()) domains · updated \(relativeTimeInline(updated))"
         }
-        return "Waiting"
+        return "Not downloaded yet"
     }
 
     var body: some View {

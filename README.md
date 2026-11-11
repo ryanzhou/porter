@@ -31,7 +31,7 @@ and can send some or all of your traffic through your VPN.
 - **See and manage what is connected.** Per-device traffic, live
   connections, pause a device, block ads for the whole network, run a
   speed test.
-- **IPv6** works too, wherever the upstream network offers it.
+- **IPv6** works too, wherever the network the router joins offers it.
 
 ## What you need
 
@@ -39,7 +39,7 @@ and can send some or all of your traffic through your VPN.
 - A **microSD card**, 8 GB or larger
 - An **iPhone** on iOS 17 or later
 - A **Mac with Xcode 16** or later, to put the app on your phone
-- Optional: an Ethernet cable for a wired uplink, a USB Wi-Fi adapter
+- Optional: an Ethernet cable to get online by wire, a USB Wi-Fi adapter
   for a second radio, your phone's USB cable to share its data, a
   micro-HDMI cable and keyboard for troubleshooting
 
@@ -93,8 +93,8 @@ app then shows sample data and needs neither a router nor an Apple ID.
 4. Join that Wi-Fi network from your devices. The QR button on
    **Overview** shows a code they can scan instead of typing.
 
-Out of the box the built-in radio is your Wi-Fi network and the Ethernet
-port is the uplink. If you have a cable, plug it in and you are online.
+Out of the box the built-in radio broadcasts your Wi-Fi and the Ethernet
+port is how the router gets online. If you have a cable, plug it in and you are online.
 If not, read on.
 
 ## Getting online
@@ -105,32 +105,34 @@ in the order the router tries them.
 | You have | Do this |
 |---|---|
 | A wired port | Plug in Ethernet. Nothing else to do. |
-| Wi-Fi only | Tap **Join a Wi-Fi network** and pick the network. With the Pi alone, the built-in radio does both jobs and your own network moves to the same channel. With a USB Wi-Fi adapter plugged in, the adapter joins and the built-in radio stays your network, which is faster and steadier. |
+| Wi-Fi only | Tap **Join a Wi-Fi network** and pick the network. With the Pi alone, the built-in radio does both jobs, and your devices drop off for a moment whenever it joins a different network. With a USB Wi-Fi adapter plugged in, the adapter joins and the built-in radio keeps broadcasting your Wi-Fi, which is faster and steadier. |
 | Your phone's data | Plug the phone into one of the Pi's USB ports and turn on Personal Hotspot (iPhone) or USB tethering (Android). An iPhone asks once whether to trust the router: tap **Trust**. Or join the phone's hotspot as a Wi-Fi network. |
 
 Networks you have joined are remembered and rejoined automatically. If
 the venue's network uses the same address range as one of yours, the
 router moves yours out of the way by itself.
 
-**Order.** The router uses the first way out in the list that works, and
-moves on to the next when one stops reaching the internet (a sign-in
+**Order.** The router gets online through the first internet source in
+the list that works, and moves to the next when one stops reaching the
+internet (a sign-in
 page does not count as not working: it waits for you). Tap **Edit** and
 drag to change the order, for instance to put your phone last so that
 its data is only used when nothing else works.
 
-**Wi-Fi uplink** has the rest: which radio joins when there are two, the
-address the router shows upstream, and **Stop using Wi-Fi**.
+**Wi-Fi source** has the rest: which radio joins when there are two, the
+hardware address the router shows to the network it joins, and **Stop
+using Wi-Fi**.
 
 Addresses come from the network by default. Where a network wants a
 fixed address instead, set it by hand: for a wired port by tapping
 **Ethernet** in the list, for a Wi-Fi network by tapping it under
-**Saved**. IPv4 and IPv6 are set separately, each with address, gateway
+**Saved Wi-Fi networks**. IPv4 and IPv6 are set separately, each with address, gateway
 and DNS servers.
 
 Where a network is on both bands the router joins it on 5 GHz, unless
-that signal is poor; the band shows next to the uplink. With one radio
-doing both jobs, your own network follows the uplink onto its channel,
-and 5 GHz is only used on channels where an access point is allowed
+that signal is poor; the band shows next to the network. With one radio
+doing both jobs, your Wi-Fi uses the same channel as the network it
+joins, and 5 GHz is only used on channels where an access point is allowed
 (venues often use the radar channels, which are not). A second adapter
 has no such limit.
 
@@ -142,7 +144,7 @@ signing in, for everyone:
 
 - On the device named there, connected to *your* Wi-Fi, tap **Open
   sign-in page** (or just open any website). Complete the page.
-- If nothing appears, tap **Reconnect**: that device rejoins your
+- If nothing appears, tap **Reconnect device**: that device rejoins your
   Wi-Fi and its own sign-in sheet pops up.
 - To use a different device, pick it from the menu on the same card.
 
@@ -161,7 +163,8 @@ what the changes will do (devices having to reconnect, for instance), or
 why they cannot be applied; **Discard** puts everything back.
 
 - **A guest network.** Tap **Add Wi-Fi network**, give it a name and a
-  password, and leave it on **A new one**, **Keep apart**. Guests get
+  password, and leave it on **A new network**, **Keep apart from your other
+  networks**. Guests get
   online, on addresses of their own, and cannot reach your devices.
 - **A network** is a set of addresses with its own rules. A Wi-Fi name or
   a wired port belongs to one; a network can have a **Route** (everything
@@ -169,10 +172,10 @@ why they cannot be applied; **Discard** puts everything back.
   whole network.
 - **Radios.** Each radio either broadcasts your Wi-Fi or does not. The
   Pi's built-in radio broadcasts one Wi-Fi name at a time; a second name
-  needs a USB Wi-Fi adapter that can carry several, or a second radio.
-  The page tells you when a name is not on the air.
-- **Wired ports** can each be an uplink (**Internet**), belong to one of
-  your networks, or be off.
+  needs a USB Wi-Fi adapter that can broadcast several, or a second
+  radio. The page tells you when a name is not broadcast.
+- **Wired ports** can each be an **Internet source**, be for devices on
+  one of your networks, or not be used.
 
 ## Using a VPN
 
@@ -188,13 +191,13 @@ from your VPN provider or your own server (or import the `.conf` file).
   ports), then where that traffic goes: a VPN, **Direct**, or
   **Blocked**.
 
-Rules are numbered in the order they are checked and the first match
-wins; then the device's own route; then its network's; then
+Rules are tried from the top and traffic follows the first one it fits;
+after the rules comes the device's own route, then its network's, then
 **Everything else**. Tap **Edit**
 to reorder, swipe a rule right to turn it off.
 
-**Kill switch** (per VPN, on by default): if the tunnel is down, traffic
-meant for it is stopped rather than sent out unprotected.
+**Kill switch** (per VPN, on by default): while the VPN is disconnected,
+devices that use it are offline rather than online without it.
 
 **MPQUIC.** Instead of WireGuard, a profile can be a tunnel to your own
 [mpquic](https://github.com/ryanzhou/mpquic) server, which spreads
@@ -208,7 +211,7 @@ VPN's DNS server. If the profile names none, the DNS servers you set
 under Settings are asked through the tunnel, or public ones (1.1.1.1,
 9.9.9.9) if you set none; the network you are connected to is not asked
 (unless the tunnel only carries a few networks rather than everything).
-While a tunnel is down, lookups go where the traffic goes: nowhere with
+While a VPN is disconnected, lookups go where the traffic goes: nowhere with
 the kill switch on, directly without it.
 
 ## Everyday things
@@ -226,7 +229,7 @@ the kill switch on, directly without it.
   internet, not the Wi-Fi between you and the router.)
 - **Another phone.** Briefly press the Pi's power button; the light
   blinks fast for two minutes while a new phone can pair. Or use
-  Settings → Phones. Remove a phone there too.
+  Settings → Paired phones. Remove a phone there too.
 - **Turning it off.** Hold the power button for a second and release, or
   use Settings → Power off. Simply pulling the plug is safe as well: the
   system is read-only and cannot be corrupted that way.
@@ -261,10 +264,10 @@ days. Connect the phone to your Mac and press Run in Xcode.
 **No Wi-Fi network appears after setup.** Open **Overview** and look at
 the Wi-Fi card for an error, and check the country is right.
 
-**A second Wi-Fi name says "Off air".** The radio broadcasting your
-network carries one name at a time (the Pi's built-in radio does). It
-goes on the air once a radio that can carry it broadcasts: see **Your
-networks**.
+**A second Wi-Fi name says "Not broadcast".** The radio broadcasting
+your Wi-Fi can broadcast one name at a time (the Pi's built-in radio
+is like that). The second name appears once there is a radio that can
+broadcast it: see **Your networks**.
 
 **The phone on USB stays "Turn on the phone's hotspot".** Check that
 Personal Hotspot (or USB tethering) is on, and on an iPhone that you
@@ -356,8 +359,8 @@ settings and pairings. Re-flashing the card does the same.
   newer mpquic without waiting for a new image, enable SSH and copy the
   `mpquic-linux-arm64` binary to `/data/porter/bin/mpquic` on the router.
 - **Not included:** OpenVPN, a VPN server, enterprise (username and
-  password) Wi-Fi as the uplink, intrusion detection, load balancing
-  across several uplinks.
+  password) Wi-Fi as an internet source, intrusion detection, load
+  balancing across several internet sources.
 
 ## For developers
 

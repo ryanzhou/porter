@@ -12,7 +12,7 @@ struct ConnectView: View {
                 case .connecting(let name):
                     WaitingCard(symbol: "wifi.router.fill", title: name, detail: "Connecting")
                 case .awaitingPairing(let name):
-                    WaitingCard(symbol: "power", title: "Press the power button", detail: name + " belongs to another phone. A short press lets this one in.")
+                    WaitingCard(symbol: "power", title: "Press the power button", detail: name + " is already paired with another phone. Press its power button briefly to let this phone pair as well.")
                 default:
                     searching
                 }
@@ -44,7 +44,7 @@ struct ConnectView: View {
             .buttonStyle(.plain)
         }
         if !forgettable.isEmpty {
-            Heading(text: "Paired")
+            Heading(text: "Paired routers")
             Card(padding: 0) {
                 VStack(spacing: 0) {
                     ForEach(forgettable) { router in
@@ -72,12 +72,14 @@ private struct SearchingCard: View {
                 .symbolEffect(.variableColor.iterative, options: .repeating)
             Text("Looking for a router")
                 .font(.headline)
-            Text("Stay within a few metres.")
+            Text("Stay within a few metres. A router takes about a minute to appear after it is plugged in.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 72)
+        .padding(.horizontal, 24)
     }
 }
 
@@ -92,7 +94,7 @@ private struct RouterCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(router.name)
                         .font(.headline)
-                    Text(paired ? "Paired" : "New")
+                    Text(paired ? "Paired" : "New to this phone")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
