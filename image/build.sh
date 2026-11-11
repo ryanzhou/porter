@@ -189,8 +189,7 @@ $SYSTEMCTL enable porterd.service porter-update-guard.service bluetooth.service 
 # as a module or built in. An image without one would ship a feature that
 # cannot work, so that is a failed build.
 for mod in ipheth rndis_host cdc_ncm; do
-    cat "$ROOT"/lib/modules/*/modules.dep "$ROOT"/lib/modules/*/modules.builtin 2>/dev/null \
-        | grep -Eq "(^|/)$mod\.ko" \
+    grep -Eqs "(^|/)$mod\.ko" "$ROOT"/lib/modules/*/modules.dep "$ROOT"/lib/modules/*/modules.builtin \
         || { echo "the kernel in this image has no $mod driver; phones that need it could not share their connection over USB" >&2; exit 1; }
 done
 echo "==> kernel has the drivers for phones on USB"
