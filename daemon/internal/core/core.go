@@ -1189,25 +1189,46 @@ func wiredPorts() []wiredPort {
 		if b, err := os.ReadFile(filepath.Join(base, "device", "..", "product")); err == nil {
 			p.Label = strings.TrimSpace(string(b))
 		}
-		switch {
-		case driver == "ipheth":
-			// An iPhone with Personal Hotspot.
-			p.Phone = true
-			if p.Label == "" {
+		p.Phone = isPhone(name, driver, readTrim(filepath.Join(base, "address")))
+		if p.Phone && p.Label == "" {
+			p.Label = "Phone"
+			if driver == "ipheth" {
 				p.Label = "iPhone"
-			}
-		case driver == "rndis_host", strings.HasPrefix(name, "usb") && driver == "":
-			// An Android phone with USB tethering. (The second form is
-			// how test rigs name a stand-in for one.)
-			p.Phone = true
-			if p.Label == "" {
-				p.Label = "Phone"
 			}
 		}
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+func readTrim(path string) string {
+	b, _ := os.ReadFile(path)
+	return strings.TrimSpace(string(b))
+}
+
+// isPhone decides whether a wired interface is a phone sharing its
+// connection over USB rather than an Ethernet port, from the driver that
+// runs it and its address.
+func isPhone(name, driver, address string) bool {
+	switch driver {
+	case "ipheth":
+		// An iPhone with Personal Hotspot.
+		return true
+	case "rndis_host":
+		// The way older Android phones tether.
+		return true
+	case "cdc_ncm", "cdc_ether", "cdc_eem":
+		// Newer Android phones, and also many real Ethernet adapters.
+		// A phone makes its address up (the "locally administered" bit
+		// is set); an adapter has one from its manufacturer.
+		hw, err := net.ParseMAC(address)
+		return err == nil && len(hw) == 6 && hw[0]&0x02 != 0
+	case "":
+		// How test rigs name a stand-in for a phone.
+		return strings.HasPrefix(name, "usb")
+	}
+	return false
 }
 
 // radioPlan is what the configuration asks of the radios that are

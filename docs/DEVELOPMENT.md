@@ -305,8 +305,16 @@ project file.
 **Demo mode.** Launching with `-demo` runs the app against the built-in
 sample router and never touches Bluetooth. `-demoScreen <name>` opens one
 screen directly: a tab name (`overview`, `internet`, `devices`, `vpn`,
-`settings`) or `traffic`, `flows`, `speedtest`, `device`, `adblock`. The
-*iOS* workflow uses this to publish screenshots as an artifact.
+`settings`) or `traffic`, `flows`, `speedtest`, `device`, `adblock`,
+`networks`, `software`, `setup`, `connect`, `share`. The *iOS* workflow
+uses this to publish screenshots as an artifact.
+
+**Two ways of changing things.** Most controls apply at once: the app
+shows the new value immediately (`AppModel.update`) and takes it back if
+the router refuses. The settings that depend on each other (Wi-Fi names,
+networks, what radios and ports are for) are edited as a draft instead
+(`NetworkSetupPage`): the router is asked what the draft would do
+(`config.check`) as it changes, and Apply sends it as one `config.set`.
 
 ## Continuous integration
 

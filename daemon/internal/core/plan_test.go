@@ -79,3 +79,23 @@ func TestPlanRadios(t *testing.T) {
 		t.Errorf("a network switched off: %+v", p)
 	}
 }
+
+func TestIsPhone(t *testing.T) {
+	for _, tc := range []struct {
+		name, driver, address string
+		want                  bool
+	}{
+		{"enx3a1f0c2299d4", "ipheth", "3a:1f:0c:22:99:d4", true},
+		{"usb0", "rndis_host", "ee:01:02:03:04:05", true},
+		{"enxa2b3c4d5e6f7", "cdc_ncm", "a2:b3:c4:d5:e6:f7", true},  // a phone's made-up address
+		{"enx00e04c680001", "cdc_ncm", "00:e0:4c:68:00:01", false}, // an Ethernet adapter
+		{"enx00e04c680002", "r8152", "00:e0:4c:68:00:02", false},
+		{"end0", "macb", "2c:cf:67:1a:44:90", false},
+		{"usb0", "", "02:00:00:00:00:01", true}, // test rig
+		{"eth1", "", "02:00:00:00:00:02", false},
+	} {
+		if got := isPhone(tc.name, tc.driver, tc.address); got != tc.want {
+			t.Errorf("isPhone(%s, %s, %s) = %v", tc.name, tc.driver, tc.address, got)
+		}
+	}
+}
