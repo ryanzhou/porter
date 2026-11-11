@@ -43,7 +43,14 @@ mkdir -p "$WORK/bin"
   go test -c -tags e2e -o "$WORK/bin/e2e.test" ./e2e/ )
 
 # The mpquic the image ships, for this machine's architecture.
-"$REPO/image/build-mpquic.sh" "$(cd "$REPO/daemon" && go env GOARCH)" "$WORK/bin/mpquic" >/dev/null
+. "$REPO/image/mpquic.pin"
+ARCH=$(cd "$REPO/daemon" && go env GOARCH)
+eval "MPQUIC_SHA256=\${MPQUIC_SHA256_$ARCH:-}"
+if [ -n "$MPQUIC_SHA256" ]; then
+    curl -fsSL -o "$WORK/bin/mpquic" "https://github.com/ryanzhou/mpquic/releases/download/$MPQUIC_VERSION/mpquic-linux-$ARCH"
+    echo "$MPQUIC_SHA256  $WORK/bin/mpquic" | sha256sum -c --quiet - || { echo "mpquic $MPQUIC_VERSION does not have the hash in image/mpquic.pin" >&2; exit 1; }
+    chmod 755 "$WORK/bin/mpquic"
+fi
 
 echo "==> root file system from image/packages"
 # Ubuntu's copy of the Debian keyring is often too old for the current

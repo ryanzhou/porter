@@ -96,8 +96,8 @@ every subsystem against it and against what the network is doing.
   encrypted a second time inside the router. The interface outlives the
   program: while no mpquic is attached, what is routed to it is dropped,
   not sent another way. The tunnel counts as up only while mpquic reports
-  at least one working path. The version is pinned by commit in
-  `image/mpquic.pin` and built from source (`image/build-mpquic.sh`); a
+  at least one working path. The release is pinned, with its hash,
+  in `image/mpquic.pin` (v0.6.0 or newer: older ones have no TUN mode); a
   copy at `/data/porter/bin/mpquic` takes precedence on a router.
 - **Uplink addresses.** dhcpcd configures an uplink (DHCP, router
   advertisements, DHCPv6) unless a family is set by hand, per wired port

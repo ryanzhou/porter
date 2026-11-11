@@ -1,12 +1,11 @@
-# The mpquic the image ships: this commit of github.com/ryanzhou/mpquic,
-# built from source by image/build-mpquic.sh. The commit id names the
-# source exactly, and Go checks the modules it depends on against the
-# go.sum that comes with it.
-#
-# It has to be a version with the TUN interface (--tun), which is newer
-# than the v0.5.0 release. Once a release carries it, this can name the
-# release's commit instead.
+# The mpquic release the image ships (github.com/ryanzhou/mpquic), and the
+# SHA-256 of its Linux binaries. To move to a newer mpquic, change the
+# version and take the two hashes from that release's SHA256SUMS file.
+# It has to be v0.6.0 or newer: the router uses mpquic's network
+# interface (--tun), which older releases do not have.
 #
 # On a running router, a copy at /data/porter/bin/mpquic is used instead
 # of the one in the image.
-MPQUIC_COMMIT=ecd3a8b4ad45b3b71020d41aad67211b57cc08af
+MPQUIC_VERSION=v0.6.0
+MPQUIC_SHA256_arm64=01e0b7a228407a58492eaea011323fa5ca1d960a41589bdc483eef2fb40b0071
+MPQUIC_SHA256_amd64=1372a49b2cf9c01241deb1a63cf2b0de1e136d312ec8bd9a2ba57ac560c8f3b0

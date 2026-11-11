@@ -354,12 +354,12 @@ settings and pairings. Re-flashing the card does the same.
   only a handful of simultaneous clients with its default firmware.
   [The developer notes](docs/DEVELOPMENT.md#built-in-radio-client-limit)
   describe the alternative firmware.
-- **MPQUIC versions.** The image carries one version of mpquic, and the
+- **MPQUIC versions.** The image carries one mpquic release, and the
   two ends of a tunnel have to speak the same protocol version. To use a
   newer mpquic without waiting for a new image, enable SSH and copy the
   `mpquic-linux-arm64` binary to `/data/porter/bin/mpquic` on the router.
-  It has to be newer than v0.5.0: the router uses mpquic's network
-  interface mode, which that release does not have.
+  It has to be v0.6.0 or newer: the router uses mpquic's network
+  interface mode, which older releases do not have.
 - **Not included:** OpenVPN, a VPN server, enterprise (username and
   password) Wi-Fi as an internet source, intrusion detection, load
   balancing across several internet sources.
