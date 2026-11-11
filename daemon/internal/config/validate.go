@@ -19,6 +19,8 @@ var (
 	reIface   = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
 	reRadio   = regexp.MustCompile(`^(builtin|[a-z0-9]{2,8}:[0-9a-f]{2}(:[0-9a-f]{2}){5})$`)
 	reLabel   = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$`)
+	// Names that belong to Wi-Fi interfaces, never to wired ports.
+	reNotWired = regexp.MustCompile(`^(wl|ap(-|[0-9x]))`)
 )
 
 // Normalize canonicalises user input (case, whitespace) so that validation
@@ -90,6 +92,15 @@ func (c *Config) Normalize() {
 		}
 		m.Up, m.Down = strings.ToLower(strings.TrimSpace(m.Up)), strings.ToLower(strings.TrimSpace(m.Down))
 	}
+	// Earlier versions could mistake a Wi-Fi interface for a wired port
+	// in the instant it was created, and remember it as one.
+	ports := c.Ethernet[:0]
+	for _, e := range c.Ethernet {
+		if !reNotWired.MatchString(e.Name) {
+			ports = append(ports, e)
+		}
+	}
+	c.Ethernet = ports
 	c.normalizeNetworks()
 	for i := range c.Ethernet {
 		c.Ethernet[i].IP.normalize()

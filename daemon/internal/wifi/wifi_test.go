@@ -155,9 +155,15 @@ func TestVifNames(t *testing.T) {
 			t.Errorf("VifName(%s, %d) = %q", tc.phy, tc.n, got)
 		}
 	}
-	for _, real := range []string{"wlan0", "wlx00c0ca123456", "end0", "apple0"} {
-		if isVif(real) && real != "apple0" {
+	for _, real := range []string{"wlan0", "wlx00c0ca123456", "end0", "eth0", "enx3a1f0c2299d4", "usb0"} {
+		if isVif(real) {
 			t.Errorf("%s taken for one of our own", real)
+		}
+	}
+	// By name alone, before the kernel has described the interface.
+	for name, want := range map[string]bool{"ap0": true, "ap1-2": true, "ap-wlan0": true, "wlan1": true, "wlx00c0ca123456": true, "end0": false, "eth1": false, "enx3a1f0c2299d4": false, "usb0": false} {
+		if got := IsWireless(name); got != want {
+			t.Errorf("IsWireless(%s) = %v", name, got)
 		}
 	}
 	// Further networks get addresses of their own, all different.
@@ -312,11 +318,11 @@ func TestChannelAwayFrom(t *testing.T) {
 	}{
 		{"no uplink: no opinion", wide, 0, 0, 0, false},
 		{"uplink on 2.4 GHz: no opinion", wide, 2437, 0, 0, false},
-		{"uplink low: go high", wide, 5200, 0, 165, true},
+		{"uplink low: go high, where 80 MHz fits", wide, 5200, 0, 149, true},
 		{"uplink high: go low", wide, 5745, 0, 36, true},
 		{"uplink on a radar channel in the middle: go low", wide, 5600, 0, 36, true},
 		{"already clear: stay", wide, 5200, 149, 149, true},
-		{"no longer clear: move", wide, 5200, 36, 165, true},
+		{"no longer clear: move", wide, 5200, 36, 149, true},
 		{"uplink gone: stay where it was", wide, 0, 149, 149, true},
 		{"nowhere far enough: share the uplink's channel", low, 5220, 0, 44, true},
 		{"nowhere far enough, uplink on a radar channel: no opinion", low, 5260, 0, 0, false},

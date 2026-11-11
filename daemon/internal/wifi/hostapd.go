@@ -42,6 +42,27 @@ var reVif = regexp.MustCompile(`^ap(-|[0-9x])`)
 // isVif reports whether an interface is one of this package's own.
 func isVif(name string) bool { return reVif.MatchString(name) }
 
+// IsWireless reports whether a network interface is a Wi-Fi one: by what
+// the kernel says of it, and by its name, which settles it for the
+// instant in which an interface exists but is not described yet. An
+// access point interface taken for a wired port in that instant would be
+// given an uplink's address handling while hostapd is starting on it.
+func IsWireless(name string) bool {
+	if isVif(name) || strings.HasPrefix(name, "wl") {
+		return true
+	}
+	base := filepath.Join("/sys/class/net", name)
+	for _, mark := range []string{"phy80211", "wireless"} {
+		if _, err := os.Stat(filepath.Join(base, mark)); err == nil {
+			return true
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(base, "uevent")); err == nil && strings.Contains(string(b), "DEVTYPE=wlan") {
+		return true
+	}
+	return false
+}
+
 // BSS is one Wi-Fi network on an access point.
 type BSS struct {
 	Iface  string
@@ -260,8 +281,8 @@ func PickChannel(b *Band, want int) (int, bool) {
 // ChannelAwayFrom chooses the 5 GHz channel for an access point whose
 // radio sits beside another radio that is connected upstream on
 // uplinkFreq. Two radios centimetres apart on neighbouring channels
-// drown each other out, so the access point goes to the other end of the
-// band; where the rules leave no channel far enough away, it shares the
+// drown each other out, so the access point goes to the other part of
+// the band; where the rules leave no channel far enough away, it shares the
 // uplink's own channel, where the two at least take turns. keep is the
 // channel chosen before (0 for none) and is kept while it is still far
 // enough, so that the access point does not move without need. The
@@ -280,14 +301,14 @@ func ChannelAwayFrom(b *Band, uplinkFreq, keep int) (int, bool) {
 	if uplinkFreq < 4900 {
 		return 0, false
 	}
-	best, bestGap := 0, 0
+	// The first far enough in the order of preference, which puts the
+	// channels that an 80 MHz network can start on ahead of the rest.
+	// (The channel furthest away is usually 165, which stands alone and
+	// is 20 MHz wide: clear of the uplink, and four times slower.)
 	for _, ch := range []int{36, 44, 149, 157, 40, 48, 153, 161, 165} {
-		if f, ok := freq[ch]; ok && abs(f-uplinkFreq) > bestGap {
-			best, bestGap = ch, abs(f-uplinkFreq)
+		if f, ok := freq[ch]; ok && abs(f-uplinkFreq) >= far {
+			return ch, true
 		}
-	}
-	if bestGap >= far {
-		return best, true
 	}
 	for ch, f := range freq {
 		if f == uplinkFreq {

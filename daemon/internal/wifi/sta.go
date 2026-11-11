@@ -599,6 +599,12 @@ func (s *STA) Steer(hold bool) {
 		s.mu.Unlock()
 	}
 
+	if hold {
+		// Where the network is is known, and the radio's access point is
+		// on its way there. A scan now would only get in its way: hostapd
+		// scans as it starts, and cannot while the station does.
+		return
+	}
 	// Scanning. With a block switched on, wpa_supplicant scans by itself
 	// until it is connected. With none on (nothing known has been seen
 	// yet) it sits idle, and while connected it never scans; those two

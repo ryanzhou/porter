@@ -1176,13 +1176,7 @@ func wiredPorts() []wiredPort {
 				continue
 			}
 		}
-		if _, err := os.Stat(filepath.Join(base, "phy80211")); err == nil {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(base, "wireless")); err == nil {
-			continue
-		}
-		if strings.HasPrefix(name, "wg-") || strings.HasPrefix(name, "br-") {
+		if wifi.IsWireless(name) || strings.HasPrefix(name, "wg-") || strings.HasPrefix(name, "br-") {
 			continue
 		}
 		p := wiredPort{Name: name}

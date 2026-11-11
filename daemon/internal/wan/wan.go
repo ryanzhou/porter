@@ -153,7 +153,7 @@ func (m *Manager) Apply(list []Uplink, probe config.Probe) {
 				u.cfg.Rank, u.st.Rank = w.Rank, w.Rank
 				reranked = true
 			}
-			if reflect.DeepEqual(w, u.cfg) {
+			if sameUplink(w, u.cfg) {
 				continue
 			}
 		}
@@ -186,6 +186,22 @@ func (m *Manager) Apply(list []Uplink, probe config.Probe) {
 	if len(cleared)+len(started) > 0 || reranked {
 		m.changed()
 	}
+}
+
+// sameUplink reports whether two descriptions of an uplink call for the
+// same handling. An address setup that is automatic is the same however
+// it is written: restarting DHCP because "automatic" arrived spelled out
+// (as it does the moment a wireless uplink learns which network it is on)
+// would cost every Wi-Fi connection several seconds.
+func sameUplink(a, b Uplink) bool {
+	canon := func(f config.IPFamily) config.IPFamily {
+		if !f.Static() {
+			return config.IPFamily{}
+		}
+		return f
+	}
+	a.IP, b.IP = config.IPSetup{V4: canon(a.IP.V4), V6: canon(a.IP.V6)}, config.IPSetup{V4: canon(b.IP.V4), V6: canon(b.IP.V6)}
+	return reflect.DeepEqual(a, b)
 }
 
 // statics lists the fixed addresses of an uplink: address and gateway
@@ -279,6 +295,11 @@ func dhcpcdConf(u Uplink, hook string) string {
 	w("option domain_name_servers, domain_name, interface_mtu, captive_portal_uri")
 	w("require dhcp_server_identifier")
 	w("noipv4ll")
+	// Take the address the network hands out without first spending five
+	// seconds asking whether anyone else has it. Handing out addresses
+	// that are free is the network's job, and a travel router is joined
+	// to a new one too often to wait each time.
+	w("noarp")
 	// A family with a fixed address is none of dhcpcd's business.
 	switch {
 	case u.IP.V4.Static():

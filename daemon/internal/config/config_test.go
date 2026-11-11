@@ -490,6 +490,13 @@ func TestUplinkOrder(t *testing.T) {
 	if err := c.Validate(); err == nil {
 		t.Error("an unknown kind of uplink was accepted")
 	}
+	// A Wi-Fi interface once mistaken for a wired port is forgotten.
+	c.Ethernet = append(c.Ethernet, EthPort{Name: "ap-wlan0", Role: EthWAN}, EthPort{Name: "ap1", Role: EthWAN}, EthPort{Name: "wlx001122334455", Role: EthLAN})
+	c.WAN.Order = []string{"eth:ap-wlan0", "eth:eth0", "wifi"}
+	c.Normalize()
+	if len(c.Ethernet) != 2 || strings.Contains(strings.Join(c.WAN.Order, " "), "ap") {
+		t.Errorf("after forgetting: %+v %v", c.Ethernet, c.WAN.Order)
+	}
 }
 
 func TestSetWifiUplink(t *testing.T) {

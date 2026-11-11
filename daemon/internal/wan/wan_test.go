@@ -73,3 +73,24 @@ func TestActiveAndPreferred(t *testing.T) {
 		}
 	}
 }
+
+func TestSameUplink(t *testing.T) {
+	bare := Uplink{If: "wlan0", Kind: "wifi", Key: "wifi", Metric: 200}
+	spelled := bare
+	spelled.IP = config.IPSetup{V4: config.IPFamily{Mode: config.IPAuto, DNS: []string{}}, V6: config.IPFamily{Mode: config.IPAuto, DNS: []string{}}}
+	if !sameUplink(bare, spelled) {
+		t.Error("automatic addresses, written two ways, taken for a change")
+	}
+	fixed := bare
+	fixed.IP.V4 = config.IPFamily{Mode: config.IPStatic, Address: "192.0.2.5/24", Gateway: "192.0.2.1"}
+	other := fixed
+	other.IP.V4.Gateway = "192.0.2.254"
+	if sameUplink(bare, fixed) || sameUplink(fixed, other) || !sameUplink(fixed, fixed) {
+		t.Error("fixed addresses compared wrongly")
+	}
+	metric := bare
+	metric.Metric = 300
+	if sameUplink(bare, metric) {
+		t.Error("another metric taken for no change")
+	}
+}
