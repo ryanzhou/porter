@@ -105,6 +105,11 @@ every subsystem against it and against what the network is doing.
   join (a station that tries first is refused, and wpa_supplicant then
   leaves the network alone for a while), and otherwise stays where it
   is rather than fall back to a default channel between connections.
+  While it starts or moves, the station is kept from scanning: hostapd
+  scans as it starts, and when it cannot it takes the interface out of
+  access point mode to do so, which drops the interface from its bridge.
+  As a second line of defence, every pass of the control loop puts the
+  interfaces of running access points back into their bridges.
 - **Changes as one.** `config.set` validates the document, checks that
   it describes a router that can work (`Config.Consistent`), and the
   next pass of the control loop applies all of it: uplinks that stop
