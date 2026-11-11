@@ -5,42 +5,35 @@
 // is shipped, as a separate program, so that a newer mpquic can replace
 // the one in the image without anything else changing.
 //
-// The local side can act as a WireGuard server whose clients' traffic it
-// proxies. That is how the router feeds it: for each profile it starts
-// one mpquic listening for WireGuard on a loopback port, and hands the
-// rest of the router an ordinary WireGuard profile pointing at that port.
-// Policy routing, the kill switch, per-path DNS and IPv6 then work for an
-// MPQUIC tunnel exactly as for any other; nothing downstream knows the
-// difference. The WireGuard keys exist only for this hop inside the
-// machine and are made afresh at every start.
+// The local side proxies whatever the system routes to a network (TUN)
+// interface it is attached to. That is how the router feeds it: each
+// profile has an interface, like a WireGuard profile has one, and one
+// mpquic attached to it. Policy routing, the kill switch, per-path DNS
+// and IPv6 then work for an MPQUIC tunnel exactly as for any other;
+// nothing downstream knows the difference. The interface belongs to the
+// router (package vpn makes it, and keeps it while mpquic restarts), so
+// that addresses, routes and firewall rules outlive the process, and
+// what is routed to it while no mpquic is attached goes nowhere.
 package mpquic
 
 import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-
 	"github.com/ryanzhou/porter/daemon/internal/config"
+	"github.com/ryanzhou/porter/daemon/internal/fw"
 	"github.com/ryanzhou/porter/daemon/internal/proc"
 )
 
-const (
-	// basePort is the loopback port of the first profile's WireGuard
-	// listener; a profile's place in the configuration is added to it.
-	basePort = 47800
-	// mtu of the WireGuard hop. It never leaves the machine, so there is
-	// no smaller path to fit; a full-size packet from the LAN goes in
-	// whole.
-	mtu = 1500
-)
+// MTU of a profile's interface. TCP ends at the interface and is carried
+// as a stream from there, so nothing is taken from the packet size.
+const MTU = 1500
 
 // Manager supervises one mpquic per enabled MPQUIC profile.
 type Manager struct {
@@ -59,10 +52,7 @@ type Manager struct {
 
 type instance struct {
 	spec    string // what the process was started for
-	index   int
 	proc    *proc.Proc
-	server  wgtypes.Key // mpquic's WireGuard key
-	client  wgtypes.Key // the router's
 	paths   int
 	started bool
 }
@@ -77,8 +67,6 @@ func (m *Manager) Binary() string {
 	return ""
 }
 
-func port(index int) int { return basePort + index }
-
 // fileConfig is mpquic's own configuration file, as far as it is used.
 type fileConfig struct {
 	Server      []string `json:"server"`
@@ -89,56 +77,54 @@ type fileConfig struct {
 	Up          string   `json:"up,omitempty"`
 	Down        string   `json:"down,omitempty"`
 	ReliableUDP bool     `json:"reliable_udp,omitempty"`
-	WireGuard   fileWG   `json:"wireguard"`
+	TUN         fileTUN  `json:"tun"`
 }
 
-type fileWG struct {
-	Listen     string     `json:"listen"`
-	PrivateKey string     `json:"private_key"`
-	MTU        int        `json:"mtu"`
-	Peers      []filePeer `json:"peers"`
+// fileTUN names the interface to attach to. It has no addresses or
+// routes here: those are the router's to set.
+type fileTUN struct {
+	Name string `json:"name"`
+	MTU  int    `json:"mtu"`
 }
 
-type filePeer struct {
-	PublicKey string `json:"public_key"`
-}
-
-func (i *instance) file(v config.VPN) fileConfig {
+func file(v config.VPN) fileConfig {
 	return fileConfig{
 		Server: v.MPQUIC.Servers, ServerPort: v.MPQUIC.Port, Password: v.MPQUIC.Password,
 		// UDP is always relayed: without it clients behind the tunnel
 		// would have no DNS and no QUIC.
 		Mode: "tcp_and_udp", NoSOCKS: true,
 		Up: v.MPQUIC.Up, Down: v.MPQUIC.Down, ReliableUDP: v.MPQUIC.ReliableUDP,
-		WireGuard: fileWG{
-			Listen: net.JoinHostPort("127.0.0.1", strconv.Itoa(port(i.index))), PrivateKey: i.server.String(), MTU: mtu,
-			Peers: []filePeer{{PublicKey: i.client.PublicKey().String()}},
-		},
+		TUN: fileTUN{Name: fw.VPNIfName(v.ID), MTU: MTU},
 	}
 }
 
-// Apply starts an mpquic for every enabled MPQUIC profile and stops the
-// ones no longer wanted. A profile whose settings changed is restarted.
-func (m *Manager) Apply(vpns []config.VPN) {
-	type wanted struct {
-		v     config.VPN
-		index int
-	}
-	want := map[string]wanted{}
-	for i, v := range vpns {
+func spec(v config.VPN) string {
+	// What mpquic is started with. The DNS servers are not part of it:
+	// they are the router's business.
+	q := v.MPQUIC
+	q.DNS = nil
+	return fmt.Sprintf("%+v", q)
+}
+
+func wanted(vpns []config.VPN) map[string]config.VPN {
+	want := map[string]config.VPN{}
+	for _, v := range vpns {
 		if v.Enabled && v.Type == config.VPNMPQUIC {
-			want[v.ID] = wanted{v, i}
+			want[v.ID] = v
 		}
 	}
+	return want
+}
+
+// Retire stops the mpquics that are no longer wanted or whose settings
+// changed. It is for calling before the interfaces of removed profiles
+// are taken away; Apply does the same by itself.
+func (m *Manager) Retire(vpns []config.VPN) {
+	want := wanted(vpns)
 	m.mu.Lock()
-	if m.inst == nil {
-		m.inst = map[string]*instance{}
-	}
 	var stop []*proc.Proc
 	for id, in := range m.inst {
-		w, ok := want[id]
-		if ok && in.spec == fmt.Sprintf("%d %+v", w.index, w.v.MPQUIC) {
-			delete(want, id)
+		if w, ok := want[id]; ok && in.spec == spec(w) {
 			continue
 		}
 		if in.proc != nil {
@@ -150,20 +136,28 @@ func (m *Manager) Apply(vpns []config.VPN) {
 	for _, p := range stop {
 		p.Stop()
 	}
+}
+
+// Apply starts an mpquic for every enabled MPQUIC profile and stops the
+// ones no longer wanted. A profile whose settings changed is restarted.
+// The profiles' interfaces have to exist by now.
+func (m *Manager) Apply(vpns []config.VPN) {
+	m.Retire(vpns)
+	want := wanted(vpns)
+	m.mu.Lock()
+	if m.inst == nil {
+		m.inst = map[string]*instance{}
+	}
+	for id := range m.inst {
+		delete(want, id)
+	}
+	m.mu.Unlock()
 	if len(want) == 0 {
 		return
 	}
 	bin := m.Binary()
-	for id, w := range want {
-		in := &instance{spec: fmt.Sprintf("%d %+v", w.index, w.v.MPQUIC), index: w.index}
-		var err error
-		if in.server, err = wgtypes.GeneratePrivateKey(); err == nil {
-			in.client, err = wgtypes.GeneratePrivateKey()
-		}
-		if err != nil {
-			m.Log.Error("mpquic: making keys", "err", err)
-			continue
-		}
+	for id, v := range want {
+		in := &instance{spec: spec(v)}
 		m.mu.Lock()
 		m.inst[id] = in
 		m.mu.Unlock()
@@ -173,7 +167,7 @@ func (m *Manager) Apply(vpns []config.VPN) {
 		}
 		// The file holds the tunnel's password: for root only, and in RAM.
 		path := filepath.Join(m.RunDir, "mpquic-"+id+".json")
-		raw, _ := json.Marshal(in.file(w.v))
+		raw, _ := json.Marshal(file(v))
 		if err := os.WriteFile(path, raw, 0o600); err != nil {
 			m.Log.Error("mpquic: writing its configuration", "err", err)
 			continue
@@ -183,19 +177,24 @@ func (m *Manager) Apply(vpns []config.VPN) {
 			Name: "mpquic-" + id, Log: m.Log,
 			Argv:   []string{bin, "local", "-c", path},
 			OnLine: func(line string) { m.onLine(id, in, line) },
+			// A process that has gone has no paths, whatever it last
+			// said.
+			OnExit: func(error) { m.setPaths(id, in, 0) },
 		}
 		in.started = true
-		m.Log.Info("mpquic starting", "vpn", w.v.Name, "paths", len(w.v.MPQUIC.Servers), "program", bin)
+		m.Log.Info("mpquic starting", "vpn", v.Name, "paths", len(v.MPQUIC.Servers), "program", bin)
 		in.proc.Start()
 	}
 }
 
 // onLine follows mpquic's log for the number of working paths.
 func (m *Manager) onLine(id string, in *instance, line string) {
-	count, ok := pathCount(line)
-	if !ok {
-		return
+	if count, ok := pathCount(line); ok {
+		m.setPaths(id, in, count)
 	}
+}
+
+func (m *Manager) setPaths(id string, in *instance, count int) {
 	m.mu.Lock()
 	// A process that was replaced may still be writing.
 	if m.inst[id] != in {
@@ -236,11 +235,10 @@ func pathCount(line string) (int, bool) {
 }
 
 // Effective returns the profiles as the rest of the router should see
-// them: an MPQUIC profile that is running is given the WireGuard settings
-// of the hop to its mpquic. Other profiles are passed through.
-func (m *Manager) Effective(vpns []config.VPN) []config.VPN {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// them: an MPQUIC profile is given the settings of its interface in the
+// place where a WireGuard profile has them. Other profiles are passed
+// through, and the stored ones are left as they are.
+func Effective(vpns []config.VPN) []config.VPN {
 	out := make([]config.VPN, len(vpns))
 	copy(out, vpns)
 	for i := range out {
@@ -248,26 +246,12 @@ func (m *Manager) Effective(vpns []config.VPN) []config.VPN {
 		if v.Type != config.VPNMPQUIC {
 			continue
 		}
-		in := m.inst[v.ID]
-		if in == nil {
-			// Not running: nothing for a WireGuard interface to talk
-			// to. The profile keeps its place, switched off.
-			v.Enabled = false
-			continue
-		}
 		v.WireGuard = config.WireGuard{
-			PrivateKey: in.client.String(),
-			// Any private addresses do: mpquic proxies whatever comes
-			// in and does not route between clients.
-			Addresses: []string{fmt.Sprintf("10.66.%d.2/32", in.index), fmt.Sprintf("fd66:%x::2/128", in.index)},
+			// Any private addresses do: they are what traffic for the
+			// tunnel is sent from, and mpquic proxies whatever comes in.
+			Addresses: []string{fmt.Sprintf("10.66.%d.2/32", i), fmt.Sprintf("fd66:%x::2/128", i)},
 			DNS:       v.MPQUIC.DNS,
-			MTU:       mtu,
-			Peers: []config.WGPeer{{
-				PublicKey:  in.server.PublicKey().String(),
-				Endpoint:   net.JoinHostPort("127.0.0.1", strconv.Itoa(port(in.index))),
-				AllowedIPs: []string{"0.0.0.0/0", "::/0"},
-				Keepalive:  25,
-			}},
+			MTU:       MTU,
 		}
 	}
 	return out

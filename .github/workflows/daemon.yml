@@ -2,7 +2,7 @@ name: Daemon
 
 on:
   push:
-    paths: ["daemon/**", "image/packages", "image/mpquic.pin", "ios/PorterKit/Tests/PorterKitTests/Resources/**", ".github/workflows/daemon.yml"]
+    paths: ["daemon/**", "image/packages", "image/mpquic.pin", "image/build-mpquic.sh", "ios/PorterKit/Tests/PorterKitTests/Resources/**", ".github/workflows/daemon.yml"]
   workflow_dispatch:
 
 concurrency:

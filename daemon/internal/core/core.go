@@ -259,7 +259,7 @@ func New(opt Options) (*Core, error) {
 	c.mpq = &mpquic.Manager{Log: c.log, RunDir: opt.RunDir, Binaries: opt.MPQUIC, OnChange: c.Kick}
 	c.vpn = &vpn.Manager{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace, Resolve: c.resolveDirect}
 	c.vpn.Carrying = func(id string) (bool, string) {
-		if paths, managed := c.mpq.Health(id); managed && paths == 0 {
+		if paths, running := c.mpq.Health(id); !running || paths == 0 {
 			return false, "No path to the server"
 		}
 		return true, ""
@@ -948,12 +948,15 @@ func (c *Core) reconcile() {
 
 	// Tunnels.
 	// From here on the VPN profiles are seen as they run: an MPQUIC
-	// profile as the WireGuard hop to its mpquic. The stored
+	// profile with the settings of its interface. The stored
 	// configuration is left as it is.
-	c.mpq.Apply(cfg.VPNs)
+	// An mpquic is stopped before its interface is taken away, and
+	// started once it is there.
+	c.mpq.Retire(cfg.VPNs)
 	running := *cfg
-	running.VPNs = c.mpq.Effective(cfg.VPNs)
+	running.VPNs = mpquic.Effective(cfg.VPNs)
 	c.vpn.Apply(running.VPNs)
+	c.mpq.Apply(cfg.VPNs)
 
 	// Firewall and routing.
 	var wanIfs []string

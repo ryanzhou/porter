@@ -30,6 +30,14 @@ import (
 // keepalive) flows.
 const handshakeFresh = 190 * time.Second
 
+// A profile of type MPQUIC has an interface like any other, with nothing
+// of WireGuard about it: a plain TUN interface that the mpquic program
+// (package mpquic) attaches to. It is made here, as a persistent one, so
+// that it is there before mpquic starts and stays while mpquic restarts:
+// its addresses and the routes through it survive, and what is routed to
+// it meanwhile is dropped rather than sent some other way. Whether it is
+// up is for Carrying to say.
+
 // Status of one tunnel.
 type Status struct {
 	ID        string `json:"id"`
@@ -67,10 +75,10 @@ type Manager struct {
 	// UserspaceImpl, when set, is a wireguard-go binary used instead of
 	// the kernel module (for tests on kernels without WireGuard).
 	UserspaceImpl string
-	// Carrying, when set, has the last word on whether a tunnel whose
-	// WireGuard side is up can carry traffic. A tunnel that ends in a
-	// local proxy completes its handshake whether or not the proxy has a
-	// way out; this is where that is asked. why is for the user.
+	// Carrying says whether the tunnel of an MPQUIC profile can carry
+	// traffic: its interface is always there, and only the program
+	// attached to it knows whether it has a way out. why is for the
+	// user. Without it such a tunnel never counts as up.
 	Carrying func(id string) (ok bool, why string)
 
 	mu      sync.Mutex
@@ -159,7 +167,56 @@ func (m *Manager) Apply(vpns []config.VPN) {
 }
 
 func sameWG(a, b config.VPN) bool {
-	return fmt.Sprintf("%+v", a.WireGuard) == fmt.Sprintf("%+v", b.WireGuard)
+	return a.Type == b.Type && fmt.Sprintf("%+v", a.WireGuard) == fmt.Sprintf("%+v", b.WireGuard)
+}
+
+func plainTUN(v config.VPN) bool { return v.Type == config.VPNMPQUIC }
+
+// ensureTUN makes the interface of an MPQUIC profile if it is not there,
+// and sees to its size, addresses and state. It is called again and
+// again: an interface that was deleted comes back.
+func (m *Manager) ensureTUN(v config.VPN) error {
+	name := fw.VPNIfName(v.ID)
+	if l, err := netlink.LinkByName(name); err == nil && l.Type() != "tuntap" && l.Type() != "tun" {
+		// The profile was a WireGuard one before.
+		netlink.LinkDel(l)
+	}
+	if !netx.Exists(name) {
+		la := netlink.NewLinkAttrs()
+		la.Name = name
+		t := &netlink.Tuntap{LinkAttrs: la, Mode: netlink.TUNTAP_MODE_TUN, Flags: netlink.TUNTAP_NO_PI, Queues: 1}
+		if err := netlink.LinkAdd(t); err != nil {
+			return fmt.Errorf("create interface: %w", err)
+		}
+		// Persistent: it stays without anyone holding it open.
+		for _, f := range t.Fds {
+			f.Close()
+		}
+	}
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return err
+	}
+	if mtu := v.WireGuard.MTU; mtu != 0 && link.Attrs().MTU != mtu {
+		if err := netlink.LinkSetMTU(link, mtu); err != nil {
+			return err
+		}
+	}
+	var addrs []netip.Prefix
+	for _, a := range v.WireGuard.Addresses {
+		pf, err := config.ParsePrefixLoose(a)
+		if err != nil {
+			return err
+		}
+		if pf.Addr().Is6() && !fw.HaveIPv6() {
+			continue
+		}
+		addrs = append(addrs, pf)
+	}
+	if _, err := netx.SyncAddrs(name, addrs); err != nil {
+		return err
+	}
+	return netlink.LinkSetUp(link)
 }
 
 func (m *Manager) remove(id string) {
@@ -214,6 +271,20 @@ func key(s string) (wgtypes.Key, error) {
 
 func (m *Manager) configure(v config.VPN) error {
 	name := fw.VPNIfName(v.ID)
+	if plainTUN(v) {
+		if err := m.ensureTUN(v); err != nil {
+			return err
+		}
+		now := time.Now()
+		m.mu.Lock()
+		m.tunnels[v.ID] = &tunnel{cfg: v, resolved: now, started: now, st: Status{ID: v.ID, If: name, State: "connecting"}}
+		m.mu.Unlock()
+		return nil
+	}
+	if l, err := netlink.LinkByName(name); err == nil && l.Type() != "wireguard" && m.UserspaceImpl == "" {
+		// The profile was an MPQUIC one before.
+		netlink.LinkDel(l)
+	}
 	if err := m.ensureLink(v.ID, name); err != nil {
 		return fmt.Errorf("create interface: %w", err)
 	}
@@ -371,6 +442,10 @@ func (m *Manager) poll() {
 			}
 			continue
 		}
+		if plainTUN(t.cfg) {
+			changed = m.pollTUN(t) || changed
+			continue
+		}
 		dev, err := c.Device(t.st.If)
 		if err != nil {
 			continue
@@ -397,11 +472,6 @@ func (m *Manager) poll() {
 			state = "up"
 		}
 		t.st.Error = ""
-		if state == "up" && m.Carrying != nil {
-			if ok, why := m.Carrying(t.cfg.ID); !ok {
-				state, t.st.Error = "connecting", why
-			}
-		}
 		if state != t.st.State {
 			changed = true
 			m.Log.Info("vpn state", "vpn", t.cfg.Name, "state", state)
@@ -426,6 +496,33 @@ func (m *Manager) poll() {
 	if changed && m.OnChange != nil {
 		m.OnChange()
 	}
+}
+
+// pollTUN brings the status of an MPQUIC profile up to date; m.mu is
+// held. It reports whether the tunnel went up or down.
+func (m *Manager) pollTUN(t *tunnel) (changed bool) {
+	if err := m.ensureTUN(t.cfg); err != nil {
+		m.Log.Warn("vpn interface", "vpn", t.cfg.Name, "err", err)
+	}
+	state, why := "connecting", ""
+	if m.Carrying != nil {
+		if ok, reason := m.Carrying(t.cfg.ID); ok {
+			state = "up"
+		} else {
+			why = reason
+		}
+	}
+	if state != t.st.State {
+		changed = true
+		m.Log.Info("vpn state", "vpn", t.cfg.Name, "state", state)
+	}
+	t.st.State, t.st.Error = state, why
+	// Counted as the system sees the interface: what it sends into it is
+	// on its way out to the internet.
+	if l, err := netlink.LinkByName(t.st.If); err == nil && l.Attrs().Statistics != nil {
+		t.st.Rx, t.st.Tx = int64(l.Attrs().Statistics.RxBytes), int64(l.Attrs().Statistics.TxBytes)
+	}
+	return changed
 }
 
 func (m *Manager) reresolve(c *wgctrl.Client, v config.VPN) {
@@ -496,6 +593,10 @@ func (m *Manager) Routes(vpns []config.VPN) []fw.VPNRoutes {
 		r := fw.VPNRoutes{Index: i, If: fw.VPNIfName(v.ID), KillSwitch: v.KillSwitch}
 		if s, ok := st[v.ID]; ok && v.Enabled && s.State == "up" {
 			r.Up = true
+			if plainTUN(v) {
+				// mpquic proxies whatever it is given.
+				r.Allowed = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}
+			}
 			for _, p := range v.WireGuard.Peers {
 				for _, a := range p.AllowedIPs {
 					if pf, err := netip.ParsePrefix(a); err == nil {

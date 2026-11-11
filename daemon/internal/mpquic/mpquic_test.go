@@ -12,11 +12,11 @@ import (
 
 func TestPathCount(t *testing.T) {
 	for line, want := range map[string]int{
-		`time=2026-11-10T10:00:00Z level=INFO msg="path up" path=203.0.113.10:8388 count=1`:                       1,
-		`time=2026-11-10T10:00:01Z level=INFO msg="path up" path=relay.example.net:9000 count=3`:                  3,
-		`time=2026-11-10T10:00:09Z level=INFO msg="path down" path=203.0.113.10:8388 err="timeout" count=0`:       0,
-		`time=2026-11-10T10:00:09Z level=INFO msg="path down" path=a err="x count=9 y" count=2 extra=1`:           2,
-		`time=2026-11-10T10:00:00Z level=INFO msg="mpquic local started" version=v0.5.0 listen="" wireguard=true`: 0,
+		`time=2026-11-10T10:00:00Z level=INFO msg="path up" path=203.0.113.10:8388 count=1`:                                 1,
+		`time=2026-11-10T10:00:01Z level=INFO msg="path up" path=relay.example.net:9000 count=3`:                            3,
+		`time=2026-11-10T10:00:09Z level=INFO msg="path down" path=203.0.113.10:8388 err="timeout" count=0`:                 0,
+		`time=2026-11-10T10:00:09Z level=INFO msg="path down" path=a err="x count=9 y" count=2 extra=1`:                     2,
+		`time=2026-11-10T10:00:00Z level=INFO msg="mpquic local started" version=v0.6.0 listen="" wireguard=false tun=true`: 0,
 	} {
 		if got, ok := pathCount(line); !ok || got != want {
 			t.Errorf("%s: got %d (%v), want %d", line, got, ok, want)
@@ -56,55 +56,57 @@ func TestEffective(t *testing.T) {
 		t.Error("a disabled profile is running")
 	}
 
-	eff := m.Effective(vpns)
+	eff := Effective(vpns)
 	if len(eff) != 3 || eff[0].WireGuard.PrivateKey != "k" || !eff[0].Enabled {
 		t.Fatalf("the WireGuard profile was changed: %+v", eff[0])
 	}
 	if eff[2].Enabled {
 		t.Error("the disabled profile came out enabled")
 	}
+	// The interface of an MPQUIC profile: addresses to send from, the
+	// profile's DNS servers, full-size packets, and nothing of WireGuard.
 	w := eff[1].WireGuard
-	if !eff[1].Enabled || !eff[1].KillSwitch || len(w.Peers) != 1 || w.Peers[0].Endpoint != "127.0.0.1:47801" || w.MTU != 1500 ||
-		strings.Join(w.Addresses, " ") != "10.66.1.2/32 fd66:1::2/128" || strings.Join(w.DNS, " ") != "1.1.1.1" ||
-		strings.Join(w.Peers[0].AllowedIPs, " ") != "0.0.0.0/0 ::/0" {
-		t.Errorf("the hop to mpquic: %+v", eff[1])
+	if !eff[1].Enabled || !eff[1].KillSwitch || len(w.Peers) != 0 || w.PrivateKey != "" || w.MTU != 1500 ||
+		strings.Join(w.Addresses, " ") != "10.66.1.2/32 fd66:1::2/128" || strings.Join(w.DNS, " ") != "1.1.1.1" {
+		t.Errorf("the interface of the MPQUIC profile: %+v", eff[1])
 	}
 	// The stored profiles are untouched.
-	if vpns[1].WireGuard.PrivateKey != "" {
-		t.Error("the stored profile was given WireGuard settings")
+	if len(vpns[1].WireGuard.Addresses) != 0 {
+		t.Error("the stored profile was given interface settings")
 	}
 
-	// What mpquic is told: the two ends hold each other's public key.
+	// What mpquic is told: the interface to attach to, and nothing about
+	// addresses or routes, which are the router's.
 	m.mu.Lock()
 	in := m.inst["mq"]
 	m.mu.Unlock()
-	raw, _ := json.Marshal(in.file(vpns[1]))
+	raw, _ := json.Marshal(file(vpns[1]))
 	var f struct {
-		Server     []string `json:"server"`
-		ServerPort int      `json:"server_port"`
-		Mode       string   `json:"mode"`
-		NoSOCKS    bool     `json:"no_socks"`
-		Up         string   `json:"up"`
-		Reliable   bool     `json:"reliable_udp"`
-		WireGuard  struct {
-			Listen     string `json:"listen"`
-			PrivateKey string `json:"private_key"`
-			MTU        int    `json:"mtu"`
-			Peers      []struct {
-				PublicKey string `json:"public_key"`
-			} `json:"peers"`
-		} `json:"wireguard"`
+		Server     []string       `json:"server"`
+		ServerPort int            `json:"server_port"`
+		Mode       string         `json:"mode"`
+		NoSOCKS    bool           `json:"no_socks"`
+		Up         string         `json:"up"`
+		Reliable   bool           `json:"reliable_udp"`
+		TUN        map[string]any `json:"tun"`
+		WireGuard  any            `json:"wireguard"`
 	}
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Server) != 2 || f.ServerPort != 8388 || f.Mode != "tcp_and_udp" || !f.NoSOCKS || f.Up != "19mbit" || !f.Reliable ||
-		f.WireGuard.Listen != "127.0.0.1:47801" || f.WireGuard.MTU != 1500 || len(f.WireGuard.Peers) != 1 {
+		f.WireGuard != nil || len(f.TUN) != 2 || f.TUN["name"] != "wg-mq" || f.TUN["mtu"] != float64(1500) {
 		t.Errorf("mpquic's configuration: %s", raw)
 	}
-	if f.WireGuard.PrivateKey != in.server.String() || w.Peers[0].PublicKey != in.server.PublicKey().String() ||
-		f.WireGuard.Peers[0].PublicKey != in.client.PublicKey().String() || w.PrivateKey != in.client.String() {
-		t.Error("the two ends of the hop do not hold each other's keys")
+	// Other DNS servers for the profile are no reason to restart mpquic.
+	other := vpns[1]
+	other.MPQUIC.DNS = []string{"9.9.9.9"}
+	if spec(other) != spec(vpns[1]) {
+		t.Error("the DNS servers are part of what mpquic is started with")
+	}
+	other.MPQUIC.Up = "5mbit"
+	if spec(other) == spec(vpns[1]) {
+		t.Error("a changed rate is not")
 	}
 
 	// Paths coming and going, as mpquic reports them.

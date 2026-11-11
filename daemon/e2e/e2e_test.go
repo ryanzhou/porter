@@ -997,9 +997,16 @@ func TestRouter(t *testing.T) {
 			return err == nil && a == ispIP
 		})
 
-		// The remote goes away. WireGuard to the local mpquic is still
-		// fine, but there is no path: the tunnel must be reported down
-		// and, with the kill switch, device two cut off.
+		// The profile's interface is a plain TUN device with mpquic
+		// attached to it: nothing of WireGuard in between.
+		if out, err := exec.Command("ip", "-n", nsRtr, "-d", "link", "show", "wg-mq").CombinedOutput(); err != nil ||
+			!strings.Contains(string(out), "tun type tun") || strings.Contains(string(out), "wireguard") {
+			t.Errorf("the MPQUIC profile's interface: %v\n%s", err, out)
+		}
+
+		// The remote goes away. The interface stays, but there is no
+		// path: the tunnel must be reported down and, with the kill
+		// switch, device two cut off.
 		srv.Process.Kill()
 		srv.Wait()
 		eventually(t, "tunnel reported down without a path", 60*time.Second, func() bool {

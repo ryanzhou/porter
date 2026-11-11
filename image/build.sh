@@ -86,14 +86,12 @@ if ! { [ -r "$DEBKEYS" ] && curl -fsS "https://deb.debian.org/debian/dists/$SUIT
 fi
 cat "$DEBKEYS" "$WORK/rpi.gpg" > "$WORK/keys.gpg"
 
-# The mpquic program, for MPQUIC tunnels: a pinned release, checked
-# against the hash recorded with the pin. Fetched before the slow stages
-# so that a failure shows at once.
+# The mpquic program, for MPQUIC tunnels: the commit pinned in
+# mpquic.pin, built from source. Done before the slow stages so that a
+# failure shows at once.
 echo "==> mpquic"
-. "$HERE/mpquic.pin"
-curl -fsSL -o "$WORK/mpquic" "https://github.com/ryanzhou/mpquic/releases/download/$MPQUIC_VERSION/mpquic-linux-arm64"
-echo "$MPQUIC_SHA256_arm64  $WORK/mpquic" | sha256sum -c --quiet - || { echo "mpquic $MPQUIC_VERSION does not have the hash in image/mpquic.pin" >&2; exit 1; }
-echo "    mpquic $MPQUIC_VERSION"
+MPQUIC_BUILT=$("$HERE/build-mpquic.sh" arm64 "$WORK/mpquic")
+echo "    mpquic $MPQUIC_BUILT"
 
 # Country database for country rules and the flow list. It is baked in
 # because the router itself never downloads anything. DB-IP publishes a

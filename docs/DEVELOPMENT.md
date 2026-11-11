@@ -87,14 +87,18 @@ every subsystem against it and against what the network is doing.
   DHCPv6 offers; traffic is masqueraded (NAT66). No prefix delegation is
   needed.
 - **MPQUIC.** A VPN profile of this type runs the `mpquic` program as it
-  is released (`mpquic local`), with only its WireGuard listener on, bound
-  to a loopback port. The rest of the router is given an ordinary
-  WireGuard profile pointing at that port (`internal/mpquic`), with keys
-  made at each start, so policy routing, the kill switch and per-path DNS
-  need to know nothing about it. The tunnel counts as up only while
-  mpquic reports at least one working path. The release is pinned, with
-  its hash, in `image/mpquic.pin`; a copy at `/data/porter/bin/mpquic`
-  takes precedence on a router.
+  is released (`mpquic local`), attached to a network interface: its
+  TUN mode, in which it proxies whatever the system routes there. Each
+  MPQUIC profile has an interface where a WireGuard profile has one
+  (`internal/vpn` makes it, a plain persistent TUN device, and
+  `internal/mpquic` runs the program on it), so policy routing, the kill
+  switch and per-path DNS need to know nothing about it, and nothing is
+  encrypted a second time inside the router. The interface outlives the
+  program: while no mpquic is attached, what is routed to it is dropped,
+  not sent another way. The tunnel counts as up only while mpquic reports
+  at least one working path. The version is pinned by commit in
+  `image/mpquic.pin` and built from source (`image/build-mpquic.sh`); a
+  copy at `/data/porter/bin/mpquic` takes precedence on a router.
 - **Uplink addresses.** dhcpcd configures an uplink (DHCP, router
   advertisements, DHCPv6) unless a family is set by hand, per wired port
   or per saved Wi-Fi network. A fixed address and its default route are
