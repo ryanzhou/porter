@@ -198,6 +198,56 @@ devices send through a VPN reaches the router's queue as one stream:
 the big transfer still cannot clog the line, but devices that share the
 VPN are not kept from slowing each other.
 
+### Sending some things through a particular source
+
+With more than one internet source connected (fibre and a phone, a
+hotel's Wi-Fi and its wired port) the router uses the first that works
+for everything. A **Route** can name one of them instead: wherever a
+Route is chosen (a device, a group, a network, a rule on the **VPN**
+tab, **Everything else**) the internet sources are listed after
+**Direct**. The work laptop always through the phone; video through the
+wired port.
+
+Under a Route that names a source is one switch, **Only this source**:
+
+- **Off:** while that source is not connected or does not reach the
+  internet, the traffic uses whichever source is in use, like everything
+  else.
+- **On:** the traffic leaves by that source or not at all. While the
+  source is not connected, the device is offline. This is for what must
+  never use another connection.
+
+The line under the switch says which of the two is the case right now.
+DNS lookups follow the traffic here as well: a device routed through a
+source asks through that source.
+
+### A source with only so much data
+
+A phone's plan, or a line with a monthly allowance: open the source's
+page (as for **Smooth out heavy use**), tap **Data limit**, turn it on,
+and enter the amount and whether it is for each month or each day. A
+monthly limit can start on the day your plan does.
+
+The router counts what the source carries, and the list of internet
+sources shows how much is used. When the amount is reached:
+
+- the router stops using the source until the next day or month begins,
+  and goes online through the next one in the list;
+- a Route that names the source does what it does when the source is
+  not connected: with **Only this source** off the traffic uses the
+  source in use, with it on the devices are offline, and their Route
+  says why;
+- the activity log says so, and the source's page offers **Use anyway
+  until then**, which lifts the limit until it starts over.
+
+While the source in use has a data limit, the router also puts off what
+it would download for itself: newer ad block lists and the monthly
+country database. (A software update is only ever started by you.)
+
+The count is the router's own, from the moment the limit is switched
+on. Your provider counts for itself and may count differently, so leave
+some room. What the phone uses for itself is not counted.
+
 ### Sign-in pages (captive portals)
 
 When the venue wants you to accept terms or enter a room number,
@@ -276,8 +326,9 @@ from your VPN provider or your own server (or import the `.conf` file).
 - **One network:** set its **Route** under Settings → Wi-Fi & networks.
 - **Some destinations:** tap **Add rule** and choose sources (devices,
   groups or whole networks) and destinations (domains, address ranges,
-  countries, ports), then where that traffic goes: a VPN, **Direct**, or
-  **Blocked**.
+  countries, ports), then where that traffic goes: a VPN, **Direct**,
+  one internet source (see *Sending some things through a particular
+  source*), or **Blocked**.
 
 Rules are tried from the top and traffic follows the first one it fits;
 after the rules comes the device's own route, then its group's, then
@@ -357,6 +408,9 @@ to everyone but the addresses you list.
 - With an IPv6 connection from your provider, the port is also opened at
   the device's own IPv6 address, where nothing is translated: there it
   is the port the device listens on.
+- With more than one internet source, a connection is answered through
+  the source it came in by, whichever is in use. The same goes for
+  **Reach home**.
 - A forwarded port is open to the whole internet. Forward what you mean
   to publish, keep the software behind it up to date, and prefer
   **Reach home** for anything only you use.
@@ -639,7 +693,8 @@ settings and pairings. Re-flashing the card does the same.
 - **What the router contacts by itself:** a time server; one small page
   on `captive.apple.com` to detect sign-in pages (the same check an
   iPhone makes); your chosen ad block lists, daily, when ad blocking is
-  on; a country database from db-ip.com, monthly; and, only while
+  on; a country database from db-ip.com, monthly (neither of the two
+  while the internet source in use has a data limit); and, only while
   something under Settings → From outside is switched on, a page at
   cloudflare.com that tells it its public address (every ten minutes)
   and your dynamic DNS provider (when the address changes, and once a

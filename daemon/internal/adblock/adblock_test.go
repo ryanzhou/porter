@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -93,7 +94,7 @@ func TestManager(t *testing.T) {
 	if m.Blocked("ads.example.com") {
 		t.Fatal("nothing can be blocked before the first download")
 	}
-	m.refreshDue(context.Background())
+	m.refreshDue(context.Background(), false)
 	if !m.Blocked("ads.example.com") || m.Blocked("example.com") {
 		t.Fatal("downloaded list not in effect")
 	}
@@ -118,13 +119,13 @@ func TestManager(t *testing.T) {
 		t.Fatal("cached list not used at start")
 	}
 	// The cached copy is fresh, so nothing is fetched.
-	m2.refreshDue(context.Background())
+	m2.refreshDue(context.Background(), false)
 	if hits.Load() != before {
 		t.Error("fresh list fetched again")
 	}
 	// Forced refresh: unchanged upstream answers 304 and keeps the list.
 	m2.RefreshNow()
-	m2.refreshDue(context.Background())
+	m2.refreshDue(context.Background(), false)
 	if hits.Load() != before+1 || !m2.Blocked("ads.example.com") {
 		t.Error("forced refresh of an unchanged list went wrong")
 	}
@@ -132,10 +133,46 @@ func TestManager(t *testing.T) {
 	second := "||tracker.example.net^\n"
 	content.Store(&second)
 	m2.RefreshNow()
-	m2.refreshDue(context.Background())
+	m2.refreshDue(context.Background(), false)
 	if m2.Blocked("ads.example.com") || !m2.Blocked("x.tracker.example.net") {
 		t.Error("updated list not applied")
 	}
+	// While data is short, a list there is a copy of is left as it is,
+	// however old the copy; one that somebody asks for is fetched all
+	// the same, and so is one there is no copy of at all.
+	old := time.Now().Add(-10 * Refresh)
+	if err := os.Chtimes(m2.cachePath(srv.URL+"/list"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	m3 := &Manager{Log: m.Log, Dir: dir}
+	m3.Configure(true, []string{srv.URL + "/list"})
+	before = hits.Load()
+	m3.refreshDue(context.Background(), true)
+	if hits.Load() != before {
+		t.Error("a list was refreshed while data is short")
+	}
+	m3.RefreshNow()
+	m3.refreshDue(context.Background(), true)
+	if hits.Load() != before+1 {
+		t.Error("a refresh that was asked for did not happen while data is short")
+	}
+	m4 := &Manager{Log: m.Log, Dir: t.TempDir()}
+	m4.Configure(true, []string{srv.URL + "/list"})
+	m4.refreshDue(context.Background(), true)
+	if !m4.Blocked("x.tracker.example.net") {
+		t.Error("a list there is no copy of was not fetched while data is short: ad blocking switched on would do nothing")
+	}
+	if err := os.Chtimes(m2.cachePath(srv.URL+"/list"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	m5 := &Manager{Log: m.Log, Dir: dir}
+	m5.Configure(true, []string{srv.URL + "/list"})
+	before = hits.Load()
+	m5.refreshDue(context.Background(), false)
+	if hits.Load() != before+1 {
+		t.Error("an old copy was not refreshed once data is not short")
+	}
+
 	// Switching off stops blocking at once.
 	m2.Configure(false, []string{srv.URL + "/list"})
 	if m2.Blocked("x.tracker.example.net") || m2.Status().Enabled {

@@ -242,7 +242,7 @@ func (c *Core) runAddressCheck(ctx context.Context) {
 			if c.cfg.Inbound.InUse() {
 				url = c.cfg.Inbound.CheckURL
 			}
-			own = ownAddr4(wan.Active(c.wan.States()))
+			own = ownAddr4(c.active(c.wan.States()))
 		})
 		if url == "" || !own.IsValid() || (own == asked && url == askedURL && time.Now().Before(next)) {
 			continue
@@ -332,7 +332,7 @@ func (c *Core) addPeer(name string, full bool) (*PeerAdded, *proto.Error) {
 	if !s.Enabled {
 		return nil, proto.Errf(proto.ErrInvalid, "Switch on reaching home first.")
 	}
-	host := c.inboundStatus(c.cfg, wan.Active(c.wan.States())).Host
+	host := c.inboundStatus(c.cfg, c.active(c.wan.States())).Host
 	if host == "" {
 		return nil, proto.Errf(proto.ErrInvalid, "The router cannot be reached from outside as things stand, so the device would have nothing to connect to.")
 	}

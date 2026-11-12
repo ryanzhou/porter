@@ -204,6 +204,9 @@ public struct EthernetPort: Codable, Equatable, Identifiable {
     /// The speeds the port is held to as an internet source; nil reads
     /// as not held to any.
     public var shaping: ShapingConfig?
+    /// The data the port may use as an internet source; nil reads as no
+    /// limit.
+    public var data: DataLimit?
     public var id: String { name }
 
     /// The tagged networks as a list, whichever way "none" was said.
@@ -265,6 +268,67 @@ public struct ShapingConfig: Codable, Equatable {
 
 /// A provider's PPPoE sign-in for a wired uplink. The router keeps the
 /// user name and password only while it is enabled.
+/// How much data an internet source may use in a day or a month. The
+/// router counts what the source carries and stops using it for the rest
+/// of the period once that is the amount. It keeps the amount while this
+/// is switched off.
+public struct DataLimit: Codable, Equatable {
+    public var enabled: Bool
+    /// "day" or "month".
+    public var period: String
+    /// The amount for one period, in megabytes of a million bytes.
+    public var mb: Int
+    /// The day of the month a monthly period begins on, 1 to 31; in a
+    /// shorter month, its last day.
+    public var startDay: Int
+    /// Until when (unix time) the source is used although the amount is
+    /// spent; 0, or a time that has passed, for not at all.
+    public var liftUntil: Int64
+
+    public init(enabled: Bool = false, period: String = "month", mb: Int = 0, startDay: Int = 1, liftUntil: Int64 = 0) {
+        self.enabled = enabled
+        self.period = period
+        self.mb = mb
+        self.startDay = startDay
+        self.liftUntil = liftUntil
+    }
+
+    public var isDaily: Bool { period == "day" }
+
+    /// The largest amount the router accepts, in megabytes.
+    public static let largestMB = 10_000_000
+
+    /// Whether an amount is one the router accepts for a limit that is on.
+    public static func accepts(mb: Int) -> Bool { mb >= 1 && mb <= largestMB }
+
+    /// An amount of megabytes as a person types it in gigabytes: "5",
+    /// "1.5", "0.5".
+    public static func gbText(mb: Int) -> String {
+        let gb = Double(mb) / 1000
+        if gb == gb.rounded() { return String(Int(gb)) }
+        var text = String(format: "%.3f", gb)
+        while text.hasSuffix("0") { text.removeLast() }
+        return text
+    }
+
+    /// The megabytes of an amount typed in gigabytes, with a point or a
+    /// comma; nil for what is not a number above zero.
+    public static func mb(gbText text: String) -> Int? {
+        let cleaned = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
+        guard let gb = Double(cleaned), gb > 0, gb.isFinite else { return nil }
+        return Int((gb * 1000).rounded())
+    }
+
+    /// An amount of bytes as it is shown: "850 MB", "4.2 GB".
+    public static func amountText(bytes: UInt64) -> String {
+        let mb = Double(bytes) / 1_000_000
+        if mb < 1000 { return String(Int(mb.rounded())) + " MB" }
+        let gb = mb / 1000
+        if gb >= 100 || (gb * 10).rounded() == gb.rounded() * 10 { return String(Int(gb.rounded())) + " GB" }
+        return String(format: "%.1f GB", gb)
+    }
+}
+
 public struct PPPoESetup: Codable, Equatable {
     public var enabled: Bool
     public var username: String
@@ -422,6 +486,8 @@ public struct SavedNetwork: Codable, Equatable, Identifiable {
     /// The speeds the router is held to while it is on this network.
     /// Left out when joining, which keeps what is set, like `ip`.
     public var shaping: ShapingConfig?
+    /// The data this network may use; left out when joining, like `ip`.
+    public var data: DataLimit?
     public var id: String { ssid }
 
     public init(ssid: String, psk: String, hidden: Bool = false, priority: Int = 0) {
@@ -454,9 +520,12 @@ public struct WANConfig: Codable, Equatable {
 /// to whichever phone is plugged in.
 public struct PhoneSourceConfig: Codable, Equatable {
     public var shaping: ShapingConfig
+    /// The data a phone may use; nil reads as no limit.
+    public var data: DataLimit?
 
-    public init(shaping: ShapingConfig = ShapingConfig()) {
+    public init(shaping: ShapingConfig = ShapingConfig(), data: DataLimit? = nil) {
         self.shaping = shaping
+        self.data = data
     }
 }
 
@@ -476,13 +545,53 @@ public extension RouterConfig {
     /// alone.
     mutating func setShaping(_ shaping: ShapingConfig, source key: String, ssid: String? = nil) {
         if key == RouterConfig.uplinkPhone {
-            wan.phone = PhoneSourceConfig(shaping: shaping)
+            var phone = wan.phone ?? PhoneSourceConfig()
+            phone.shaping = shaping
+            wan.phone = phone
         } else if key == RouterConfig.uplinkWifi {
             if let index = wan.networks.firstIndex(where: { $0.ssid == ssid }) {
                 wan.networks[index].shaping = shaping
             }
         } else if let index = ethernet.firstIndex(where: { RouterConfig.uplinkEthernet($0.name) == key }) {
             ethernet[index].shaping = shaping
+        }
+    }
+
+    /// The data limit of the internet source with the given key; for
+    /// Wi-Fi, that of the saved network `ssid`.
+    func dataLimit(source key: String, ssid: String? = nil) -> DataLimit {
+        if key == RouterConfig.uplinkPhone { return wan.phone?.data ?? DataLimit() }
+        if key == RouterConfig.uplinkWifi {
+            return wan.networks.first(where: { $0.ssid == ssid })?.data ?? DataLimit()
+        }
+        return ethernet.first(where: { RouterConfig.uplinkEthernet($0.name) == key })?.data ?? DataLimit()
+    }
+
+    /// Sets it, in the place each kind of source keeps it, as
+    /// `setShaping` does.
+    mutating func setDataLimit(_ limit: DataLimit, source key: String, ssid: String? = nil) {
+        if key == RouterConfig.uplinkPhone {
+            var phone = wan.phone ?? PhoneSourceConfig()
+            phone.data = limit
+            wan.phone = phone
+        } else if key == RouterConfig.uplinkWifi {
+            if let index = wan.networks.firstIndex(where: { $0.ssid == ssid }) {
+                wan.networks[index].data = limit
+            }
+        } else if let index = ethernet.firstIndex(where: { RouterConfig.uplinkEthernet($0.name) == key }) {
+            ethernet[index].data = limit
+        }
+    }
+
+    /// The keys of the internet sources a Route can name, in the order
+    /// the router ranks them: the wired ports that are internet ports,
+    /// Wi-Fi where a radio joins other networks, and a phone on USB.
+    var routableSources: [String] {
+        let wifi = radios.contains { $0.role == .wan || $0.role == .apWan }
+        return wan.order.filter { key in
+            if key == RouterConfig.uplinkPhone { return true }
+            if key == RouterConfig.uplinkWifi { return wifi }
+            return ethernet.contains { RouterConfig.uplinkEthernet($0.name) == key && $0.role == .wan }
         }
     }
 }
@@ -591,19 +700,30 @@ public struct WireGuardPeer: Codable, Equatable {
     public var keepalive: Int
 }
 
-/// Where traffic goes: "direct", "block" or "vpn:<profile id>".
+/// Where traffic goes: "direct", "block", "vpn:<profile id>", or through
+/// one internet source, named by its key in `wan.order`: "source:<key>"
+/// (through whichever source is in use while that one is not available)
+/// or "only:<key>" (offline while it is not).
 public enum RouteAction: Hashable {
     case direct
     case block
     case vpn(String)
+    case source(String, only: Bool)
 
     public init?(_ raw: String) {
         switch raw {
         case "direct": self = .direct
         case "block": self = .block
         default:
-            guard raw.hasPrefix("vpn:") else { return nil }
-            self = .vpn(String(raw.dropFirst(4)))
+            if raw.hasPrefix("vpn:") {
+                self = .vpn(String(raw.dropFirst(4)))
+            } else if raw.hasPrefix("source:"), raw.count > 7 {
+                self = .source(String(raw.dropFirst(7)), only: false)
+            } else if raw.hasPrefix("only:"), raw.count > 5 {
+                self = .source(String(raw.dropFirst(5)), only: true)
+            } else {
+                return nil
+            }
         }
     }
 
@@ -612,7 +732,43 @@ public enum RouteAction: Hashable {
         case .direct: return "direct"
         case .block: return "block"
         case .vpn(let id): return "vpn:" + id
+        case .source(let key, let only): return (only ? "only:" : "source:") + key
         }
+    }
+
+    /// The key of the internet source the Route names, if it names one.
+    public var sourceKey: String? {
+        if case .source(let key, _) = self { return key }
+        return nil
+    }
+
+    /// Whether the Route uses its source and nothing else.
+    public var onlySource: Bool {
+        if case .source(_, let only) = self { return only }
+        return false
+    }
+
+    /// The same Route with "only this source" switched on or off; a
+    /// Route that names no source is returned as it is.
+    public func onlySource(_ only: Bool) -> RouteAction {
+        if case .source(let key, _) = self { return .source(key, only: only) }
+        return self
+    }
+
+    /// What a Route picker shows as chosen for a stored Route: the
+    /// source itself, whichever way it is used.
+    public static func choice(for raw: String) -> String {
+        guard let action = RouteAction(raw), let key = action.sourceKey else { return raw }
+        return RouteAction.source(key, only: false).raw
+    }
+
+    /// The Route to store when `choice` is picked while `current` is
+    /// stored: picking the source that is already chosen keeps "only
+    /// this source" as it is.
+    public static func picked(_ choice: String, current: String) -> String {
+        guard let next = RouteAction(choice), let key = next.sourceKey else { return choice }
+        if let now = RouteAction(current), now.sourceKey == key { return now.raw }
+        return choice
     }
 }
 
@@ -936,6 +1092,9 @@ public struct RouterStatus: Codable, Equatable {
     /// How each internet source that is to be held to a speed stands;
     /// nil from a router too old to hold any.
     public var shaping: [ShapingStatus]?
+    /// How each internet source with a data limit stands; nil from a
+    /// router too old to count.
+    public var data: [DataStatus]?
     /// What the router knows of the time, how each group stands, and
     /// the devices whose internet access is paused right now, by
     /// themselves or with their group; nil from a router too old to
@@ -997,6 +1156,98 @@ public extension RouterStatus {
     /// What pauses a device's internet access right now; nil when
     /// nothing does.
     func held(_ mac: String) -> HeldDevice? { held?.first { $0.mac == mac } }
+}
+
+/// What an internet source with a data limit has used of it.
+public struct DataStatus: Codable, Equatable, Identifiable {
+    /// The source's entry in `wan.order`, and for Wi-Fi the saved
+    /// network the limit belongs to.
+    public var key: String
+    public var ssid: String?
+    /// "day" or "month"; when the period began and when it ends (unix
+    /// time); the amount for it and what has been used, in bytes.
+    public var period: String
+    public var limit: UInt64
+    public var used: UInt64
+    public var since: Int64
+    public var resets: Int64
+    /// The amount is spent. The source is then not used again before
+    /// `resets`, unless `lifted`: it is used all the same.
+    public var reached: Bool
+    public var lifted: Bool
+    public var id: String { key + "/" + (ssid ?? "") }
+
+    public init(key: String, ssid: String? = nil, period: String, limit: UInt64, used: UInt64, since: Int64, resets: Int64, reached: Bool, lifted: Bool) {
+        self.key = key
+        self.ssid = ssid
+        self.period = period
+        self.limit = limit
+        self.used = used
+        self.since = since
+        self.resets = resets
+        self.reached = reached
+        self.lifted = lifted
+    }
+
+    /// Out of use for the rest of the period.
+    public var spent: Bool { reached && !lifted }
+
+    /// How much of the amount is used, from 0 to 1.
+    public var fraction: Double {
+        limit == 0 ? 0 : min(1, Double(used) / Double(limit))
+    }
+}
+
+/// How an internet source stands for a Route that names it.
+public enum SourceAvailability: Equatable {
+    /// Connected and reaching the internet: what is routed to it goes
+    /// there.
+    case online
+    /// Connected without reaching the internet: only what uses nothing
+    /// else is sent there.
+    case connected
+    /// Past its data limit, and not used for the rest of the period.
+    case dataSpent
+    /// Not connected.
+    case away
+}
+
+public extension RouterStatus {
+    /// The network the router has joined as an internet source, if any.
+    var joinedNetwork: String? {
+        stas.first(where: { $0.state == "connected" && !($0.ssid ?? "").isEmpty })?.ssid
+    }
+
+    /// How the data limit of a source stands; for Wi-Fi, that of the
+    /// saved network `ssid`, or of the network joined when none is named.
+    func data(source key: String, ssid: String? = nil) -> DataStatus? {
+        if key == RouterConfig.uplinkWifi {
+            guard let name = ssid ?? joinedNetwork else { return nil }
+            return data?.first { $0.key == key && $0.ssid == name }
+        }
+        return data?.first { $0.key == key }
+    }
+
+    /// How the source with the given key stands for a Route that names
+    /// it, by the router's own rules.
+    func availability(source key: String) -> SourceAvailability {
+        guard let uplink = wan.first(where: { $0.key == key }) else { return .away }
+        if data(source: key)?.spent == true { return .dataSpent }
+        let hasAddress = !(uplink.ipv4 ?? "").isEmpty || uplink.hasV6
+        if !uplink.carrier || !hasAddress { return .away }
+        return uplink.internet == "online" ? .online : .connected
+    }
+
+    /// Whether traffic with the given Route goes through the source it
+    /// names right now; nil for a Route that names none.
+    func usesSource(_ action: RouteAction) -> Bool? {
+        guard case .source(let key, let only) = action else { return nil }
+        switch availability(source: key) {
+        case .online: return true
+        case .connected: return only
+        case .dataSpent, .away: return false
+        }
+    }
 }
 
 /// How holding one internet source to its speeds stands.

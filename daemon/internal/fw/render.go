@@ -31,6 +31,11 @@ func ClassKey(p *Plan) string {
 	// there are go on as they were set up, and nothing was under way to
 	// addresses that did not exist.
 	q.Delegated, q.WANMTU = nil, nil
+	// Nor an uplink coming, going or running out of data: where what is
+	// marked for it goes then is the routing tables' business, and the
+	// control loop flushes for those (see Core.reconcile). Which mark a
+	// route gives is in the rules that stay.
+	q.Sources = nil
 	// Nor the IPv6 addresses a forwarded port is open to, which come and
 	// go with the device. A forward itself does decide: one that is taken
 	// away has to end the connections that came in by it.
@@ -146,6 +151,21 @@ func render(p *Plan, full bool) string {
 	// --- classification -------------------------------------------------
 	w("\tchain prerouting {")
 	w("\t\ttype filter hook prerouting priority mangle; policy accept;")
+	if forwards {
+		// A connection that comes in from an uplink is noted as that
+		// uplink's, so that the device's answers can be sent back the way
+		// it came (below) and not by whichever uplink is in use.
+		var arrived []string
+		for _, s := range p.Sources {
+			if s.If != "" {
+				arrived = append(arrived, fmt.Sprintf("%q : 0x%x", s.If, MarkArrived|s.Only))
+			}
+		}
+		if len(arrived) > 0 {
+			sort.Strings(arrived)
+			w("\t\tiifname @wan_ifs ct state new ct mark set iifname map { %s }", strings.Join(arrived, ", "))
+		}
+	}
 	w("\t\tiifname != @lan_ifs return")
 	// Traffic to the router itself (DNS, DHCP) and to the LAN is not routed
 	// by policy.
@@ -158,9 +178,10 @@ func render(p *Plan, full bool) string {
 	}
 	if forwards {
 		// What a device answers to a connection that came in from outside
-		// is not a connection of its own to classify: it goes back out
-		// the way the router itself would send it, by the uplink in use.
-		w("\t\tct direction reply return")
+		// is not a connection of its own to classify. It carries the mark
+		// of the uplink the connection arrived by, which is that of
+		// traffic for that uplink alone: back out there, or nowhere.
+		w("\t\tct direction reply meta mark set ct mark return")
 	}
 	w("\t\tct mark != 0 meta mark set ct mark return")
 	w("\t\tjump classify")
@@ -370,7 +391,8 @@ func render(p *Plan, full bool) string {
 	}
 	if forwards {
 		// A device's answers to what a forwarded port let in. They were
-		// not classified (see prerouting) and leave by an uplink only.
+		// not classified (see prerouting) and leave by an uplink only: the
+		// one the connection came in by, which its routing table sees to.
 		w("\t\tiifname @lan_ifs ct direction reply oifname @wan_ifs accept")
 	}
 	w("\t\tiifname @lan_ifs jump lan_out")
@@ -404,6 +426,15 @@ func render(p *Plan, full bool) string {
 			w("\t\tmeta mark & 0x%x == 0x%x oifname != %q jump refuse", ClassMask, v.Mark, v.If)
 		} else {
 			w("\t\tmeta mark & 0x%x == 0x%x jump refuse", ClassMask, v.Mark)
+		}
+	}
+	// And for what it sends for devices that use one uplink and no other:
+	// their lookups.
+	for _, s := range p.Sources {
+		if s.Usable && s.If != "" {
+			w("\t\tmeta mark & 0x%x == 0x%x oifname != %q jump refuse", ClassMask, s.Only, s.If)
+		} else {
+			w("\t\tmeta mark & 0x%x == 0x%x jump refuse", ClassMask, s.Only)
 		}
 	}
 	w("\t}")
@@ -472,8 +503,28 @@ func render(p *Plan, full bool) string {
 			w("\t\tmeta mark & 0x%x == 0x%x jump refuse", ClassMask, v.Mark)
 		}
 	}
-	// Whatever is left may leave directly: direct traffic, and traffic for
-	// a tunnel without a kill switch that is currently down.
+	// An uplink that has used up its data carries nothing more, whatever
+	// the routing tables say at this moment.
+	var spent []string
+	for _, s := range p.Sources {
+		if s.Spent && s.If != "" {
+			spent = append(spent, s.If)
+		}
+	}
+	if len(spent) > 0 {
+		w("\t\toifname { %s } jump refuse", strings.Join(quoteAll(sorted(spent)), ", "))
+	}
+	// What is for one uplink and no other leaves by that one, while it
+	// can be used, and not at all otherwise.
+	for _, s := range p.Sources {
+		if s.Usable && s.If != "" {
+			w("\t\tmeta mark & 0x%x == 0x%x oifname %q accept", ClassMask, s.Only, s.If)
+		}
+		w("\t\tmeta mark & 0x%x == 0x%x jump refuse", ClassMask, s.Only)
+	}
+	// Whatever is left may leave directly: direct traffic, traffic for a
+	// tunnel without a kill switch that is currently down, and traffic
+	// that prefers an uplink, by that one or by the one in use.
 	w("\t\tmeta mark & 0x%x >= 0x10 oifname @vpn_ifs jump refuse", ClassMask)
 	w("\t\tmeta mark & 0x%x != 0x%x oifname @wan_ifs accept", ClassMask, MarkBlock)
 	w("\t\tjump refuse")

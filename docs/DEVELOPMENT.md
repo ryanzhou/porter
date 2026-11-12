@@ -23,7 +23,7 @@ the project's GitHub releases, and only when asked for from the app.
                                                     ├─ dnsmasq          (LAN DHCP and router advertisements)
                                                     ├─ nftables         (firewall, NAT44/NAT66, classification)
                                                     ├─ tc               (CAKE queues on uplinks held to a speed)
-                                                    ├─ policy routing   (one table per VPN profile)
+                                                    ├─ policy routing   (one table per VPN profile and per uplink)
                                                     ├─ WireGuard        (kernel: profiles, and the router's own server)
                                                     ├─ DNS forwarder    (built in)
                                                     └─ mDNS relay       (built in)
@@ -34,7 +34,8 @@ every subsystem against it and against what the network is doing.
 
 - **Classification.** Each connection from the LAN is classified once in
   nftables and marked; the mark selects a routing table (the main table,
-  or one per VPN profile). The mark is kept in connection tracking.
+  one per VPN profile, or one per uplink for a route that names an
+  uplink). The mark is kept in connection tracking.
   Whenever the inputs to classification change, connection tracking is
   flushed so no flow stays on a path that no longer applies to it.
 - **Kill switch.** A VPN's table carries an `unreachable` backstop route
@@ -73,7 +74,8 @@ every subsystem against it and against what the network is doing.
   pulled is not used (the kernel would keep its route). The uplink to
   use is the first in the order that is online or behind a sign-in
   page; one that has an address but fails three reachability probes in
-  a row is stepped past. A sign-in page is believed on the second probe
+  a row is stepped past, and so is one that has used up its data (see
+  *Data limits*). A sign-in page is believed on the second probe
   that shows one when the uplink was online before, and a sign-in under
   way survives two failed probes.
 - **Presence.** A Wi-Fi device is online while an access point lists
@@ -359,8 +361,9 @@ every subsystem against it and against what the network is doing.
   answers to a connection from outside comes in from a bridge like
   anything it sends, but must not be classified: prerouting returns on
   `ct direction reply`, and the forward chain lets it out by an uplink.
-  It leaves by the uplink in use, like the router's own packets; a
-  connection that came in by another uplink does not get its answers.
+  It leaves by the uplink the connection came in by, whichever is in
+  use: see *Routes through one uplink* for how, and for the same about
+  the WireGuard server's own answers.
   A forward names its device by hardware address and is sent to the
   device's fixed address, which `config` insists on; `core.pinForwards`
   gives a device without one the address it has, when a forward for it
@@ -391,6 +394,126 @@ every subsystem against it and against what the network is doing.
   as its endpoint follows from that: the dynamic DNS name, else the
   public IPv4 address, else a public IPv6 address, else nothing, and
   then no device is made.
+- **Routes through one uplink.** A route can name an uplink by its key
+  in the order (`source:<key>`, `only:<key>`), wherever a route can be:
+  a rule, a device, a group, a network, the default. It works the way a
+  route through a VPN does. Uplinks are numbered (`fw.SourceIndex`:
+  Wi-Fi, a phone, then the wired ports as listed), and number *i* has
+  two marks, `MarkSource(i)` (0x40 up) for traffic that prefers it and
+  `MarkOnly(i)` (0x80 up) for traffic that uses nothing else, and one
+  routing table, `TableSource(i)` (150 up), which `fw.SyncRouting`
+  keeps: a default route out by the uplink while it is connected and
+  may be used, built exactly like the override table's (gateway, or the
+  link itself for a PPPoE session), and always an `unreachable`
+  backstop below it. The backstop is what refuses the address family
+  the uplink does not have, so that IPv6 does not go round an uplink
+  that is IPv4 only, and everything while the uplink is away.
+  *The switch.* What a VPN has as its kill switch is here part of the
+  route, because it belongs to the use and not to the uplink: the same
+  phone can be the only way out for the work laptop and merely the
+  preferred one for the television, which a switch on the phone could
+  not say. The two kinds differ in their policy-routing rules and
+  nowhere else. The rule for `MarkOnly(i)` is always there, so that
+  traffic is routed by the table or refused by its backstop, and the
+  forward chain accepts the mark only on its way out by that uplink,
+  the second check a kill switch has too. The rule for `MarkSource(i)`
+  is there only while the uplink reaches the internet (online, by its
+  probe); without it the traffic falls through to the override table
+  and is ordinary traffic of the uplink in use. So "available" means
+  two things on purpose: for traffic that prefers an uplink, that the
+  uplink is worth using; for traffic that has no other, only that it is
+  connected, since a probe that fails is no reason to cut off what
+  could go nowhere else anyway. Uplinks are probed whether or not they
+  are in use, every 15 seconds while there is more than one, and are
+  taken to have stopped working after three probes without an answer,
+  which is how long traffic that prefers a dead uplink waits.
+  *Lookups* follow (`dnsfwd.SourceDNS`): for a device routed through an
+  uplink the forwarder asks the resolvers that uplink's network named,
+  or the configured ones, from a socket that carries the uplink's
+  `MarkOnly` and is bound to its interface. The mark finds the table;
+  the binding is for a resolver inside the uplink's own network where
+  another uplink is on a network numbered the same (the cable and the
+  Wi-Fi of one hotel), which the main table would otherwise decide by
+  metric. Where the traffic would fall back or be refused, so is the
+  lookup.
+  *Address translation* needed nothing new. What leaves by an uplink is
+  masqueraded, and the one exception, an address out of the prefix that
+  very uplink delegated, is written per uplink: a device's delegated
+  address leaving by another uplink, which a route through one now
+  makes an everyday case, is translated like a private one.
+  *What the router sends itself.* Two more rules per uplink, ahead of
+  the override table: from each of the uplink's own addresses, and from
+  any socket bound to its interface, to the uplink's table. The first
+  is what answers a connection to the router itself by the uplink it
+  came in on (the kernel's WireGuard answers from the address it was
+  spoken to at, and would otherwise find that address routed out by
+  another interface and give it up); the second makes the reachability
+  probe, a speed test and the lookups above independent of the override
+  table. A program that answers from an unbound socket without saying
+  from which address cannot be helped by routing: it has chosen the
+  wrong address before any rule sees the packet. (The userspace
+  WireGuard the tests can fall back on is one, where the kernel hands
+  it several packets at once; the end-to-end test of this runs with
+  the kernel's.)
+  *Forwarded ports.* A device's answers come in from a bridge and say
+  nothing of where the connection came from, so that is noted when it
+  arrives: a new connection from an uplink has its connection mark set
+  to that uplink's `MarkOnly`, with `MarkArrived` (0x200) on top, and
+  prerouting gives a packet in the reply direction the connection's
+  mark. The answers then go by the uplink's table, or nowhere.
+  *What makes connections start over.* The tables of all uplinks are in
+  `routeKey`, which decides whether `SyncRouting` runs; only those of
+  uplinks that a route names are in `movedKey`, which decides whether
+  connection tracking is flushed. A phone that is plugged in and that
+  nothing is routed to gets its table and costs no connection.
+- **Data limits.** An uplink can have only so much data to spend in a
+  day or a month (`data`, kept where `shaping` is: per wired port, per
+  saved Wi-Fi network, for the phone). `internal/usage` counts: on
+  every pass the control loop reads the byte counters of the uplink's
+  interface (`netx.Traffic`, received plus sent) and adds what they
+  have moved by to the line's count for the current period. A line is
+  an uplink's key, or one saved Wi-Fi network. The count survives what
+  the interface does not: with it are kept the interface's name and
+  index, the kernel's boot id and the last reading, so that a counter
+  that simply carried on (the daemon restarted) is read as what was
+  carried meanwhile, and anything else (a phone plugged in again, a new
+  PPPoE session, a restart of the router) starts from the new
+  interface's zero. A radio that was on another network in between has
+  carried that network's data, which is told by the line not having
+  been read on the pass before. The file (`usage.json`) is written when
+  the traffic history is, every ten minutes and at shutdown, and at
+  once when a limit is reached: a power cut loses at most ten minutes
+  of counting and never brings a spent uplink back.
+  *Periods* are days and months in `system.timezone` (UTC while none is
+  set), a month beginning on a chosen day and, where it has no such
+  day, on its last (`usage.PeriodStart`). A period only follows the one
+  before: a clock that is behind after a power cut counts into the
+  period that was current, and one that had run ahead and has been
+  confirmed to be earlier moves the period back and keeps what was
+  counted since, so that a wrong clock can lose a count but cannot make
+  one stand still for months.
+  *Reached.* An uplink whose count has reached its amount is, to
+  everything that chooses a way out, an uplink that is not there:
+  `usable` leaves it out before `wan.Active` picks the uplink in use,
+  its table (above) loses its route and keeps the backstop, and the
+  forward chain refuses what would leave by it. A route that prefers it
+  falls back and a route that uses it alone is refused, lookups
+  included. The limit wins over the route on purpose: it was set to
+  stop spending, and the status (`data[].reached`) lets the app say
+  why those devices are offline. Where no other uplink is left the
+  override table refuses both families, because the main table still
+  has the spent uplink's default route. With no route in its table the
+  uplink's probe mostly fails as well and it is shown as not reaching
+  the internet, which decides nothing while it is out of use. (Mostly:
+  the kernel lets a socket bound to an interface send on it even where
+  no route is found, taking the destination to be on the link, which
+  over a PPPoE session gets through.) The probe is answered again
+  within seconds of the limit being lifted (`data.lift_until`, set by
+  the app to the end of the period) or the next period beginning.
+  *Sparing.* While the uplink in use has a limit, reached or not, the
+  router does not refresh block lists it has a copy of and does not
+  fetch the month's country database (`Core.sparing`), unless asked to
+  with `updates.check`.
 - **Groups and schedules.** A group (`groups` in the configuration)
   names devices by hardware address and has a route, a switch that
   pauses it, and schedules: times of the week it is offline. Nothing
@@ -641,7 +764,13 @@ CI runs the end-to-end tests this way.
   switches it off); a second network (its own addresses, isolation, a
   route and a rule of its own, and its removal); a second uplink
   standing in for a phone (the order of uplinks, and falling back when
-  the first stops reaching the internet); a group of devices
+  the first stops reaching the internet); routes through that second
+  uplink (`sources_test.go`: one device leaving by it with its lookups
+  while the other leaves by the first, over IPv6 as well, a rule for
+  one site, the uplink going away with the device falling back or held
+  as its route says, and a data limit of a megabyte reached, stepped
+  past when ranked first, lifted, taken back and begun anew the next
+  day); a group of devices
   (`groups_test.go`: with the router's own clock set to a few seconds
   before bedtime, a device in the group is cut off when the schedule
   starts, not before and within a pass of the control loop, its
@@ -665,16 +794,20 @@ CI runs the end-to-end tests this way.
   WireGuard from the configuration `server.peer_add` gave it and
   reaches a device at home, the router's DNS, the internet through the
   router and the app's port, under a rule by address, until it is
-  switched off; and a forwarded port, from the upstream network and
-  from inside, to and from a network that is kept apart, restricted to
-  some addresses, switched off, and over IPv6 at a device's delegated
-  address); and the ways a home connection
+  switched off, and connecting to the router's address on a second
+  uplink, answered from there (with the kernel's WireGuard); and a
+  forwarded port, from the upstream network and from inside, by a
+  second uplink with the upstream network refusing answers that leave
+  by the wrong one, to and from a network that is kept apart,
+  restricted to some addresses, switched off, and over IPv6 at a
+  device's delegated address); and the ways a home connection
   arrives (`home_test.go`): the internet under a VLAN tag; PPPoE against
   a real `pppoe-server` (nobody answering, a wrong password, a session,
   the server restarting under it); and a prefix delegated by a DHCPv6
   server written out in the test (`dhcp6_test.go`), with a device going
-  out from its own address, nothing coming in, a second network with a
-  /64 of its own, and the prefix being withdrawn; devices finding each
+  out from its own address, nothing coming in, the same device routed
+  through another uplink and masqueraded there, a second network with
+  a /64 of its own, and the prefix being withdrawn; devices finding each
   other across networks (`trunk_test.go`: a question asked by multicast
   DNS on one network heard on another from the router's address there,
   the answer coming back, nothing repeated twice or handed back, the
@@ -729,7 +862,7 @@ project file.
 sample router and never touches Bluetooth. `-demoScreen <name>` opens one
 screen directly: a tab name (`overview`, `internet`, `devices`, `vpn`,
 `settings`) or `traffic`, `flows`, `speedtest`, `device`, `adblock`,
-`networks`, `outside`, `smoothing`, `group`, `software`, `setup`, `connect`, `share`. The *iOS* workflow
+`networks`, `outside`, `smoothing`, `datalimit`, `group`, `software`, `setup`, `connect`, `share`. The *iOS* workflow
 uses this to publish screenshots as an artifact.
 
 **Two ways of changing things.** Most controls apply at once: the app
@@ -826,6 +959,13 @@ draft or pre-release. The router and the app both show the version.
   rules resets connection tracking, which also clears the active list.
 - Downloaded data (block lists, the country database) is checked for
   plausibility before it replaces the copy in use.
+- A data limit is counted from the interface's counters every five
+  seconds, so an uplink is taken out of use up to that long after the
+  amount is reached, and it counts everything the interface carries,
+  the router's own probes included, but not what a phone uses for
+  itself or what the provider rounds up. Up to ten minutes of counting
+  are lost in a power cut. Two phones plugged in at once are one line,
+  and only the first is counted.
 - A schedule starts and ends up to five seconds late: whenever the
   control loop next comes round. After a power cut it goes by the time
   the router last knew until the router is online or the app has

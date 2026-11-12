@@ -201,13 +201,35 @@ devices behind a wired port losing their connection when the port
 changes hands or a network on it changes its VLAN ID).
 
 The document's format is `version` 3. (Format 3 added
-`system.bluetooth_only` and `system.timezone`; `vlan`, `pppoe`, `tagged`
-and `shaping` for wired ports; `vlan` and `discovery` for networks;
-`shaping` for saved Wi-Fi networks and `wan.phone`; `inbound`; and
-`groups`, with `groups` in a rule's `src` and `allow_until` for a
-device, to format 2 and changed nothing else; a router that stored
+`system.bluetooth_only` and `system.timezone`; `vlan`, `pppoe`, `tagged`,
+`shaping` and `data` for wired ports; `vlan` and `discovery` for
+networks; `shaping` and `data` for saved Wi-Fi networks and
+`wan.phone`; `inbound`; `groups`, with `groups` in a rule's `src` and
+`allow_until` for a device; and the routes `source:<key>` and
+`only:<key>`, to format 2 and changed nothing else; a router that stored
 format 2 carries it over as it is, with nothing let in, no source held
-to a speed and no groups.) Its parts, briefly:
+to a speed or to an amount of data, and no groups.)
+
+A **route** (a rule's `action`, `policy.default`, and `route` of a
+device, a group or a network) is one of:
+
+```
+"direct"        by whichever uplink is in use
+"vpn:<id>"      through that VPN profile
+"source:<key>"  through the uplink with that key (as in wan.order:
+                "eth:<port>", "wifi", "phone"); by the uplink in use
+                while that one is not connected, does not reach the
+                internet, or has used up its data
+"only:<key>"    through that uplink and no other: refused while it is
+                not connected or has used up its data
+"block"         refused
+```
+
+A key has to be one the configuration could have an uplink for: `wifi`,
+`phone`, or `eth:` and a port listed in `ethernet`. Where a route may be
+left unset it is `""`.
+
+Its parts, briefly:
 
 ```
 system      {name country ssh{enabled authorized_keys[]} bluetooth_only timezone}
@@ -222,7 +244,7 @@ networks[]  {id name address ula_prefix isolated route vlan discovery}
             the router's own networks; the first ("lan") always exists.
             address and ula_prefix may be left empty for a new one: the
             router chooses. isolated: cannot open connections to the
-            others. route: "", "direct", "block" or "vpn:<id>".
+            others. route: "" or a route (above).
             vlan: the VLAN ID the network has on wired ports that carry
             it tagged, 1 to 4094, 0 for none; no two networks have the
             same. discovery: multicast DNS is relayed between this
@@ -246,12 +268,22 @@ ethernet[]  {name role ip vlan pppoe shaping network tagged[]}
             shaping {enabled down_kbps up_kbps}: the uplink is held to
             these rates, in kbit/s, each from 100 to 10000000. Both are
             needed while it is enabled; they are kept while it is not.
+            data {enabled period mb start_day lift_until}: the uplink
+            may carry mb megabytes (of a million bytes, 1 to 10000000)
+            in each period, "day" or "month"; a month begins on
+            start_day (1 to 31; in a shorter month on its last day),
+            in system.timezone, or UTC while none is set. Once that is
+            used the uplink is out of use until the period ends (see
+            `data[]` in the status), unless lift_until (unix time) has
+            not passed: the app sets it to the status's `resets` for
+            "use anyway", and to 0 to take that back. One whose time
+            has passed means nothing and is left in place.
 wan         {networks[] wifi_mac eth_mac order[] phone probe}
-            networks[] {ssid psk hidden priority ip shaping}: the saved
-            Wi-Fi networks; shaping as for a wired port, applied while
-            the router is on that network.
+            networks[] {ssid psk hidden priority ip shaping data}: the
+            saved Wi-Fi networks; shaping and data as for a wired port,
+            applied and counted while the router is on that network.
             order: uplink keys, best first: "eth:<port>", "wifi", "phone"
-            phone {shaping}: what is set for a phone sharing its
+            phone {shaping data}: what is set for a phone sharing its
             connection over USB, whichever phone it is
 policy      {default rules[{id name enabled src{devices cidrs networks groups} dst action}]}
             src.groups: ids of groups; the rule is for whoever is in
@@ -324,7 +356,8 @@ name id version time uptime temp ready rev pairing
            gave while the clock itself has not been set since the start
 internet   "down" | "connecting" | "limited" | "captive" | "online"
 active     interface of the uplink in use: the first in the configured
-           order that reaches the internet or stands behind a sign-in page
+           order that reaches the internet or stands behind a sign-in
+           page, and has not used up its data (data[])
 wan[]      {if kind key label metric rank carrier internet ipv4 gateway ipv6[] has_v6 prefix? dns[] pppoe? portal_url captive_api mac}
            kind "eth" | "wifi" | "phone"; key: its entry in wan.order;
            rank: its place in that order, 0 first.
@@ -387,6 +420,18 @@ shaping[]  {key if state down up error?}
            packets the queue has dropped or marked (ECN) to make a
            sender slow down since it was put there. The counters are
            read every few seconds and do not cause status events.
+data[]     {key ssid? period limit used since resets reached lifted}
+           one entry for each data limit that is enabled, whether or
+           not its uplink is there: a wired internet port's, each
+           saved Wi-Fi network's (key "wifi", with its ssid), the
+           phone's. limit, used: bytes for the period and bytes
+           carried in it (received and sent, by the uplink's interface
+           counters); since, resets: the period's beginning and end
+           (unix time). reached: used is not below limit. Unless
+           lifted (data.lift_until has not passed), the uplink is then
+           out of use: left out when the uplink in use is chosen, and
+           to routes that name it the same as not connected. A change
+           of `used` alone causes no status event.
 clock      {zone trusted}
            zone: system.timezone. trusted: since the router started,
            `time` has been confirmed by a time server, by
@@ -425,7 +470,7 @@ loop notices within five seconds of the minute.
 | `radios.list` | – | `[{id,phy,iface,driver,bus,product,mac,bands[],ap,sta,ap_sta,max_ap,max_ap_sta,present,role}]` |
 | `wifi.uplink` | `{radio}` | `{}` – makes that radio the one that joins upstream networks (`""`: none) |
 | `wifi.scan` | `{quick?}` | `[{ssid,signal,freq,security,known}]`; takes several seconds, or with `quick` answers at once from the last scan and starts a new one |
-| `wifi.connect` | `{ssid,psk,hidden}` | `{}` – saves the network with top priority; one that is saved already keeps its `ip` and `shaping` |
+| `wifi.connect` | `{ssid,psk,hidden}` | `{}` – saves the network with top priority; one that is saved already keeps its `ip`, `shaping` and `data` |
 | `wifi.forget` | `{ssid}` | `{}` |
 | `wan.new_mac` | `{kind: "wifi"\|"eth"}` | `{}` – new random upstream MAC |
 | `wan.recheck` | – | `{}` – probe reachability now |
@@ -469,7 +514,8 @@ A flow is a connection from a LAN device to somewhere beyond the router,
 read from connection tracking every few seconds. `name` is the host name
 the address was resolved as through the router's DNS, `country` comes
 from the country database, `path` is the route the connection was
-classified onto. Connections that were refused by a block rule never
+classified onto (`source:<key>` for either kind of route through an
+uplink). Connections that were refused by a block rule never
 enter connection tracking and are not listed.
 
 `speedtest.run` measures from the router itself, against the server in
@@ -534,7 +580,7 @@ that has a port forwarded to it.
 | `system.logs` | – | `[string]` |
 | `system.reboot` / `system.poweroff` | – | `{}` |
 | `system.factory_reset` | – | `{}` – erases settings, pairings and the router's key |
-| `updates.check` | – | `{}` – look for newer block lists and a newer country database now |
+| `updates.check` | – | `{}` – look for newer block lists and a newer country database now, also while the uplink in use has a data limit, when the router does not look by itself |
 
 The app sends `system.set_time` at the start of every session: the Pi has
 no battery-backed clock. The clock is set if it differs by more than two
@@ -560,6 +606,6 @@ it ends with the router restarting, which drops the session. `state` is
 | Event | Data |
 |-------|------|
 | `status` | Status, whenever something other than a counter changed |
-| `event` | `{t,kind,msg,mac?}` – a new activity log entry; kind `group` when a schedule takes a group offline or a group comes back by itself |
+| `event` | `{t,kind,msg,mac?}` – a new activity log entry; kind `group` when a schedule takes a group offline or a group comes back by itself, `data` when an uplink has used up its data for the period |
 | `speedtest` | `{phase: "latency"\|"download"\|"upload"\|"done", mbps}` – progress of a running test |
 | `firmware` | the result of `firmware.status`, whenever it changes |

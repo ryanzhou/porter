@@ -7,6 +7,8 @@
 //	MarkDirect   main routing table (the active uplink)
 //	MarkBlock    rejected in the forward hook
 //	MarkVPN(i)   routing table TableVPN(i), which holds the tunnel's routes
+//	MarkSource(i), MarkOnly(i)
+//	             routing table TableSource(i), which leads out by one uplink
 //
 // The mark is stored in the conntrack entry so later packets of the flow
 // skip classification. Whenever the classification inputs change the
@@ -27,6 +29,10 @@ const (
 	// MarkPortal is OR'd onto MarkDirect for a device that is allowed
 	// straight out while the uplink sits behind a captive portal.
 	MarkPortal uint32 = 0x100
+	// MarkArrived is OR'd onto MarkOnly(i) in the connection mark of a
+	// connection that came in from uplink i: what answers it goes back
+	// out by that uplink, or not at all.
+	MarkArrived uint32 = 0x200
 
 	LANBridge = "br-lan"
 	Table     = "porter"
@@ -34,12 +40,21 @@ const (
 	// Rule priorities and routing tables.
 	// PrefOwnBase: what the router itself sends for a tunnel (see
 	// syncRules), ahead of everything else.
-	PrefOwnBase  = 60
-	PrefMain     = 100
-	PrefVPNBase  = 110
-	PrefUplink   = 140
-	TableVPNBase = 110
-	TableUplink  = 105
+	// PrefSourceOwn: what the router sends from an uplink's own address,
+	// or from a socket bound to its interface, leaves by that uplink.
+	// PrefSource: what is marked for an uplink goes by its table.
+	PrefOwnBase     = 60
+	PrefMain        = 100
+	PrefVPNBase     = 110
+	PrefSourceOwn   = 120
+	PrefSource      = 130
+	PrefUplink      = 140
+	TableVPNBase    = 110
+	TableUplink     = 105
+	TableSourceBase = 150
+	// MaxSources is how many uplinks can have a mark and a table: Wi-Fi,
+	// a phone, and as many wired ports as a configuration may list.
+	MaxSources = 34
 )
 
 // Bridge is the bridge interface of one of the router's networks. The
@@ -48,6 +63,45 @@ func Bridge(networkID string) string { return "br-" + networkID }
 
 func MarkVPN(index int) uint32 { return 0x10 + uint32(index) }
 func TableVPN(index int) int   { return TableVPNBase + index }
+
+// MarkSource is the mark of what prefers uplink i, and goes by whichever
+// uplink is in use while that one does not reach the internet. MarkOnly is
+// the mark of what uses uplink i and nothing else. Both lead to
+// TableSource(i).
+func MarkSource(index int) uint32 { return 0x40 + uint32(index) }
+func MarkOnly(index int) uint32   { return 0x80 + uint32(index) }
+func TableSource(index int) int   { return TableSourceBase + index }
+
+// SourceIndex numbers the uplinks a configuration can have, by key: Wi-Fi,
+// a phone, then the wired ports in the order they are listed.
+func SourceIndex(c *config.Config, key string) (int, bool) {
+	switch key {
+	case config.UplinkWifi:
+		return 0, true
+	case config.UplinkPhone:
+		return 1, true
+	}
+	port, wired := config.EthOfUplink(key)
+	for i, e := range c.Ethernet {
+		if wired && e.Name == port && i+2 < MaxSources {
+			return i + 2, true
+		}
+	}
+	return 0, false
+}
+
+// SourceKey is the uplink key SourceIndex gave the number to.
+func SourceKey(c *config.Config, index int) (string, bool) {
+	switch {
+	case index == 0:
+		return config.UplinkWifi, true
+	case index == 1:
+		return config.UplinkPhone, true
+	case index >= 2 && index-2 < len(c.Ethernet):
+		return config.UplinkEth(c.Ethernet[index-2].Name), true
+	}
+	return "", false
+}
 
 // VPNIfName is the WireGuard interface for a VPN profile.
 func VPNIfName(id string) string { return "wg-" + id }
@@ -72,7 +126,10 @@ type Plan struct {
 	// LANs are the router's own networks, the main one first.
 	LANs []PlanLAN
 	VPNs []PlanVPN
-	SSH  bool
+	// Sources are the uplinks that are there or that a route names, in
+	// the order of their marks.
+	Sources []PlanSource
+	SSH     bool
 	// Control: the app may connect over the router's own networks.
 	Control   bool
 	Intercept bool
@@ -141,6 +198,20 @@ type PlanForward struct {
 	From4, From6 []netip.Prefix
 }
 
+// PlanSource is one uplink as a route that names it, and a connection
+// that came in by it, see it.
+type PlanSource struct {
+	Key string
+	// If is the uplink's interface, empty while it is not there.
+	If string
+	// Mark and Only are MarkSource and MarkOnly of its number.
+	Mark, Only uint32
+	// Usable: it is connected and may be used, so what is marked Only may
+	// leave by it. Spent: it has used up its data, and nothing is
+	// forwarded out by it at all.
+	Usable, Spent bool
+}
+
 type PlanVPN struct {
 	ID         string
 	If         string
@@ -183,8 +254,9 @@ func fam(v6 bool) string {
 	return "4"
 }
 
-// MarkFor maps a config action to a mark. An action naming a VPN that does
-// not exist blocks, so a dangling reference can never open a path.
+// MarkFor maps a config action to a mark. An action naming a VPN or an
+// uplink that does not exist blocks, so a dangling reference can never
+// open a path.
 func MarkFor(c *config.Config, action string) uint32 {
 	switch action {
 	case config.ActDirect:
@@ -199,7 +271,21 @@ func MarkFor(c *config.Config, action string) uint32 {
 			}
 		}
 	}
+	if key, only, ok := config.SourceOf(action); ok {
+		if i, known := SourceIndex(c, key); known {
+			if only {
+				return MarkOnly(i)
+			}
+			return MarkSource(i)
+		}
+	}
 	return MarkBlock
+}
+
+// SourceState is what is known at the moment of an uplink that is there.
+type SourceState struct {
+	Key, If       string
+	Usable, Spent bool
 }
 
 // Runtime is the non-config input to a plan.
@@ -214,6 +300,8 @@ type Runtime struct {
 	// hardware address. A forwarded port is opened to those of them that
 	// are in a network's /64 of a delegated prefix.
 	Addrs6 map[string][]netip.Addr
+	// Sources are the uplinks that are there.
+	Sources []SourceState
 	// Held are the devices that are cut off right now, by hardware
 	// address (see sched.Evaluate): next to the devices the configuration
 	// has paused, those whose group is offline at this hour.
@@ -319,6 +407,26 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 	}
 	for mac, route := range c.DeviceRoutes() {
 		p.DeviceMarks[mac] = MarkFor(c, route)
+	}
+	// The uplinks that are there, and those a route names although they
+	// are not: what is marked for one of those alone must still be held.
+	sources := map[int]PlanSource{}
+	for _, s := range rt.Sources {
+		if i, ok := SourceIndex(c, s.Key); ok {
+			sources[i] = PlanSource{Key: s.Key, If: s.If, Mark: MarkSource(i), Only: MarkOnly(i), Usable: s.Usable, Spent: s.Spent}
+		}
+	}
+	for _, key := range c.RoutedSources() {
+		if i, ok := SourceIndex(c, key); ok {
+			if _, there := sources[i]; !there {
+				sources[i] = PlanSource{Key: key, Mark: MarkSource(i), Only: MarkOnly(i)}
+			}
+		}
+	}
+	for i := 0; i < MaxSources; i++ {
+		if s, ok := sources[i]; ok {
+			p.Sources = append(p.Sources, s)
+		}
 	}
 	for _, r := range c.Policy.Rules {
 		if !r.Enabled {

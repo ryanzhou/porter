@@ -129,11 +129,14 @@ func (c *Config) Normalize() {
 		if !e.PPPoE.Enabled {
 			e.PPPoE = PPPoE{}
 		}
+		e.Data.normalize()
 	}
 	c.normalizeOrder()
 	for i := range c.WAN.Networks {
 		c.WAN.Networks[i].IP.normalize()
+		c.WAN.Networks[i].Data.normalize()
 	}
+	c.WAN.Phone.Data.normalize()
 	// Configurations saved before speed tests existed have no server set.
 	if c.SpeedTest.DownloadURL == "" && c.SpeedTest.UploadURL == "" {
 		c.SpeedTest = DefaultSpeedTest()
@@ -458,6 +461,9 @@ func (c *Config) validateRadios() error {
 		if err := e.Shaping.validate(); err != nil {
 			return err
 		}
+		if err := e.Data.validate(); err != nil {
+			return err
+		}
 		if err := c.validatePortNetworks(e); err != nil {
 			return err
 		}
@@ -508,6 +514,41 @@ func (s Shaping) validate() error {
 	}
 	if s.Enabled && (s.DownKbps == 0 || s.UpKbps == 0) {
 		return fmt.Errorf("Smoothing out heavy use needs both speeds of the internet source, download and upload.")
+	}
+	return nil
+}
+
+// normalize gives a data limit that has never been set what the app
+// starts from: a month that begins on the first.
+func (l *DataLimit) normalize() {
+	l.Period = strings.ToLower(strings.TrimSpace(l.Period))
+	if l.Period == "" {
+		l.Period = PeriodMonth
+	}
+	if l.StartDay == 0 {
+		l.StartDay = 1
+	}
+}
+
+// validate checks a data limit. The amount has to be there while the limit
+// is switched on; switched off, what is kept still has to be an amount, or
+// nothing.
+func (l DataLimit) validate() error {
+	// What Normalize fills in is taken as it would fill it in.
+	if l.Period != PeriodDay && l.Period != PeriodMonth && l.Period != "" {
+		return fmt.Errorf("A data limit is for a day or for a month.")
+	}
+	if l.MB < 0 || l.MB > MaxDataMB {
+		return fmt.Errorf("A data limit is between 1 MB and %d GB.", MaxDataMB/1000)
+	}
+	if l.Enabled && l.MB == 0 {
+		return fmt.Errorf("A data limit needs the amount of data the internet source may use.")
+	}
+	if l.StartDay < 0 || l.StartDay > 31 {
+		return fmt.Errorf("The day of the month a data limit starts on is a number from 1 to 31.")
+	}
+	if l.LiftUntil < 0 || l.LiftUntil >= maxUnix {
+		return fmt.Errorf("until when a data limit is lifted is not a time")
 	}
 	return nil
 }
@@ -748,8 +789,14 @@ func (c *Config) validateWAN() error {
 		if err := n.Shaping.validate(); err != nil {
 			return err
 		}
+		if err := n.Data.validate(); err != nil {
+			return err
+		}
 	}
 	if err := w.Phone.Shaping.validate(); err != nil {
+		return err
+	}
+	if err := w.Phone.Data.validate(); err != nil {
 		return err
 	}
 	if err := validMACPolicy(w.WifiMAC, "wan.wifi_mac"); err != nil {
@@ -1157,6 +1204,14 @@ func (c *Config) validAction(a string, allowEmpty bool) error {
 	if id, ok := VPNOf(a); ok {
 		if c.VPN(id) == nil {
 			return fmt.Errorf("action refers to unknown VPN %q", id)
+		}
+		return nil
+	}
+	if key, _, ok := SourceOf(a); ok {
+		// A key no uplink could have is refused like a VPN that does not
+		// exist: nothing could ever be routed to it.
+		if !c.UplinkKey(key) {
+			return fmt.Errorf("action refers to unknown internet source %q", key)
 		}
 		return nil
 	}

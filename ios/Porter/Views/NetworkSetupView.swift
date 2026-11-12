@@ -767,12 +767,8 @@ private struct NetworkEditor: View {
                 }
             }
             Section {
-                Picker("Route", selection: field(\.route, "")) {
-                    Text(defaultRouteLabel).tag("")
-                    ForEach(model.availableActions, id: \.self) { action in
-                        Text(model.actionLabel(action.raw)).tag(action.raw)
-                    }
-                }
+                RoutePicker(title: "Route", selection: field(\.route, ""), defaultLabel: defaultRouteLabel)
+                RouteSourceRows(selection: field(\.route, ""), subject: .network)
             } footer: {
                 Text("Route sets how devices on this network go online. A device's own route, and a rule on the VPN tab that fits its traffic, take priority.")
             }

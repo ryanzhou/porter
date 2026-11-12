@@ -36,13 +36,29 @@ func newUpstreams() *upstreams {
 	return &upstreams{tls: map[string]*tlsConn{}, https: map[string]*http.Client{}}
 }
 
-func dialer(mark uint32) *net.Dialer {
+// egress is the way out of the router a query is given: the firewall mark
+// of its path and, for a path that is one uplink, that uplink's
+// interface. The mark alone finds the uplink's routing table; bound to
+// the interface as well, a resolver inside the uplink's own network is
+// reached through it even where another uplink is on a network numbered
+// the same (the cable and the Wi-Fi of one hotel).
+type egress struct {
+	mark uint32
+	dev  string
+}
+
+func dialer(via egress) *net.Dialer {
 	d := &net.Dialer{Timeout: 3 * time.Second}
-	if mark != 0 {
+	if via.mark != 0 || via.dev != "" {
 		d.Control = func(network, address string, c syscall.RawConn) error {
 			var serr error
 			err := c.Control(func(fd uintptr) {
-				serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, int(mark))
+				if via.mark != 0 {
+					serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, int(via.mark))
+				}
+				if via.dev != "" && serr == nil {
+					serr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, via.dev)
+				}
 			})
 			if err != nil {
 				return err
@@ -53,20 +69,20 @@ func dialer(mark uint32) *net.Dialer {
 	return d
 }
 
-func (u *upstreams) exchange(ctx context.Context, m *dns.Msg, srv config.Upstream, mark uint32) (*dns.Msg, error) {
+func (u *upstreams) exchange(ctx context.Context, m *dns.Msg, srv config.Upstream, via egress) (*dns.Msg, error) {
 	switch srv.Proto {
 	case "udp":
-		return exchangePlain(ctx, m, srv, mark)
+		return exchangePlain(ctx, m, srv, via)
 	case "tls":
-		return u.exchangeTLS(ctx, m, srv, mark)
+		return u.exchangeTLS(ctx, m, srv, via)
 	case "https":
-		return u.exchangeHTTPS(ctx, m, srv, mark)
+		return u.exchangeHTTPS(ctx, m, srv, via)
 	}
 	return nil, fmt.Errorf("unknown upstream protocol %q", srv.Proto)
 }
 
-func exchangePlain(ctx context.Context, m *dns.Msg, srv config.Upstream, mark uint32) (*dns.Msg, error) {
-	c := &dns.Client{Net: "udp", Dialer: dialer(mark), Timeout: 2 * time.Second, UDPSize: 1232}
+func exchangePlain(ctx context.Context, m *dns.Msg, srv config.Upstream, via egress) (*dns.Msg, error) {
+	c := &dns.Client{Net: "udp", Dialer: dialer(via), Timeout: 2 * time.Second, UDPSize: 1232}
 	resp, _, err := c.ExchangeContext(ctx, m, srv.Addr.String())
 	if err != nil || !resp.Truncated {
 		// A resolver that does not answer over UDP is not asked again
@@ -74,7 +90,7 @@ func exchangePlain(ctx context.Context, m *dns.Msg, srv config.Upstream, mark ui
 		// tried.
 		return resp, err
 	}
-	c = &dns.Client{Net: "tcp", Dialer: dialer(mark), Timeout: 3 * time.Second}
+	c = &dns.Client{Net: "tcp", Dialer: dialer(via), Timeout: 3 * time.Second}
 	resp, _, err = c.ExchangeContext(ctx, m, srv.Addr.String())
 	return resp, err
 }
@@ -86,8 +102,8 @@ type tlsConn struct {
 	conn *dns.Conn
 }
 
-func (u *upstreams) exchangeTLS(ctx context.Context, m *dns.Msg, srv config.Upstream, mark uint32) (*dns.Msg, error) {
-	key := fmt.Sprintf("%s#%s#%d", srv.Addr, srv.ServerName, mark)
+func (u *upstreams) exchangeTLS(ctx context.Context, m *dns.Msg, srv config.Upstream, via egress) (*dns.Msg, error) {
+	key := fmt.Sprintf("%s#%s#%d#%s", srv.Addr, srv.ServerName, via.mark, via.dev)
 	u.mu.Lock()
 	tc := u.tls[key]
 	if tc == nil {
@@ -107,7 +123,7 @@ func (u *upstreams) exchangeTLS(ctx context.Context, m *dns.Msg, srv config.Upst
 				// certificate for the address itself.
 				cfg.ServerName = srv.Addr.Addr().String()
 			}
-			td := &tls.Dialer{NetDialer: dialer(mark), Config: cfg}
+			td := &tls.Dialer{NetDialer: dialer(via), Config: cfg}
 			raw, err := td.DialContext(ctx, "tcp", srv.Addr.String())
 			if err != nil {
 				return nil, err
@@ -142,12 +158,12 @@ func (u *upstreams) exchangeTLS(ctx context.Context, m *dns.Msg, srv config.Upst
 	return nil, lastErr
 }
 
-func (u *upstreams) exchangeHTTPS(ctx context.Context, m *dns.Msg, srv config.Upstream, mark uint32) (*dns.Msg, error) {
-	key := fmt.Sprintf("%s#%s#%d", srv.URL, srv.Addr, mark)
+func (u *upstreams) exchangeHTTPS(ctx context.Context, m *dns.Msg, srv config.Upstream, via egress) (*dns.Msg, error) {
+	key := fmt.Sprintf("%s#%s#%d#%s", srv.URL, srv.Addr, via.mark, via.dev)
 	u.mu.Lock()
 	hc := u.https[key]
 	if hc == nil {
-		d := dialer(mark)
+		d := dialer(via)
 		target := srv.Addr.String()
 		hc = &http.Client{
 			Timeout: 5 * time.Second,

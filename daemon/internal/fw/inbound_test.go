@@ -70,9 +70,10 @@ func TestRenderInbound(t *testing.T) {
 		`iifname @wan_ifs fib daddr type local ip saddr { 203.0.113.0/24 } meta l4proto { tcp, udp } th dport 27000-27015 dnat ip to 10.83.0.10`,
 		// To a device on a network that is kept apart.
 		`iifname @wan_ifs fib daddr type local ip saddr { 198.51.100.7 } udp dport 5000 dnat ip to 10.84.0.11`,
-		// Answers to what came in are not classified, and leave by an
+		// Answers to what came in are not classified: they carry the
+		// mark of the uplink the connection arrived by, and leave by an
 		// uplink.
-		"\t\tct direction reply return\n\t\tct mark != 0 meta mark set ct mark return",
+		"\t\tct direction reply meta mark set ct mark return\n\t\tct mark != 0 meta mark set ct mark return",
 		`iifname @lan_ifs ct direction reply oifname @wan_ifs accept`,
 		`iifname @wan_ifs jump forwarded`,
 		"chain forwarded {\n\t\tct status dnat accept",

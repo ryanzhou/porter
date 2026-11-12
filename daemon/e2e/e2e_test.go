@@ -1572,6 +1572,11 @@ func TestRouter(t *testing.T) {
 		})
 	})
 
+	// A Route through one internet source, for a device and by a rule,
+	// with the source going away and coming back; and a source with a
+	// data limit, reached, lifted and begun anew (sources_test.go).
+	t.Run("SourceRoutes", func(t *testing.T) { sourceRoutes(t, home) })
+
 	// An internet source held to a speed, so that one device's heavy use
 	// does not make the others wait (shape_test.go).
 	t.Run("Smoothing", func(t *testing.T) { smoothing(t, home) })

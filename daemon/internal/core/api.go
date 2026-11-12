@@ -423,6 +423,9 @@ type Status struct {
 	// Shaping says, for each uplink that is to be held to a speed, how
 	// that stands.
 	Shaping []shape.Status `json:"shaping"`
+	// Data says, for each uplink that has a data limit, what it has used
+	// of it and whether it is out of use for that.
+	Data []DataStatus `json:"data"`
 	// Clock is what the router knows of the time; Groups how each group
 	// of devices stands, in the order of the configuration; Held the
 	// devices that are cut off right now, whatever cuts them off.
@@ -487,6 +490,7 @@ func (c *Core) status() Status {
 		LAN:     LANStatus{Address: cfg.Main().Address, Networks: map[string]int{}, Prefixes: map[string]string{}},
 		Control: c.controlStatus(),
 		Shaping: c.shape.Status(),
+		Data:    append([]DataStatus{}, c.data...),
 		Clock:   ClockStatus{Zone: cfg.System.Timezone, Trusted: c.clockTrusted},
 	}
 	devs := c.devs.List()
@@ -502,8 +506,8 @@ func (c *Core) status() Status {
 		st.GeoIP = GeoIPStatus{Available: true, Date: c.geo.Date}
 	}
 	st.Adblock = c.ads.Status()
-	st.Inbound = c.inboundStatus(cfg, wan.Active(states))
-	if a := wan.Active(states); a != nil {
+	st.Inbound = c.inboundStatus(cfg, c.active(states))
+	if a := c.active(states); a != nil {
 		st.Internet, st.Active = a.Internet, a.If
 		if a.Internet == wan.StCaptive {
 			st.Portal = PortalStatus{Captive: true, URL: a.PortalURL, Device: c.portalDev}
@@ -579,6 +583,13 @@ func (c *Core) publishStatus() {
 	for i := range stable.Shaping {
 		sh := &stable.Shaping[i]
 		sh.Down.Dropped, sh.Down.Marked, sh.Up.Dropped, sh.Up.Marked = 0, 0, 0, 0
+	}
+	// What a source has used of its data grows with every packet. That
+	// the amount is reached is news; the count on the way there is read
+	// by whoever is looking at it.
+	stable.Data = append([]DataStatus(nil), st.Data...)
+	for i := range stable.Data {
+		stable.Data[i].Used = 0
 	}
 	b, _ := json.Marshal(stable)
 	if string(b) == c.statusKey {
@@ -888,13 +899,16 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 					top = max(top, n.Priority)
 				} else {
 					// Joining again with a new password keeps the
-					// addresses set for the network, and the speeds it
-					// is held to.
+					// addresses set for the network, the speeds it is
+					// held to and its data limit.
 					if p.IP.V4.Mode == "" && p.IP.V6.Mode == "" {
 						p.IP = n.IP
 					}
 					if p.Shaping == (config.Shaping{}) {
 						p.Shaping = n.Shaping
+					}
+					if p.Data == (config.DataLimit{}) {
+						p.Data = n.Data
 					}
 				}
 			}
@@ -1106,7 +1120,11 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 						device = s.If
 					}
 				}
-				if device == "" {
+				if u := c.inUse.Load(); u != nil && u.spent[source] {
+					// A test is twenty seconds of everything the line
+					// carries.
+					out = proto.Errf(proto.ErrInvalid, "That internet source has reached its data limit. Lift the limit to measure it.")
+				} else if device == "" {
 					out = proto.Errf(proto.ErrInvalid, "That internet source is not connected.")
 				}
 			default:
@@ -1453,7 +1471,7 @@ func (c *Core) check(next *config.Config) CheckResult {
 		}
 	}
 	inUse := ""
-	if a := wan.Active(c.wan.States()); a != nil {
+	if a := c.active(c.wan.States()); a != nil {
 		inUse = a.Key
 	}
 	out.Effects = append(out.Effects, portEffects(cur, next, names, inUse)...)

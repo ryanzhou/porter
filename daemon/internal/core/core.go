@@ -21,8 +21,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/ryanzhou/porter/daemon/internal/adblock"
 	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/ddns"
@@ -43,6 +41,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/stats"
 	"github.com/ryanzhou/porter/daemon/internal/system"
 	"github.com/ryanzhou/porter/daemon/internal/update"
+	"github.com/ryanzhou/porter/daemon/internal/usage"
 	"github.com/ryanzhou/porter/daemon/internal/vpn"
 	"github.com/ryanzhou/porter/daemon/internal/wan"
 	"github.com/ryanzhou/porter/daemon/internal/wifi"
@@ -126,6 +125,14 @@ type Core struct {
 	shaped    []shape.Source
 	measuring string
 
+	// usage counts what the uplinks with a data limit have carried, and
+	// data is how each stood on the last pass. inUse says, for whoever
+	// asks from another goroutine, which uplinks are out of data and
+	// whether the one in use is one that is counted (see sources.go).
+	usage *usage.Store
+	data  []DataStatus
+	inUse atomic.Pointer[inUse]
+
 	// clockTrusted: the time schedules go by has been confirmed since the
 	// router started (see groups.go). heard is the time they go by in
 	// place of the machine's clock: what a site gave, while the clock is
@@ -194,6 +201,7 @@ type Core struct {
 	classKey   string // the part of planKey that decides where connections go
 	forwarding bool
 	routeKey   string
+	movedKey   string // the part of routeKey that moves connections
 	dnsKey     string
 	sysKey     string
 	statusKey  string
@@ -281,6 +289,7 @@ func New(opt Options) (*Core, error) {
 	c.geoCheck = make(chan struct{}, 1)
 	c.ads = &adblock.Manager{Log: c.log, Dir: filepath.Join(opt.DataDir, "blocklists")}
 	c.stats = stats.Load(filepath.Join(opt.DataDir, "stats.json"))
+	c.usage = usage.Load(filepath.Join(opt.DataDir, "usage.json"))
 	c.devs = devices.Load(filepath.Join(opt.DataDir, "devices.json"))
 	c.devs.OnTraffic = func(mac string, up, down uint64) { c.stats.Add(mac, up, down, time.Now()) }
 	// The flow tracker is polled from the control loop, so its hooks may
@@ -294,6 +303,12 @@ func New(opt Options) (*Core, error) {
 			switch class := mark & fw.ClassMask; {
 			case class == fw.MarkBlock:
 				return config.ActBlock
+			case class >= fw.MarkSource(0):
+				// Through one uplink, whether it had to be that one or
+				// not.
+				if key, ok := fw.SourceKey(c.cfg, int(class&0x3f)); ok {
+					return config.ActSource(key)
+				}
 			case class >= fw.MarkVPN(0):
 				if i := int(class - fw.MarkVPN(0)); i < len(c.cfg.VPNs) {
 					return config.ActVPN(c.cfg.VPNs[i].ID)
@@ -438,7 +453,7 @@ func (c *Core) Run(ctx context.Context) error {
 	})
 
 	c.reconcile()
-	go c.ads.Run(ctx, c.online)
+	go c.ads.Run(ctx, c.online, c.sparing)
 	go c.runGeoUpdates(ctx)
 	go c.settleUpdate(ctx)
 	go c.ddns.Run(ctx)
@@ -476,6 +491,7 @@ func (c *Core) shutdown() {
 		system.SaveClock(filepath.Join(c.opt.DataDir, "clock"))
 		c.devs.Save()
 		c.stats.Save()
+		c.usage.Save()
 	}
 	for _, ap := range c.aps {
 		ap.Stop()
@@ -546,6 +562,7 @@ func (c *Core) periodic() {
 		c.devs.Prune(func(mac string) bool { return c.cfg.Device(mac) != nil || c.cfg.GroupOf(mac) != nil })
 		c.devs.Save()
 		c.stats.Save()
+		c.usage.Save()
 		system.SaveClock(filepath.Join(c.opt.DataDir, "clock"))
 	}
 	c.updateLED()
@@ -1013,8 +1030,14 @@ func (c *Core) reconcile() {
 		c.apStarted[id] = time.Now()
 	}
 
+	// An uplink that has used up its data is stepped past as one that is
+	// down would be.
 	states := c.wan.States()
-	active := wan.Active(states)
+	spent := c.countData(cfg, uplinks, joined)
+	inOrder := usable(states, spent)
+	active := wan.Active(inOrder)
+	c.inUse.Store(&inUse{spent: spent, metered: active != nil && cfg.DataLimitOf(active.Key, joined[active.If]).Enabled})
+	src := sources(cfg, states, spent)
 
 	// Move a network out of the way of the upstream network (and of the
 	// router's other networks, should it have to move onto one's range).
@@ -1203,7 +1226,7 @@ func (c *Core) reconcile() {
 		}
 	}
 	plan := fw.BuildPlan(&running, fw.Runtime{
-		WANIfs: wanIfs, Delegated: delegated, WANMTU: wanMTU, Global: global, Addrs6: forwardAddrs6(cfg, devList),
+		WANIfs: wanIfs, Delegated: delegated, WANMTU: wanMTU, Global: global, Addrs6: forwardAddrs6(cfg, devList), Sources: src.fw,
 		Held: cutOff, PortalDevs: portalDevs, Geo: c.geo.Ranges, GeoVersion: c.geo.Version(),
 	})
 	c.forwards = plan.Forwards
@@ -1239,32 +1262,34 @@ func (c *Core) reconcile() {
 	// fw.UplinkOverride), whether or not it is the one the main table
 	// would have picked.
 	var override *fw.UplinkOverride
-	if active != nil {
-		override = &fw.UplinkOverride{If: active.If, V4: active.IPv4 != "", V6: active.HasV6}
-		override.Gw4, _ = netip.ParseAddr(active.Gateway)
-		if active.HasV6 {
-			override.Gw6, _ = netx.DefaultRoute(active.If, unix.AF_INET6)
-		}
-		// A PPPoE session has no gateway: its default route is the
-		// link itself.
-		if _, routed := netx.DefaultRoute(active.If, unix.AF_INET); routed && override.V4 && !override.Gw4.IsValid() {
-			override.Direct4 = true
-		}
-		override.Direct6 = override.V6 && !override.Gw6.IsValid()
+	inUseIf := ""
+	switch {
+	case active != nil:
+		override, inUseIf = wayOut(active), active.If
+	case len(spent) > 0:
+		// Every uplink that could be used is out of data. The table then
+		// refuses both families: left empty, it would leave everything to
+		// the main table, whose default route still leads out by one of
+		// them.
+		override = &fw.UplinkOverride{}
 	}
-	if (override == nil) != (c.overrideIf == "") || (override != nil && override.If != c.overrideIf) {
-		c.overrideIf = ""
-		if override != nil {
-			c.overrideIf = override.If
-			c.log.Info("uplink in use", "if", active.If)
+	if inUseIf != c.overrideIf {
+		c.overrideIf = inUseIf
+		if inUseIf != "" {
+			c.log.Info("uplink in use", "if", inUseIf)
 		}
 	}
-	if key := fmt.Sprintf("%+v|%+v", routes, override); key != c.routeKey {
-		if err := fw.SyncRouting(routes, override); err != nil {
+	if key := fmt.Sprintf("%+v|%+v|%v", routes, override, src.routes); key != c.routeKey {
+		if err := fw.SyncRouting(routes, override, src.routes); err != nil {
 			c.log.Error("policy routing", "err", err)
 		} else {
-			flush = flush || c.routeKey != ""
-			c.routeKey = key
+			// Connections have to find their way anew when a tunnel, the
+			// uplink in use or an uplink that a route names has changed;
+			// not when some other uplink has come or gone, which only has
+			// its own table made or emptied.
+			moved := fmt.Sprintf("%+v|%+v|%v", routes, override, src.routed)
+			flush = flush || (c.routeKey != "" && moved != c.movedKey)
+			c.routeKey, c.movedKey = key, moved
 		}
 	}
 	if flush {
@@ -1277,7 +1302,7 @@ func (c *Core) reconcile() {
 		}
 	}
 
-	c.applyDNS(&running, states, active, portalDevs, cutOff, routerAddr, routes, global)
+	c.applyDNS(&running, inOrder, active, src.dns, portalDevs, cutOff, routerAddr, routes, global)
 	c.applySystem(cfg)
 	c.applyControl(cfg)
 	c.applyDiscovery(cfg)
@@ -1296,7 +1321,7 @@ func (c *Core) reconcile() {
 	c.publishStatus()
 }
 
-func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.State, portalDevs, cutOff []string, router netip.Prefix, routes []fw.VPNRoutes, global map[string]netip.Prefix) {
+func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.State, sources map[string]dnsfwd.SourceDNS, portalDevs, cutOff []string, router netip.Prefix, routes []fw.VPNRoutes, global map[string]netip.Prefix) {
 	pol := &dnsfwd.Policy{
 		Hosts:      map[string][]netip.Addr{},
 		Reverse:    map[netip.Addr]string{},
@@ -1307,6 +1332,7 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 		Default:    cfg.Policy.Default,
 		PortalDevs: map[string]bool{},
 		VPN:        map[string]dnsfwd.VPNDNS{},
+		Source:     sources,
 		NetRoute:   dnsfwd.NetRoutesFrom(cfg, global),
 	}
 	pol.SetDevices(cfg, cutOff)
@@ -1486,7 +1512,7 @@ func (c *Core) geoDataPath() string { return filepath.Join(c.opt.DataDir, "geoip
 // online reports whether the active uplink reaches the internet. Safe
 // from any goroutine.
 func (c *Core) online() bool {
-	a := wan.Active(c.wan.States())
+	a := c.active(c.wan.States())
 	return a != nil && a.Internet == wan.StOnline
 }
 
@@ -1519,7 +1545,9 @@ func (c *Core) runGeoUpdates(ctx context.Context) {
 		month := geoip.Month(time.Now())
 		var have string
 		c.do(func() { have = c.geo.Version() })
-		if have >= month || !c.online() || (!forced && time.Since(lastTry) < 12*time.Hour) {
+		// Not while the uplink in use has only so much data, unless
+		// somebody asked: the database can wait for a better line.
+		if have >= month || !c.online() || (!forced && (c.sparing() || time.Since(lastTry) < 12*time.Hour)) {
 			continue
 		}
 		lastTry = time.Now()

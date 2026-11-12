@@ -105,6 +105,57 @@ func whoAsked(t *testing.T, ns, addr string) net.Listener {
 	return ln
 }
 
+// homeBySecondSource has the device away connect to the router's address
+// on a second internet source: the server answers from there, by that
+// source, although the wired one is the source in use. A WireGuard device
+// follows its peer to whatever address answers it, so the device still
+// naming the address it was told is the sign that the answers came from
+// it; and the upstream network drops what leaves by the wrong source.
+//
+// The kernel's WireGuard answers from the address it was spoken to at,
+// which is what the router's rule for its own addresses then routes. The
+// userspace one these tests fall back on does not keep that address where
+// the kernel hands it several packets at once (its "sticky" source is
+// lost when received packets are split up again), and answers from
+// whatever address the source in use has: nothing the router can route.
+// So this is checked with the kernel's only, which is what the router
+// runs.
+func homeBySecondSource(t *testing.T, r *rig, ip1, wanIP, serverKey, endpoint string) {
+	t.Helper()
+	if !r.kernelWG {
+		t.Log("no WireGuard in this kernel: the server answering by a second internet source is not checked")
+		return
+	}
+	phoneIP, unplug := r.plugPhone(t)
+	defer unplug()
+	defer strictISP(t)()
+	has := func() string {
+		return strings.TrimSpace(output("ip netns exec %s wg show wgc0 endpoints", nsAway))
+	}
+	home := func() bool {
+		got, err := httpGet(nsAway, "http://"+ip1+":8089/")
+		return err == nil && got == "10.89.0.2"
+	}
+	sh(t, "ip netns exec %s wg set wgc0 peer %s endpoint %s:51820", nsAway, serverKey, phoneIP)
+	eventually(t, "the device away connected by the router's second source", 30*time.Second, func() bool {
+		return home() && strings.HasSuffix(has(), phoneIP+":51820")
+	})
+	for i := 0; i < 3; i++ {
+		time.Sleep(time.Second)
+		if !home() || !strings.HasSuffix(has(), phoneIP+":51820") {
+			t.Fatalf("connected by the second source, the device has the router at %q, not at %s, and reaches home: %v", has(), phoneIP, home())
+		}
+	}
+	if got := reaches(nsAway, siteA); got != wanIP {
+		t.Errorf("the device that came in by the second source went on to the internet from %q, want the source in use (%s)", got, wanIP)
+	}
+	// Back to the address it was given, for the rest.
+	sh(t, "ip netns exec %s wg set wgc0 peer %s endpoint %s", nsAway, serverKey, endpoint)
+	eventually(t, "the device away connected by the wired source again", 30*time.Second, func() bool {
+		return home() && reaches(nsAway, siteA) == wanIP
+	})
+}
+
 var showInbound = []string{
 	"ip netns exec " + nsRtr + " nft list table inet porter",
 	"ip -n " + nsRtr + " addr show", "ip -n " + nsRtr + " rule show", "ip -n " + nsRtr + " route show table all",
@@ -257,6 +308,10 @@ func reachHome(t *testing.T, r *rig) {
 	eventually(t, "the device away reaching the internet through the router", 15*time.Second, func() bool {
 		return reaches(nsAway, siteA) == wanIP
 	})
+	// The same by the router's second internet source, where the
+	// WireGuard in use lets that be seen.
+	homeBySecondSource(t, r, ip1, wanIP, wg.Peers[0].PublicKey, wg.Peers[0].Endpoint)
+
 	// The app, with the phone's own identity, at the router's address in
 	// the server's range, which the router names for it; and at the
 	// address it knows from home, which the tunnel carries as well.
@@ -420,6 +475,32 @@ func portForwards(t *testing.T, r *rig) {
 	eventually(t, "a connection from the internet reaching the device through the forwarded port", 15*time.Second, func() bool {
 		return outside(nsISP, 8443) == ispIP
 	})
+	// By the router's second internet source, at the router's address
+	// there, from somewhere out on the internet (an address of the
+	// upstream network's that is on neither source's own network, or the
+	// router would know the way back without being told): the same
+	// device answers, and its answers leave by the source the connection
+	// came in by, not by the one in use. The upstream network would not
+	// carry them otherwise (strictISP).
+	const elsewhere = "198.51.100.53"
+	phoneIP, unplug := r.plugPhone(t)
+	defer unplug()
+	loose := strictISP(t)
+	defer loose()
+	eventually(t, "a connection that came in by the second source answered by it", 20*time.Second, func() bool {
+		got, err := getFrom(nsISP, elsewhere, fmt.Sprintf("http://%s:8443/", phoneIP))
+		return err == nil && got == elsewhere
+	})
+	// The same from there by the wired source, which is the one in use.
+	if got, err := getFrom(nsISP, elsewhere, fmt.Sprintf("http://%s:8443/", wanIP)); err != nil || got != elsewhere {
+		t.Errorf("the forwarded port at the wired source's address, from %s: %q %v", elsewhere, got, err)
+	}
+	if got := outside(nsISP, 8443); got != ispIP {
+		t.Errorf("with a second source there, the forwarded port at the wired source's address answers %q", got)
+	}
+	loose()
+	unplug()
+
 	// Nothing else is open for it: not the port the device listens on.
 	if got := outside(nsISP, 8090); got != "" {
 		t.Errorf("the device's own port answers the internet at the router's address: %q", got)

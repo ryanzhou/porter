@@ -125,8 +125,10 @@ struct DemoScreen: View {
             NavigationStack { NetworkSetupPage() }
         case "outside":
             NavigationStack { InboundPage() }
+        case "datalimit":
+            NavigationStack { DataLimitPage(target: SmoothingTarget(key: RouterConfig.uplinkPhone)) }
         case "smoothing":
-            NavigationStack { SmoothingPage(title: "Smooth out heavy use", heading: false, target: joinedSource) }
+            NavigationStack { SmoothingPage(target: joinedSource) }
         case "setup":
             NavigationStack { SetupView() }
         case "connect":

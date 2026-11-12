@@ -308,8 +308,10 @@ func (m *Manager) Status() Status {
 }
 
 // Run keeps the lists fresh until ctx ends. online reports whether a
-// download is worth attempting.
-func (m *Manager) Run(ctx context.Context, online func() bool) {
+// download is worth attempting, and sparing that data is short at the
+// moment: a list the router has a copy of is then left as it is, unless
+// RefreshNow asked for it.
+func (m *Manager) Run(ctx context.Context, online, sparing func() bool) {
 	m.mu.Lock()
 	m.init()
 	wake := m.wake
@@ -326,11 +328,11 @@ func (m *Manager) Run(ctx context.Context, online func() bool) {
 		if !online() {
 			continue
 		}
-		m.refreshDue(ctx)
+		m.refreshDue(ctx, sparing())
 	}
 }
 
-func (m *Manager) refreshDue(ctx context.Context) {
+func (m *Manager) refreshDue(ctx context.Context, sparing bool) {
 	m.mu.Lock()
 	enabled, urls := m.enabled, append([]string(nil), m.urls...)
 	m.mu.Unlock()
@@ -343,6 +345,14 @@ func (m *Manager) refreshDue(ctx context.Context) {
 		m.mu.Lock()
 		next, scheduled := m.nextTry[u]
 		m.mu.Unlock()
+		_, cachedErr := os.Stat(m.cachePath(u))
+		if sparing && cachedErr == nil && !(scheduled && next.IsZero()) {
+			// The copy there is will do until data is not short. A list
+			// there is no copy of is fetched all the same, or switching
+			// ad blocking on would do nothing; so is one that somebody
+			// asked to have fetched now.
+			continue
+		}
 		if !scheduled {
 			// First look at this list: due when the cached copy is old.
 			if fi, err := os.Stat(m.cachePath(u)); err == nil {

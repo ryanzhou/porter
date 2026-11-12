@@ -453,12 +453,8 @@ struct GroupDetailView: View {
     @ViewBuilder
     private func settingsSection(_ group: DeviceGroup) -> some View {
         Section {
-            Picker("Route", selection: routeBinding) {
-                Text("Default").tag("")
-                ForEach(model.availableActions, id: \.self) { action in
-                    Text(model.actionLabel(action.raw)).tag(action.raw)
-                }
-            }
+            RoutePicker(title: "Route", selection: routeBinding, defaultLabel: "Default")
+            RouteSourceRows(selection: routeBinding, subject: .group)
             if model.config?.dns.adblock.enabled == true {
                 Toggle("Skip ad blocking", isOn: noAdblockBinding)
             }

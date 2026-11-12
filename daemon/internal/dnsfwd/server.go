@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+
+	"github.com/ryanzhou/porter/daemon/internal/config"
 )
 
 // Hooks connect the forwarder to the rest of the router.
@@ -273,7 +275,9 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		reply(w, req, dns.RcodeRefused)
 		return
 	case "vpn":
-		entry.Path = "vpn:" + pt.vpn
+		entry.Path = config.ActVPN(pt.vpn)
+	case "source":
+		entry.Path = config.ActSource(pt.source)
 	}
 	if len(pt.servers) == 0 {
 		entry.Failed = true
@@ -331,7 +335,7 @@ func (s *Server) resolve(req *dns.Msg, pt path) (*dns.Msg, error) {
 	defer cancel()
 	var lastErr error
 	for _, srv := range pt.servers {
-		resp, err := s.up.exchange(ctx, out, srv, pt.mark)
+		resp, err := s.up.exchange(ctx, out, srv, egress{mark: pt.mark, dev: pt.dev})
 		if err != nil {
 			lastErr = err
 			continue
@@ -353,6 +357,7 @@ func groupKey(pt path) string {
 	var b strings.Builder
 	b.WriteString(pt.kind)
 	b.WriteString(pt.vpn)
+	b.WriteString(pt.source)
 	for _, s := range pt.servers {
 		b.WriteByte('|')
 		b.WriteString(s.Proto)

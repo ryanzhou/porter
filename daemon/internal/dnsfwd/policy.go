@@ -48,6 +48,25 @@ type Policy struct {
 	// WAN is always the network-provided resolver list.
 	WAN []config.Upstream
 	VPN map[string]VPNDNS
+	// Source holds the uplinks that are there, by key, for routes that
+	// name one.
+	Source map[string]SourceDNS
+}
+
+// SourceDNS is one uplink as a route that names it sees it.
+type SourceDNS struct {
+	// Mark is the firewall mark that selects the uplink's routing table,
+	// and If its interface.
+	Mark uint32
+	If   string
+	// Servers are the resolvers the uplink's own network handed out.
+	Servers []config.Upstream
+	// Up: the uplink is connected and may be used, so what is routed to it
+	// alone goes there. Online: it also reaches the internet, so what
+	// merely prefers it goes there too. Together they say where a query
+	// goes, which has to be where the traffic would go.
+	Up     bool
+	Online bool
 }
 
 // NetRoute is the route of one of the router's networks.
@@ -213,10 +232,12 @@ func NetRoutesFrom(c *config.Config, global map[string]netip.Prefix) []NetRoute 
 
 // path is where a query is sent.
 type path struct {
-	kind    string // "direct", "wan", "vpn", "block", "refuse"
+	kind    string // "direct", "wan", "vpn", "source", "block", "refuse"
 	vpn     string
+	source  string // the uplink's key, for "source"
 	servers []config.Upstream
 	mark    uint32
+	dev     string // the interface to send from, for "source"
 }
 
 // decide picks the path for a query, mirroring the packet classifier: the
@@ -292,6 +313,29 @@ func (p *Policy) decide(mac string, ip netip.Addr, name string) path {
 			// A tunnel to a few networks only, and no resolver named for
 			// it: names are looked up the way everything else of the
 			// device's that is not for those networks goes.
+			return path{kind: "direct", servers: p.Direct}
+		}
+	}
+	if key, only, ok := config.SourceOf(action); ok {
+		src := p.Source[key]
+		switch {
+		case src.Online, only && src.Up:
+			// Through the uplink, to the resolvers that are configured or
+			// else to those its own network named, which may answer nobody
+			// who asks from elsewhere. A network that named none (a fixed
+			// address without a resolver) is asked for a public one.
+			servers := src.Servers
+			if p.DirectCustom {
+				servers = p.Direct
+			} else if len(servers) == 0 {
+				servers = tunnelFallback
+			}
+			return path{kind: "source", source: key, servers: servers, mark: src.Mark, dev: src.If}
+		case only:
+			// Nothing of this device's gets out while the uplink is away.
+			return path{kind: "refuse"}
+		default:
+			// Its traffic goes by the uplink in use for now.
 			return path{kind: "direct", servers: p.Direct}
 		}
 	}

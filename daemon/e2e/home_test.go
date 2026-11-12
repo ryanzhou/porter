@@ -569,6 +569,45 @@ func globalIn(ns, ifname string, prefix netip.Prefix) (addr netip.Addr, deprecat
 	return netip.Addr{}, false, false
 }
 
+// delegatedByAnotherSource routes the first device through a second
+// internet source while its network has a /64 of the prefix the wired
+// source delegated, and puts things back.
+func delegatedByAnotherSource(t *testing.T, r *rig, dev1 netip.Addr, mainNet netip.Prefix) {
+	t.Helper()
+	_, unplug := r.plugPhone(t)
+	defer unplug()
+	var before config.Config
+	if err := r.c.Call("config.get", nil, &before); err != nil {
+		t.Fatal(err)
+	}
+	defer r.edit(t, func(cfg *config.Config) { cfg.Devices = before.Devices })
+	r.edit(t, func(cfg *config.Config) {
+		for i := range cfg.Devices {
+			if cfg.Devices[i].MAC == r.mac1 {
+				cfg.Devices[i].Route = "source:phone"
+				return
+			}
+		}
+		cfg.Devices = append(cfg.Devices, config.Device{MAC: r.mac1, Route: "source:phone"})
+	})
+	eventually(t, "the device routed through the second source leaving masqueraded, from that source's address", 40*time.Second, func() bool {
+		return strings.HasPrefix(reaches(nsC1, site6), phoneNet6)
+	})
+	if dev2, _, ok := globalIn(nsC2, "pt-c2if", mainNet); ok {
+		if got := reaches(nsC2, site6); got != dev2.String() {
+			t.Errorf("with its neighbour routed through another source, the second device left from %q, not from its own %s", got, dev2)
+		}
+	}
+	if rules := output("ip netns exec %s nft list chain inet porter srcnat", nsRtr); strings.Contains(rules, `oifname "usb0" ip6 saddr`) {
+		t.Errorf("addresses are spared from masquerading on a source that delegated nothing:\n%s", rules)
+	}
+	forwardOverIPv6(t, r, dev1, 8088)
+	r.edit(t, func(cfg *config.Config) { cfg.Devices = before.Devices })
+	eventually(t, "the device leaving from its own address again", 40*time.Second, func() bool {
+		return reaches(nsC1, site6) == dev1.String()
+	})
+}
+
 // refused reports whether a connection from inside a namespace to an
 // address and port fails.
 func refused(ns string, addr netip.Addr, port int) bool {
@@ -719,6 +758,12 @@ func prefixDelegation(t *testing.T, r *rig) {
 	// Unless a port is forwarded to the device: over IPv6 that opens the
 	// port at the device's own address, with nothing translated.
 	forwardOverIPv6(t, r, dev1, 8088)
+	// Routed through another internet source, the device's address out of
+	// this one's prefix is as foreign there as a private one: it leaves
+	// masqueraded, while its neighbour goes on leaving from its own. What
+	// comes in for it at that address through the forwarded port is still
+	// answered the way it came.
+	delegatedByAnotherSource(t, r, dev1, mainNet)
 	// From another device on the network the same listener answers: it
 	// is the direction that is refused, not the address.
 	eventually(t, "the second device with an address from the delegated prefix", 60*time.Second, func() bool {

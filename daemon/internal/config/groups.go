@@ -144,6 +144,35 @@ func (c *Config) GroupOf(mac string) *Group {
 	return nil
 }
 
+// RoutedSources lists the keys of the uplinks that a route names: a rule's,
+// a device's, a group's, a network's or the default. Each is there once.
+func (c *Config) RoutedSources() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(action string) {
+		if key, _, ok := SourceOf(action); ok && !seen[key] {
+			seen[key] = true
+			out = append(out, key)
+		}
+	}
+	add(c.Policy.Default)
+	for _, r := range c.Policy.Rules {
+		if r.Enabled {
+			add(r.Action)
+		}
+	}
+	for _, d := range c.Devices {
+		add(d.Route)
+	}
+	for _, g := range c.Groups {
+		add(g.Route)
+	}
+	for _, n := range c.Networks {
+		add(n.Route)
+	}
+	return out
+}
+
 // DeviceRoutes returns the route of every device that has one, by
 // hardware address: its own, or else its group's.
 func (c *Config) DeviceRoutes() map[string]string {

@@ -665,22 +665,28 @@ final class AppModel: ObservableObject {
     /// something belongs to.
     var hasSeveralNetworks: Bool { (config?.networks.count ?? 0) > 1 }
 
-    /// A readable label for an action string ("direct", "block", "vpn:<id>").
+    /// A readable label for an action string ("direct", "block",
+    /// "vpn:<id>", "source:<key>", "only:<key>").
     func actionLabel(_ raw: String) -> String {
         switch RouteAction(raw) {
         case .direct: return "Direct"
         case .block: return "Blocked"
         case .vpn(let id): return vpnName(id)
+        case .source(let key, let only): return only ? sourceName(key) + " only" : sourceName(key)
         case nil:
             if raw == "adblock" { return "Ad blocked" }
             return raw.isEmpty ? "Default" : raw
         }
     }
 
-    /// Every action a rule or device can choose, in display order.
+    /// Every action a rule or device can choose, in display order:
+    /// Direct, each internet source, each VPN, Blocked. A source is
+    /// listed once; whether it is the only one a Route uses is a switch
+    /// next to the choice (`RouteSourceRows`).
     var availableActions: [RouteAction] {
+        let sources: [RouteAction] = (config?.routableSources ?? []).map { RouteAction.source($0, only: false) }
         let tunnels: [RouteAction] = (config?.vpns ?? []).map { RouteAction.vpn($0.id) }
-        return [RouteAction.direct] + tunnels + [RouteAction.block]
+        return [RouteAction.direct] + sources + tunnels + [RouteAction.block]
     }
 
     /// A short random identifier for new rules and VPN profiles.

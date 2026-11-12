@@ -258,7 +258,7 @@ private struct SourcesSection: View {
                     }
                 } else if source.kind == "phone" {
                     NavigationLink {
-                        SmoothingPage(title: "Phone on USB", heading: true, target: SmoothingTarget(key: source.key))
+                        PhoneSourcePage()
                     } label: {
                         SourceRow(source: source, active: isActive(source))
                     }
@@ -359,17 +359,32 @@ private struct SourceRow: View {
         }
     }
 
+    /// What the source has used of its data limit, if it has one; for
+    /// Wi-Fi, the limit of the network joined.
+    private var usage: DataStatus? { model.status?.data(source: source.key) }
+
+    /// Past its data limit, and not used for it.
+    private var spent: Bool { usage?.spent ?? false }
+
     /// Nothing plugged in is not a fault: grey, and no second label.
     private var color: Color {
         guard linked, let uplink else { return Color.gray }
         if signInFailed(uplink.pppoe) { return Color.red }
+        if spent { return Color.orange }
         return internetColor(uplink.internet)
     }
 
-    /// A sign-in the provider refuses is not on its way to working.
+    /// A sign-in the provider refuses is not on its way to working, and
+    /// a source past its data limit is not used whatever it reaches.
     private func stateLabel(_ uplink: UplinkStatus) -> String {
         if signInFailed(uplink.pppoe) { return internetLabel("down") }
+        if spent { return "Data limit reached" }
         return internetLabel(uplink.internet)
+    }
+
+    /// What has been used of the limit, in a few words.
+    private func usageText(_ usage: DataStatus) -> String {
+        DataLimit.amountText(bytes: usage.used) + " of " + DataLimit.amountText(bytes: usage.limit)
     }
 
     var body: some View {
@@ -388,6 +403,11 @@ private struct SourceRow: View {
                     if linked, let freq = station?.freq, freq > 0 {
                         BandBadge(freq: freq)
                     }
+                }
+                if let usage {
+                    Text(usageText(usage))
+                        .font(.caption)
+                        .foregroundStyle(usage.reached ? Color.orange : Color.secondary)
                 }
             }
             Spacer(minLength: 8)
@@ -562,6 +582,7 @@ private struct WiredSourcePage: View {
                 }
             }
             Section {
+                DataLimitLink(target: SmoothingTarget(key: RouterConfig.uplinkEthernet(port)))
                 SmoothingLink(target: SmoothingTarget(key: RouterConfig.uplinkEthernet(port)))
             }
         }
@@ -801,6 +822,7 @@ private struct SavedNetworkPage: View {
                 } label: {
                     LabeledContent("Addresses", value: addresses)
                 }
+                DataLimitLink(target: SmoothingTarget(key: RouterConfig.uplinkWifi, ssid: ssid))
                 SmoothingLink(target: SmoothingTarget(key: RouterConfig.uplinkWifi, ssid: ssid))
             }
         }

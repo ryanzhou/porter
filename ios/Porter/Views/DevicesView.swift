@@ -189,17 +189,35 @@ struct DeviceDetailView: View {
         return cleanName != original.name || cleanIP != (original.ip ?? "")
     }
 
-    /// Where the device's traffic goes when it has no route of its own:
-    /// its group's route, else its network's, or else the default.
+    /// The route the device has when it has none of its own: its
+    /// group's, else its network's, or else the default.
+    private var inheritedRoute: String {
+        if let group, !group.route.isEmpty { return group.route }
+        if let id = device?.network, let route = model.config?.network(id)?.route, !route.isEmpty {
+            return route
+        }
+        return model.config?.policy.`default` ?? "direct"
+    }
+
+    /// Where the device's traffic goes when it has no route of its own.
     private var defaultRouteLabel: String {
         if let group, !group.route.isEmpty {
             return group.name + " (" + model.actionLabel(group.route) + ")"
         }
-        var action: String = model.config?.policy.`default` ?? "direct"
-        if let id = device?.network, let route = model.config?.network(id)?.route, !route.isEmpty {
-            action = route
-        }
-        return "Default (" + model.actionLabel(action) + ")"
+        return "Default (" + model.actionLabel(inheritedRoute) + ")"
+    }
+
+    /// For a device without a route of its own whose inherited route is
+    /// through an internet source that is not carrying it right now: why
+    /// it is offline, or going out another way.
+    private var inheritedRouteNote: String? {
+        let own: String = device?.route ?? ""
+        return own.isEmpty ? inheritedNote : nil
+    }
+
+    private var inheritedNote: String? {
+        guard let action = RouteAction(inheritedRoute), model.status?.usesSource(action) == false else { return nil }
+        return model.routeNote(action, for: .device)
     }
 
     /// What the switches do not say by themselves: that the device is
@@ -335,11 +353,12 @@ struct DeviceDetailView: View {
             Text(groupNote)
         }
         Section {
-            Picker("Route", selection: routeBinding) {
-                Text(defaultRouteLabel).tag("")
-                ForEach(model.availableActions, id: \.self) { action in
-                    Text(model.actionLabel(action.raw)).tag(action.raw)
-                }
+            RoutePicker(title: "Route", selection: routeBinding, defaultLabel: defaultRouteLabel)
+            RouteSourceRows(selection: routeBinding, subject: .device)
+            if let note = inheritedRouteNote {
+                Text(note)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         } footer: {
             Text("Route sets how this device goes online. A rule on the VPN tab that fits its traffic takes priority.")

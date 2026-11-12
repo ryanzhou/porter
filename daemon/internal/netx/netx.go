@@ -198,6 +198,18 @@ func Index(name string) int {
 	return l.Attrs().Index
 }
 
+// Traffic returns how many bytes an interface has received and sent since
+// it came to be, with its index; ok is false when there is no such
+// interface.
+func Traffic(name string) (index int, bytes uint64, ok bool) {
+	l, err := netlink.LinkByName(name)
+	if err != nil || l.Attrs().Statistics == nil {
+		return 0, 0, false
+	}
+	st := l.Attrs().Statistics
+	return l.Attrs().Index, st.RxBytes + st.TxBytes, true
+}
+
 // EnsureIFB makes name an intermediate functional block device, the
 // stand-in on which what arrives on another interface can be queued, and
 // brings it up. made reports that it was not there, or not up, before:

@@ -138,7 +138,42 @@ type EthPort struct {
 	// Shaping holds the port, as an uplink, a little below the speed of
 	// the line behind it.
 	Shaping Shaping `json:"shaping"`
+	// Data is the amount of data the line behind the port, as an uplink,
+	// may carry in a day or a month.
+	Data DataLimit `json:"data"`
 }
+
+// DataLimit says that the line behind an uplink has only so much data to
+// spend in a day or a month. The router counts what the uplink carries
+// (see internal/usage) and stops using it for the rest of the period once
+// that is the amount. Like Shaping it belongs to the line: to a wired
+// port, to a saved Wi-Fi network, to the phone on USB.
+type DataLimit struct {
+	Enabled bool `json:"enabled"`
+	// Period is PeriodDay or PeriodMonth.
+	Period string `json:"period"`
+	// MB is the amount for one period, in megabytes of a million bytes,
+	// which is how providers count. It is needed while the limit is
+	// enabled, and kept while it is not.
+	MB int `json:"mb"`
+	// StartDay is the day of the month a monthly period begins on, 1 to
+	// 31; in a month that is shorter, its last day.
+	StartDay int `json:"start_day"`
+	// LiftUntil lets the uplink be used although the amount is spent,
+	// until that moment (unix time): the app sets it to the end of the
+	// period. 0, or a moment that has passed, for not at all.
+	LiftUntil int64 `json:"lift_until"`
+}
+
+const (
+	PeriodDay   = "day"
+	PeriodMonth = "month"
+	// MaxDataMB is the largest amount a DataLimit takes: ten terabytes.
+	MaxDataMB = 10_000_000
+)
+
+// Bytes is the amount for one period.
+func (l DataLimit) Bytes() uint64 { return uint64(l.MB) * 1_000_000 }
 
 // Shaping holds an uplink to rates a little below what the line behind it
 // really carries, so that what has to wait waits in the router, where it
@@ -268,8 +303,9 @@ type Network struct {
 	// Isolated keeps the devices here from opening connections to the
 	// router's other networks. They can still be reached from those.
 	Isolated bool `json:"isolated"`
-	// Route overrides Policy.Default for this network: "", "direct",
-	// "vpn:<id>" or "block". A device's own route wins over it.
+	// Route overrides Policy.Default for this network: "" or an action
+	// ("direct", "vpn:<id>", "source:<key>", "only:<key>", "block"). A
+	// device's own route wins over it.
 	Route string `json:"route"`
 	// VLAN is the tag the network has on the wired ports that carry it
 	// tagged (EthPort.Tagged), 1 to 4094; 0 for none. No two networks
@@ -327,6 +363,9 @@ type WifiNetwork struct {
 	// speed of the line behind it: a hotel's and a home's differ, so the
 	// rates belong to the network joined, not to the radio.
 	Shaping Shaping `json:"shaping"`
+	// Data is the amount of data this network may carry in a day or a
+	// month: a phone's hotspot has one where the Wi-Fi at home has none.
+	Data DataLimit `json:"data"`
 }
 
 type WAN struct {
@@ -350,6 +389,8 @@ type WAN struct {
 // about any one phone is stored: they apply to whichever is plugged in.
 type Phone struct {
 	Shaping Shaping `json:"shaping"`
+	// Data is the amount of data a phone may carry in a day or a month.
+	Data DataLimit `json:"data"`
 }
 
 // Uplink keys, as used in WAN.Order.
@@ -391,6 +432,43 @@ func (c *Config) ShapingOf(key, ssid string) Shaping {
 		return c.WAN.Phone.Shaping
 	}
 	return Shaping{}
+}
+
+// DataLimitOf returns the data limit of the uplink with the given key,
+// for Wi-Fi that of the saved network named ssid, as ShapingOf does.
+func (c *Config) DataLimitOf(key, ssid string) DataLimit {
+	switch port, wired := EthOfUplink(key); {
+	case wired:
+		for _, e := range c.Ethernet {
+			if e.Name == port {
+				return e.Data
+			}
+		}
+	case key == UplinkWifi:
+		for _, n := range c.WAN.Networks {
+			if n.SSID == ssid {
+				return n.Data
+			}
+		}
+	case key == UplinkPhone:
+		return c.WAN.Phone.Data
+	}
+	return DataLimit{}
+}
+
+// UplinkKey reports whether key names an uplink this configuration can
+// have: Wi-Fi, a phone, or one of its wired ports.
+func (c *Config) UplinkKey(key string) bool {
+	if key == UplinkWifi || key == UplinkPhone {
+		return true
+	}
+	port, wired := EthOfUplink(key)
+	for _, e := range c.Ethernet {
+		if wired && e.Name == port {
+			return true
+		}
+	}
+	return false
 }
 
 type Probe struct {
@@ -498,14 +576,36 @@ type WGPeer struct {
 	Keepalive    int      `json:"keepalive"`
 }
 
-// Actions. A VPN action is "vpn:<id>".
+// Actions. A VPN action is "vpn:<id>". An action that names one uplink
+// is "source:<key>" or "only:<key>", with the uplink's key as in
+// WAN.Order: the first goes by whichever uplink is in use while the named
+// one is not available, the second is offline then.
 const (
-	ActDirect = "direct"
-	ActBlock  = "block"
-	actVPNPfx = "vpn:"
+	ActDirect    = "direct"
+	ActBlock     = "block"
+	actVPNPfx    = "vpn:"
+	actSourcePfx = "source:"
+	actOnlyPfx   = "only:"
 )
 
 func ActVPN(id string) string { return actVPNPfx + id }
+
+// ActSource is the action that prefers the uplink with the given key, and
+// ActOnly the one that uses nothing else.
+func ActSource(key string) string { return actSourcePfx + key }
+func ActOnly(key string) string   { return actOnlyPfx + key }
+
+// SourceOf returns the uplink key of a "source:<key>" or "only:<key>"
+// action, and whether it is the second kind.
+func SourceOf(action string) (key string, only, ok bool) {
+	if strings.HasPrefix(action, actSourcePfx) {
+		return action[len(actSourcePfx):], false, true
+	}
+	if strings.HasPrefix(action, actOnlyPfx) {
+		return action[len(actOnlyPfx):], true, true
+	}
+	return "", false, false
+}
 
 // VPNOf returns the VPN id of a "vpn:<id>" action.
 func VPNOf(action string) (string, bool) {
@@ -565,7 +665,7 @@ type Device struct {
 	MAC  string `json:"mac"`
 	Name string `json:"name"`
 	// Route overrides Policy.Default (and its group's and its network's
-	// route) for this device: "", "direct", "vpn:<id>" or "block".
+	// route) for this device: "" or an action, as for a network.
 	Route string `json:"route"`
 	// Paused cuts the device off without forgetting its settings.
 	Paused bool `json:"paused"`
@@ -819,9 +919,10 @@ func (s *Store) Load() (*Config, error) {
 // here. Without it a router that updates itself would lose its settings.
 //
 // Format 3 only added fields (system.bluetooth_only and system.timezone,
-// a wired port's vlan, pppoe, tagged and shaping, a network's vlan and
-// discovery, shaping for a saved Wi-Fi network and for a phone, inbound,
-// groups with a rule's src.groups and a device's allow_until), so format
+// a wired port's vlan, pppoe, tagged, shaping and data, a network's vlan
+// and discovery, shaping and data for a saved Wi-Fi network and for a
+// phone, inbound, groups with a rule's src.groups and a device's
+// allow_until) and two kinds of action (source: and only:), so format
 // 2 has no entry. The number was raised all the same: an app that knows format 2
 // would write the document back without them, and has to be told that it
 // cannot.

@@ -60,7 +60,7 @@ func TestSyncRouting(t *testing.T) {
 	v4only := []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}
 
 	// Tunnel up, IPv4 only, no kill switch: IPv6 must still be backstopped.
-	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: true, Allowed: v4only}}, nil); err != nil {
+	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: true, Allowed: v4only}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := ipOut(t, "route", "show", "table", "110"); !strings.Contains(got, "default dev wg-home") || strings.Contains(got, "unreachable") {
@@ -86,7 +86,7 @@ func TestSyncRouting(t *testing.T) {
 	}
 
 	// Tunnel down, no kill switch: table empty so traffic falls back.
-	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: false, Allowed: v4only}}, nil); err != nil {
+	if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: false, Allowed: v4only}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := ipOut(t, "route", "show", "table", "110") + ip6(); strings.TrimSpace(got) != "" {
@@ -95,7 +95,7 @@ func TestSyncRouting(t *testing.T) {
 
 	// Kill switch: backstop present up or down, in both families.
 	for _, up := range []bool{false, true} {
-		if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: up, KillSwitch: true, Allowed: v4only}}, nil); err != nil {
+		if err := SyncRouting([]VPNRoutes{{Index: 0, If: "wg-home", Up: up, KillSwitch: true, Allowed: v4only}}, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		v4 := ipOut(t, "route", "show", "table", "110")
@@ -109,7 +109,7 @@ func TestSyncRouting(t *testing.T) {
 
 	// Removing the profile removes its rule; idempotent on repeat.
 	for i := 0; i < 2; i++ {
-		if err := SyncRouting(nil, nil); err != nil {
+		if err := SyncRouting(nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -122,7 +122,7 @@ func TestSyncRouting(t *testing.T) {
 	ipOut(t, "addr", "add", "192.0.2.2/24", "dev", "peer0")
 	over := &UplinkOverride{If: "peer0", V4: true, Gw4: netip.MustParseAddr("192.0.2.1")}
 	for i := 0; i < 2; i++ {
-		if err := SyncRouting(nil, over); err != nil {
+		if err := SyncRouting(nil, over, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -141,7 +141,7 @@ func TestSyncRouting(t *testing.T) {
 	}
 	// Another gateway replaces the first; no override empties the table.
 	over.Gw4 = netip.MustParseAddr("192.0.2.9")
-	if err := SyncRouting(nil, over); err != nil {
+	if err := SyncRouting(nil, over, nil); err != nil {
 		t.Fatal(err)
 	}
 	if v4 := ipOut(t, "route", "show", "table", "105"); !strings.Contains(v4, "via 192.0.2.9") || strings.Contains(v4, "192.0.2.1 ") {
@@ -150,7 +150,7 @@ func TestSyncRouting(t *testing.T) {
 	// An uplink with an address but no gateway known is left to the main
 	// table; one with no IPv4 at all has IPv4 refused.
 	over.Gw4 = netip.Addr{}
-	if err := SyncRouting(nil, over); err != nil {
+	if err := SyncRouting(nil, over, nil); err != nil {
 		t.Fatal(err)
 	}
 	if v4, _ := exec.Command("ip", "route", "show", "table", "105").CombinedOutput(); strings.Contains(string(v4), "default") {
@@ -161,7 +161,7 @@ func TestSyncRouting(t *testing.T) {
 	// another uplink's route by its metric.
 	over.Direct4 = true
 	for i := 0; i < 2; i++ {
-		if err := SyncRouting(nil, over); err != nil {
+		if err := SyncRouting(nil, over, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -170,7 +170,7 @@ func TestSyncRouting(t *testing.T) {
 	}
 	// And is replaced by a gateway once there is one.
 	over.Gw4 = netip.MustParseAddr("192.0.2.1")
-	if err := SyncRouting(nil, over); err != nil {
+	if err := SyncRouting(nil, over, nil); err != nil {
 		t.Fatal(err)
 	}
 	if v4 := ipOut(t, "route", "show", "table", "105"); !strings.Contains(v4, "default via 192.0.2.1 dev peer0") || strings.Count(v4, "default") != 1 {
@@ -178,13 +178,13 @@ func TestSyncRouting(t *testing.T) {
 	}
 	over.Gw4, over.Direct4 = netip.Addr{}, false
 	over.V4 = false
-	if err := SyncRouting(nil, over); err != nil {
+	if err := SyncRouting(nil, over, nil); err != nil {
 		t.Fatal(err)
 	}
 	if v4 := ipOut(t, "route", "show", "table", "105"); !strings.Contains(v4, "unreachable default") {
 		t.Errorf("override for an uplink without IPv4: %q", v4)
 	}
-	if err := SyncRouting(nil, nil); err != nil {
+	if err := SyncRouting(nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	out, _ := exec.Command("ip", "route", "show", "table", "105").CombinedOutput()

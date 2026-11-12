@@ -592,13 +592,10 @@ private struct RulesSection: View {
                 RuleNumber(text: "∗")
                 Text("Everything else")
                 Spacer()
-                Picker("Everything else", selection: model.binding(\.policy.`default`, fallback: "direct")) {
-                    ForEach(model.availableActions, id: \.self) { action in
-                        Text(model.actionLabel(action.raw)).tag(action.raw)
-                    }
-                }
-                .labelsHidden()
+                RoutePicker(title: "Everything else", selection: model.binding(\.policy.`default`, fallback: "direct"))
+                    .labelsHidden()
             }
+            RouteSourceRows(selection: model.binding(\.policy.`default`, fallback: "direct"), subject: .everythingElse)
             Button {
                 addRule()
             } label: {
@@ -691,6 +688,7 @@ struct ActionBadge: View {
         case .direct: return Color.secondary
         case .block: return Color.red
         case .vpn: return Color.blue
+        case .source: return Color.teal
         }
     }
 
@@ -871,11 +869,8 @@ struct RuleEditorView: View {
         Section {
             TextField("Name", text: $draft.name)
             Toggle("Enabled", isOn: $draft.enabled)
-            Picker("Route", selection: $draft.action) {
-                ForEach(model.availableActions, id: \.self) { action in
-                    Text(model.actionLabel(action.raw)).tag(action.raw)
-                }
-            }
+            RoutePicker(title: "Route", selection: $draft.action)
+            RouteSourceRows(selection: $draft.action, subject: .rule)
         }
     }
 

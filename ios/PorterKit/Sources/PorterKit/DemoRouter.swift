@@ -46,7 +46,7 @@ public enum DemoRouter {
             case "hello":
                 return Data(#"{"name":"Porter","id":"3fa9c210","version":"v1.0.0","paired":true,"claimed":true,"pairing":false,"ready":true,"control":\#(DemoRouter.control(config))}"#.utf8)
             case "status.get":
-                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: DemoRouter.control(config), inbound: DemoRouter.inbound(config, now: now), shaping: DemoRouter.shaping(config), groups: try DemoRouter.groups(config, now: now)).utf8)
+                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: DemoRouter.control(config), inbound: DemoRouter.inbound(config, now: now), shaping: DemoRouter.shaping(config), data: try DemoRouter.data(config, now: now), groups: try DemoRouter.groups(config, now: now)).utf8)
             case "devices.list":
                 return try RouterConnection.makeEncoder().encode(try DemoRouter.devices(config, now: now))
             case "device.set":
@@ -192,7 +192,8 @@ public enum DemoRouter {
      "wan":{"networks":[{"ssid":"Harbour Hotel Guest","psk":"","hidden":false,"priority":3,"shaping":{"enabled":true,"down_kbps":36400,"up_kbps":8830}},
                         {"ssid":"Home","psk":"not-a-real-password","hidden":false,"priority":2,"shaping":{"enabled":false,"down_kbps":0,"up_kbps":0}},
                         {"ssid":"Airport Free WiFi","psk":"","hidden":false,"priority":1}],
-            "phone":{"shaping":{"enabled":false,"down_kbps":0,"up_kbps":0}},
+            "phone":{"shaping":{"enabled":false,"down_kbps":0,"up_kbps":0},
+                     "data":{"enabled":true,"period":"month","mb":5000,"start_day":1,"lift_until":0}},
             "wifi_mac":{"mode":"random","address":"06:5a:91:c3:7e:12"},"eth_mac":{"mode":"hardware"},
             "order":["eth:end0","eth:\(adapter)","wifi","phone"],
             "probe":{"url":"http://captive.apple.com/hotspot-detect.html","expect":"Success"}},
@@ -217,7 +218,8 @@ public enum DemoRouter {
          "dst":{"domains":[],"cidrs":[],"countries":[],"proto":"tcp","ports":["25"]},"action":"block"}]},
      "devices":[{"mac":"3c:22:fb:18:7a:c4","name":"Work laptop","route":"vpn:home","paused":false,"ip":"10.83.0.57","no_adblock":true},
                 {"mac":"98:b6:e9:52:1c:d0","name":"Games console","route":"","paused":true,"no_adblock":false},
-                {"mac":"a6:3c:11:5e:90:21","name":"","route":"","paused":false,"no_adblock":false}],
+                {"mac":"a6:3c:11:5e:90:21","name":"","route":"","paused":false,"no_adblock":false},
+                {"mac":"\(printer)","name":"Printer","route":"source:phone","paused":false,"no_adblock":false}],
      "groups":[{"id":"\(kidsGroup)","name":"Kids","icon":"child","members":["\(tablet)","\(console)","\(reader)"],"route":"","paused":false,"no_adblock":false,
                 "schedules":[{"id":"bed","name":"Bedtime","enabled":true,"days":[0,1,2,3,4],"from":"21:00","to":"07:00"},
                              {"id":"hw","name":"Homework","enabled":false,"days":[1,2,3,4,5],"from":"16:30","to":"18:00"}],
@@ -395,7 +397,34 @@ public enum DemoRouter {
         return "[" + out.joined(separator: ",") + "]"
     }
 
-    static func status(now: Int64, rev: UInt64, name: String, control: String, inbound: String, shaping: String, groups: String) -> String {
+    /// What the sources with a data limit have used of it: the phone most
+    /// of its month's, any other a tenth, each as far into its period as
+    /// a third of it.
+    static func data(_ config: RouterConfig, now: Int64) throws -> String {
+        var out: [DataStatus] = []
+        func add(_ key: String, _ ssid: String?, _ limit: DataLimit, usedMB: Int) {
+            guard limit.enabled else { return }
+            let length: Int64 = limit.isDaily ? 86_400 : 30 * 86_400
+            let since: Int64 = now - length / 3
+            let used = UInt64(max(usedMB, 0)) * 1_000_000
+            let amount = UInt64(max(limit.mb, 0)) * 1_000_000
+            let reached: Bool = used >= amount
+            out.append(DataStatus(key: key, ssid: ssid, period: limit.period, limit: amount, used: used, since: since, resets: since + length,
+                                  reached: reached, lifted: reached && limit.liftUntil > now))
+        }
+        for port in config.ethernet where port.role == .wan {
+            let limit: DataLimit = port.data ?? DataLimit()
+            add(RouterConfig.uplinkEthernet(port.name), nil, limit, usedMB: limit.mb / 10)
+        }
+        for network in config.wan.networks {
+            let limit: DataLimit = network.data ?? DataLimit()
+            add(RouterConfig.uplinkWifi, network.ssid, limit, usedMB: limit.mb / 10)
+        }
+        add(RouterConfig.uplinkPhone, nil, config.dataLimit(source: RouterConfig.uplinkPhone), usedMB: 3_870)
+        return String(decoding: try RouterConnection.makeEncoder().encode(out), as: UTF8.self)
+    }
+
+    static func status(now: Int64, rev: UInt64, name: String, control: String, inbound: String, shaping: String, data: String, groups: String) -> String {
         let safeName = name.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "\"", with: "'")
         return """
         {"name":"\(safeName)","id":"3fa9c210","version":"v1.0.0","time":\(now),"uptime":93784,"temp":51.3,"ready":true,"rev":\(rev),"pairing":false,
@@ -417,6 +446,7 @@ public enum DemoRouter {
                  {"id":"us","name":"Streaming (US)","state":"off","rx":0,"tx":0}],
          "inbound":\(inbound),
          "shaping":\(shaping),
+         "data":\(data),
          \(groups),
          "geoip":{"available":true,"date":"2026-11"},
          "adblock":{"enabled":true,"domains":78215,"blocked":1284,

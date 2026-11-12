@@ -567,6 +567,7 @@ private struct PathBadge: View {
         case .direct: return Color.secondary
         case .block: return Color.red
         case .vpn: return Color.blue
+        case .source: return Color.teal
         }
     }
 

@@ -22,7 +22,7 @@ struct SmoothingLink: View {
 
     var body: some View {
         NavigationLink {
-            SmoothingPage(title: "Smooth out heavy use", heading: false, target: target)
+            SmoothingPage(target: target)
         } label: {
             LabeledContent("Smooth out heavy use", value: on ? "On" : "Off")
         }
@@ -35,10 +35,6 @@ struct SmoothingLink: View {
 struct SmoothingPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    let title: String
-    /// The page is the source's own, so the setting gets its name as a
-    /// heading; where the page is named after the setting it does not.
-    let heading: Bool
     let target: SmoothingTarget
 
     @State private var enabled = false
@@ -130,10 +126,6 @@ struct SmoothingPage: View {
         Form {
             Section {
                 Toggle("Enabled", isOn: $enabled)
-            } header: {
-                if heading {
-                    Text("Smooth out heavy use")
-                }
             } footer: {
                 Text("A big upload or download no longer makes calls stutter and pages hang on your other devices. It costs a few per cent of this source's top speed.")
             }
@@ -144,7 +136,7 @@ struct SmoothingPage: View {
                 SmoothingStatusSection(held: held)
             }
         }
-        .navigationTitle(title)
+        .navigationTitle("Smooth out heavy use")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
