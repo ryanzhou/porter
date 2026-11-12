@@ -663,7 +663,10 @@ func prefixDelegation(t *testing.T, r *rig) {
 	if mainNet.Contains(unused) {
 		unused = netip.MustParseAddr("2001:db8:1000:f:1::1")
 	}
-	if got := output("ip -n %s -6 route get %s", nsRtr, unused); !strings.Contains(got, "unreachable") {
+	// Asked for such an address, the kernel either shows the unreachable
+	// route or, depending on its version, answers with the error that
+	// route produces.
+	if got := output("ip -n %s -6 route get %s", nsRtr, unused); !strings.Contains(got, "unreachable") && !strings.Contains(got, "No route to host") {
 		t.Errorf("%s, in a part of the prefix that no network has, is routed: %s", unused, got)
 	}
 
