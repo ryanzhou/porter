@@ -434,6 +434,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Reads the status again, for what the router does not announce as
+    /// it changes: counters. A failure is not announced.
+    func refreshStatus() async {
+        let found: RouterStatus? = await fetchQuietly { try await $0.status() }
+        if let found {
+            status = found
+        }
+    }
+
     /// Pull-to-refresh entry point for views.
     func refresh() async {
         await attempt { _ in try await self.reload() }
@@ -593,7 +602,8 @@ final class AppModel: ObservableObject {
         return error.localizedDescription
     }
 
-    /// Runs a speed test through the given path ("direct" or "vpn:<id>").
+    /// Runs a speed test through the given path ("direct", "vpn:<id>", or
+    /// one internet source: `RouterConfig.speedTestPath(source:)`).
     /// `speedTestProgress` updates while it runs.
     func runSpeedTest(via: String) async -> SpeedTestResult? {
         speedTestProgress = SpeedTestProgress(phase: "latency", mbps: 0)

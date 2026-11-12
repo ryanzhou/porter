@@ -163,4 +163,131 @@ final class DemoTests: XCTestCase {
         let parsed = try await router.parseWireGuard(conf: "ignored")
         XCTAssertEqual(parsed.peers.count, 1)
     }
+
+    /// Holding an internet source to a speed, in demo mode: the sample
+    /// router is on a hotel's network and holds that to speeds measured
+    /// there; the wired port's are kept for when it is back home.
+    func testSmoothingInDemoMode() async throws {
+        let router = DemoRouter.makeConnection()
+        let config = try await router.config()
+        let status = try await router.status()
+        let wired = RouterConfig.uplinkEthernet("end0")
+        XCTAssertEqual(config.shaping(source: wired), ShapingConfig(enabled: true, downKbps: 237_500, upKbps: 38_000))
+        XCTAssertEqual(config.shaping(source: RouterConfig.uplinkPhone), ShapingConfig())
+        XCTAssertEqual(config.shaping(source: RouterConfig.uplinkWifi, ssid: "Airport Free WiFi"), ShapingConfig())
+        XCTAssertEqual(config.shaping(source: RouterConfig.uplinkWifi, ssid: "Nowhere"), ShapingConfig())
+        let hotel = config.shaping(source: RouterConfig.uplinkWifi, ssid: DemoRouter.joinedNetwork)
+        XCTAssertTrue(hotel.enabled)
+
+        let shaped = try XCTUnwrap(status.shaping)
+        XCTAssertEqual(shaped.map(\.key), [wired, RouterConfig.uplinkWifi])
+        XCTAssertEqual(shaped.map(\.state), ["waiting", "active"])
+        // Each is the status of a source the router lists, by interface.
+        XCTAssertTrue(shaped.allSatisfy { entry in status.wan.contains { $0.iface == entry.iface && $0.key == entry.key } })
+        XCTAssertEqual(shaped[1].down.kbps, hotel.downKbps)
+        XCTAssertEqual(shaped[1].up.kbps, hotel.upKbps)
+        XCTAssertEqual(shaped[1].down.slowed, 2046)
+        XCTAssertEqual(shaped[0].down.slowed, 0)
+
+        // Measured through the source, the speeds to hold it to are a
+        // little below what was measured: the ones the sample has.
+        let measured = try await router.runSpeedTest(via: RouterConfig.speedTestPath(source: RouterConfig.uplinkWifi))
+        XCTAssertEqual(measured.via, "source:wifi")
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: measured.downMbps), hotel.downKbps)
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: measured.upMbps), hotel.upKbps)
+        let plain = try await router.runSpeedTest()
+        XCTAssertEqual(plain.via, "direct")
+
+        // Set for the phone, it is kept, and the phone that is plugged
+        // in is held to it; switched off for the hotel, that goes.
+        var next = config
+        next.setShaping(ShapingConfig(enabled: true, downKbps: 20_000, upKbps: 4_000), source: RouterConfig.uplinkPhone)
+        next.setShaping(ShapingConfig(enabled: false, downKbps: hotel.downKbps, upKbps: hotel.upKbps), source: RouterConfig.uplinkWifi, ssid: DemoRouter.joinedNetwork)
+        next.setShaping(ShapingConfig(enabled: true, downKbps: 1, upKbps: 1), source: RouterConfig.uplinkWifi, ssid: "Nowhere")
+        _ = try await router.setConfig(next)
+        let stored = try await router.config()
+        XCTAssertEqual(stored.wan.phone?.shaping, ShapingConfig(enabled: true, downKbps: 20_000, upKbps: 4_000))
+        XCTAssertEqual(stored.wan.networks.map(\.ssid), config.wan.networks.map(\.ssid))
+        let after = try await router.status()
+        XCTAssertEqual(after.shaping?.map(\.key), [wired, RouterConfig.uplinkPhone])
+        XCTAssertEqual(after.shaping?.last?.iface, DemoRouter.phoneInterface)
+
+        // The app writes the whole document back: what it read of this
+        // has to come out as it went in.
+        let rewritten = try JSONSerialization.jsonObject(with: RouterConnection.makeEncoder().encode(config)) as? [String: Any]
+        let original = try JSONSerialization.jsonObject(with: Data(DemoRouter.configJSON.utf8)) as? [String: Any]
+        XCTAssertEqual(rewritten?["ethernet"] as? NSArray, original?["ethernet"] as? NSArray)
+        XCTAssertEqual(rewritten?["wan"] as? NSDictionary, original?["wan"] as? NSDictionary)
+    }
+
+    /// The setting as routers of different ages say it, and the figures
+    /// the app makes of a measurement and of what is typed.
+    func testShapingModel() throws {
+        let decoder = RouterConnection.makeDecoder()
+        let encoder = RouterConnection.makeEncoder()
+        // A router that knows nothing of it.
+        let port = try decoder.decode(EthernetPort.self, from: Data(#"{"name":"eth0","role":"wan","network":"lan"}"#.utf8))
+        XCTAssertNil(port.shaping)
+        let saved = try decoder.decode(SavedNetwork.self, from: Data(#"{"ssid":"Hotel","psk":"","hidden":false,"priority":1}"#.utf8))
+        XCTAssertNil(saved.shaping)
+        let wan = try decoder.decode(WANConfig.self, from: Data(#"{"networks":[],"wifi_mac":{"mode":"hardware"},"eth_mac":{"mode":"hardware"},"order":["wifi"],"probe":{"url":"http://example.com/","expect":"ok"}}"#.utf8))
+        XCTAssertNil(wan.phone)
+        // Joining a network says nothing about its speeds, so that the
+        // router keeps the ones it has.
+        let join = String(decoding: try encoder.encode(SavedNetwork(ssid: "Hotel", psk: "")), as: UTF8.self)
+        XCTAssertFalse(join.contains("shaping"), join)
+
+        // One that does: the names on the wire, there and back.
+        let held = try decoder.decode(EthernetPort.self, from: Data(#"{"name":"eth0","role":"wan","network":"lan","shaping":{"enabled":true,"down_kbps":95000,"up_kbps":19000}}"#.utf8))
+        XCTAssertEqual(held.shaping, ShapingConfig(enabled: true, downKbps: 95_000, upKbps: 19_000))
+        let written = String(decoding: try encoder.encode(held), as: UTF8.self)
+        XCTAssertTrue(written.contains("\"shaping\":{") && written.contains("\"down_kbps\":95000") && written.contains("\"up_kbps\":19000"), written)
+        XCTAssertEqual(try decoder.decode(EthernetPort.self, from: Data(written.utf8)), held)
+        let phone = String(decoding: try encoder.encode(PhoneSourceConfig(shaping: ShapingConfig(enabled: true, downKbps: 20_000, upKbps: 4_000))), as: UTF8.self)
+        XCTAssertTrue(phone.contains("\"shaping\":{") && phone.contains("\"down_kbps\":20000"), phone)
+        let entry = try decoder.decode(ShapingStatus.self, from: Data(#"{"key":"eth:eth0","if":"ppp-eth0","state":"error","down":{"kbps":95000,"dropped":7,"marked":5},"up":{"kbps":19000,"dropped":0,"marked":1},"error":"Error: Specified qdisc kind is unknown."}"#.utf8))
+        XCTAssertEqual(entry.iface, "ppp-eth0")
+        XCTAssertEqual(entry.down.slowed, 12)
+        XCTAssertEqual(entry.up.slowed, 1)
+        XCTAssertNotNil(entry.error)
+
+        // 95 % of what was measured, rounded down to a figure that reads
+        // well, and never outside what the router takes.
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: 93.7), 89_000)
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: 41.2), 39_100)
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: 9.3), 8_830)
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: 250), 237_500)
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: 0.05), ShapingConfig.slowestKbps)
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: 50_000), ShapingConfig.fastestKbps)
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: 0), 0)
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: -3), 0)
+        XCTAssertEqual(ShapingConfig.speed(measuredMbps: .nan), 0)
+        for mbps in [0.3, 1.0, 7.77, 12.5, 99.99, 940.0] {
+            let kbps = ShapingConfig.speed(measuredMbps: mbps)
+            XCTAssertTrue(ShapingConfig.accepts(kbps: kbps))
+            XCTAssertLessThanOrEqual(Double(kbps), mbps * 950 + 0.001)
+            XCTAssertGreaterThan(Double(kbps), mbps * 900)
+        }
+
+        // Shown and typed in Mbit/s.
+        XCTAssertEqual(ShapingConfig.mbpsText(kbps: 89_000), "89")
+        XCTAssertEqual(ShapingConfig.mbpsText(kbps: 39_100), "39.1")
+        XCTAssertEqual(ShapingConfig.mbpsText(kbps: 8_830), "8.83")
+        XCTAssertEqual(ShapingConfig.mbpsText(kbps: 500), "0.5")
+        XCTAssertEqual(ShapingConfig.mbpsText(kbps: 10_000_000), "10000")
+        XCTAssertEqual(ShapingConfig.mbpsText(kbps: 0), "")
+        XCTAssertEqual(ShapingConfig.kbps(mbpsText: "39.1"), 39_100)
+        XCTAssertEqual(ShapingConfig.kbps(mbpsText: " 39,1 "), 39_100)
+        XCTAssertEqual(ShapingConfig.kbps(mbpsText: "250"), 250_000)
+        XCTAssertEqual(ShapingConfig.kbps(mbpsText: "0.5"), 500)
+        XCTAssertEqual(ShapingConfig.kbps(mbpsText: ""), 0)
+        XCTAssertNil(ShapingConfig.kbps(mbpsText: "fast"))
+        XCTAssertNil(ShapingConfig.kbps(mbpsText: "-5"))
+        XCTAssertNil(ShapingConfig.kbps(mbpsText: "1e12"))
+        for kbps in [100, 990, 8_830, 39_100, 237_500, 10_000_000] {
+            XCTAssertEqual(ShapingConfig.kbps(mbpsText: ShapingConfig.mbpsText(kbps: kbps)), kbps)
+        }
+        XCTAssertFalse(ShapingConfig.accepts(kbps: 99))
+        XCTAssertFalse(ShapingConfig.accepts(kbps: 10_000_001))
+    }
 }

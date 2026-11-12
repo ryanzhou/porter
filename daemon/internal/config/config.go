@@ -129,7 +129,30 @@ type EthPort struct {
 	// (Network.VLAN), next to the untagged one. Each has a sub-interface
 	// of the port (VLANIfName) in its bridge.
 	Tagged []string `json:"tagged"`
+	// Shaping holds the port, as an uplink, a little below the speed of
+	// the line behind it.
+	Shaping Shaping `json:"shaping"`
 }
+
+// Shaping holds an uplink to rates a little below what the line behind it
+// really carries, so that what has to wait waits in the router, where it
+// is sorted fairly between devices, and not in the modem (see
+// internal/shape). It belongs to the line: to a wired port, to a saved
+// Wi-Fi network, to the phone on USB.
+type Shaping struct {
+	Enabled bool `json:"enabled"`
+	// DownKbps and UpKbps are the rates in kbit/s. Both are needed while
+	// it is enabled, and kept while it is not.
+	DownKbps int `json:"down_kbps"`
+	UpKbps   int `json:"up_kbps"`
+}
+
+// The rates Shaping takes: below the lower one nothing is usable, and the
+// upper one is more than any port of the router carries.
+const (
+	MinShapeKbps = 100
+	MaxShapeKbps = 10_000_000
+)
 
 // PPPoE is a provider's sign-in for a wired uplink. Username and Password
 // are used, and kept, only while it is Enabled.
@@ -294,6 +317,10 @@ type WifiNetwork struct {
 	Priority int    `json:"priority"`
 	// IP is how the router gets its addresses on this network.
 	IP IPSetup `json:"ip"`
+	// Shaping holds the router's traffic through this network below the
+	// speed of the line behind it: a hotel's and a home's differ, so the
+	// rates belong to the network joined, not to the radio.
+	Shaping Shaping `json:"shaping"`
 }
 
 type WAN struct {
@@ -307,8 +334,16 @@ type WAN struct {
 	// UplinkPhone for a phone sharing its connection over USB. The router
 	// uses the first one that works.
 	Order []string `json:"order"`
+	// Phone is what is set for a phone sharing its connection over USB.
+	Phone Phone `json:"phone"`
 	// Probe controls connectivity / captive portal detection.
 	Probe Probe `json:"probe"`
+}
+
+// Phone holds the settings of the uplink that is a phone on USB. Nothing
+// about any one phone is stored: they apply to whichever is plugged in.
+type Phone struct {
+	Shaping Shaping `json:"shaping"`
 }
 
 // Uplink keys, as used in WAN.Order.
@@ -327,6 +362,29 @@ func EthOfUplink(key string) (string, bool) {
 		return key[len(uplinkEth):], true
 	}
 	return "", false
+}
+
+// ShapingOf returns what is set for the uplink with the given key
+// (UplinkEth of a port, UplinkWifi, UplinkPhone). For Wi-Fi it is that of
+// the saved network named ssid, the one the router has joined.
+func (c *Config) ShapingOf(key, ssid string) Shaping {
+	switch port, wired := EthOfUplink(key); {
+	case wired:
+		for _, e := range c.Ethernet {
+			if e.Name == port {
+				return e.Shaping
+			}
+		}
+	case key == UplinkWifi:
+		for _, n := range c.WAN.Networks {
+			if n.SSID == ssid {
+				return n.Shaping
+			}
+		}
+	case key == UplinkPhone:
+		return c.WAN.Phone.Shaping
+	}
+	return Shaping{}
 }
 
 type Probe struct {
@@ -748,8 +806,9 @@ func (s *Store) Load() (*Config, error) {
 // here. Without it a router that updates itself would lose its settings.
 //
 // Format 3 only added fields (system.bluetooth_only, a wired port's vlan,
-// pppoe and tagged, a network's vlan and discovery, inbound), so format 2
-// has no entry. The number was raised all the same: an app that knows format 2
+// pppoe, tagged and shaping, a network's vlan and discovery, shaping for
+// a saved Wi-Fi network and for a phone, inbound), so format 2 has no
+// entry. The number was raised all the same: an app that knows format 2
 // would write the document back without them, and has to be told that it
 // cannot.
 var migrations = map[int]func(doc map[string]any) error{

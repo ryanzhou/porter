@@ -23,6 +23,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/netctl"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
+	"github.com/ryanzhou/porter/daemon/internal/shape"
 	"github.com/ryanzhou/porter/daemon/internal/speedtest"
 	"github.com/ryanzhou/porter/daemon/internal/stats"
 	"github.com/ryanzhou/porter/daemon/internal/system"
@@ -418,6 +419,9 @@ type Status struct {
 	GeoIP   GeoIPStatus    `json:"geoip"`
 	Adblock adblock.Status `json:"adblock"`
 	Inbound InboundStatus  `json:"inbound"`
+	// Shaping says, for each uplink that is to be held to a speed, how
+	// that stands.
+	Shaping []shape.Status `json:"shaping"`
 }
 
 // GeoIPStatus says whether country rules and country display can work.
@@ -475,6 +479,7 @@ func (c *Core) status() Status {
 		OffAir: append([]string{}, c.offAir...), Ports: []PortStatus{},
 		LAN:     LANStatus{Address: cfg.Main().Address, Networks: map[string]int{}, Prefixes: map[string]string{}},
 		Control: c.controlStatus(),
+		Shaping: c.shape.Status(),
 	}
 	for _, p := range c.ports {
 		st.Ports = append(st.Ports, PortStatus{Name: p.Name, Label: p.Label, Phone: p.Phone, Carrier: netx.Carrier(p.Name)})
@@ -559,6 +564,11 @@ func (c *Core) publishStatus() {
 	for i := range stable.STAs {
 		stable.STAs[i].Signal = 0
 	}
+	stable.Shaping = append([]shape.Status(nil), st.Shaping...)
+	for i := range stable.Shaping {
+		sh := &stable.Shaping[i]
+		sh.Down.Dropped, sh.Down.Marked, sh.Up.Dropped, sh.Up.Marked = 0, 0, 0, 0
+	}
 	b, _ := json.Marshal(stable)
 	if string(b) == c.statusKey {
 		return
@@ -581,6 +591,10 @@ func decode[T any](req *proto.Request) (T, *proto.Error) {
 	}
 	return v, nil
 }
+
+// viaSource begins the path of a speed test that goes out by one uplink:
+// "source:" and the uplink's key.
+const viaSource = "source:"
 
 // DeviceView is a device with its settings merged in.
 type DeviceView struct {
@@ -842,10 +856,16 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 				if n.SSID != p.SSID {
 					kept = append(kept, n)
 					top = max(top, n.Priority)
-				} else if p.IP.V4.Mode == "" && p.IP.V6.Mode == "" {
+				} else {
 					// Joining again with a new password keeps the
-					// addresses set for the network.
-					p.IP = n.IP
+					// addresses set for the network, and the speeds it
+					// is held to.
+					if p.IP.V4.Mode == "" && p.IP.V6.Mode == "" {
+						p.IP = n.IP
+					}
+					if p.Shaping == (config.Shaping{}) {
+						p.Shaping = n.Shaping
+					}
 				}
 			}
 			p.Priority = min(top+1, 1000)
@@ -1026,6 +1046,10 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		}
 		var cfg config.SpeedTest
 		var mark uint32
+		// source and device: the test is to go out by one uplink, whether
+		// or not it is the one in use, through that uplink's interface.
+		source, bySource := strings.CutPrefix(p.Via, viaSource)
+		var device string
 		var out *proto.Error
 		c.do(func() {
 			cfg = c.cfg.SpeedTest
@@ -1038,8 +1062,17 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 					return
 				}
 				mark = fw.MarkFor(c.cfg, p.Via)
+			case bySource:
+				for _, s := range c.wan.States() {
+					if s.Key == source && device == "" && (s.IPv4 != "" || s.HasV6) {
+						device = s.If
+					}
+				}
+				if device == "" {
+					out = proto.Errf(proto.ErrInvalid, "That internet source is not connected.")
+				}
 			default:
-				out = proto.Errf(proto.ErrInvalid, "a speed test runs directly or through a VPN")
+				out = proto.Errf(proto.ErrInvalid, "a speed test runs directly, through a VPN or through an internet source")
 			}
 		})
 		if out != nil {
@@ -1049,6 +1082,20 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 			return nil, proto.Errf("busy", "a speed test is already running")
 		}
 		defer c.speedMu.Unlock()
+		if bySource {
+			// What is asked for is the speed of the line, which is what
+			// the uplink is then held a little below: for as long as the
+			// test runs, it is not held to anything.
+			unshaped := func(key string) {
+				c.do(func() {
+					c.measuring = key
+					c.applyShaping()
+					c.publishStatus()
+				})
+			}
+			unshaped(source)
+			defer unshaped("")
+		}
 		type progress struct {
 			Phase string  `json:"phase"`
 			Mbps  float64 `json:"mbps"`
@@ -1057,10 +1104,15 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		defer cancel()
 		// The phase length can be shortened for tests.
 		phase, _ := time.ParseDuration(os.Getenv("PORTER_SPEEDTEST_DURATION"))
-		res := speedtest.Run(ctx, cfg, p.Via, speedtest.Options{Mark: mark, Duration: phase, Progress: func(phase string, mbps float64) {
+		res := speedtest.Run(ctx, cfg, p.Via, speedtest.Options{Mark: mark, Device: device, Duration: phase, Progress: func(phase string, mbps float64) {
 			c.broadcast("speedtest", progress{phase, mbps})
 		}})
 		c.broadcast("speedtest", progress{"done", 0})
+		if bySource {
+			// A measurement of the line for a setting, not a test of the
+			// connection as it is used: it is not among those kept.
+			return res, nil
+		}
 		c.speedHistMu.Lock()
 		c.speedHistory = append([]speedtest.Result{res}, c.speedHistory...)
 		if len(c.speedHistory) > 20 {

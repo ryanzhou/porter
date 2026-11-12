@@ -12,7 +12,8 @@
 // pppoe-server, and a kernel with VLANs, PPPoE and IPv6; the one for
 // several networks on a cable (trunk_test.go) a kernel with VLANs; the
 // one for reaching home from outside (inbound_test.go) WireGuard, as the
-// VPN checks do.
+// VPN checks do; the one for holding an internet source to a speed
+// (shape_test.go) tc and a kernel with CAKE and IFB interfaces.
 //
 //	go test -tags e2e -count=1 ./e2e/
 package e2e
@@ -1563,6 +1564,10 @@ func TestRouter(t *testing.T) {
 			return s.Active == "eth0" && s.Internet == "online" && wired() == wiredIP
 		})
 	})
+
+	// An internet source held to a speed, so that one device's heavy use
+	// does not make the others wait (shape_test.go).
+	t.Run("Smoothing", func(t *testing.T) { smoothing(t, home) })
 
 	// How a home connection arrives: under a VLAN tag, through a PPPoE
 	// sign-in, and with a prefix for the router's own networks.

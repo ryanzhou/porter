@@ -37,6 +37,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/netctl"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
+	"github.com/ryanzhou/porter/daemon/internal/shape"
 	"github.com/ryanzhou/porter/daemon/internal/speedtest"
 	"github.com/ryanzhou/porter/daemon/internal/stats"
 	"github.com/ryanzhou/porter/daemon/internal/system"
@@ -116,6 +117,13 @@ type Core struct {
 	reach    addressCheck
 	reachNow chan struct{}
 	forwards []fw.PlanForward
+
+	// shape holds the uplinks to the speeds set for them. shaped is what
+	// the last pass asked of it, and measuring the key of an uplink whose
+	// speed is being measured, which is left unshaped meanwhile.
+	shape     *shape.Manager
+	shaped    []shape.Source
+	measuring string
 
 	geo *geoip.DB
 	ads *adblock.Manager
@@ -296,6 +304,7 @@ func New(opt Options) (*Core, error) {
 	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, PPPHooks: opt.PPPHooks, HookEnv: hookEnv, OnChange: c.Kick}
 	c.mpq = &mpquic.Manager{Log: c.log, RunDir: opt.RunDir, Binaries: opt.MPQUIC, OnChange: c.Kick}
 	c.mdns = &mdns.Relay{Log: c.log}
+	c.shape = &shape.Manager{Log: c.log}
 	c.srv = &vpn.Server{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace}
 	c.ddns = &ddns.Manager{Log: c.log, OnChange: c.Kick}
 	c.reachNow = make(chan struct{}, 1)
@@ -850,11 +859,14 @@ func (c *Core) reconcile() {
 		staIDs = append(staIDs, id)
 	}
 	sort.Strings(staIDs)
+	// joined is the network each wireless uplink is on, by interface.
+	joined := map[string]string{}
 	for i, id := range staIDs {
 		up := wan.Uplink{If: wantSTA[id].Iface, Kind: "wifi", Key: config.UplinkWifi, Metric: 200 + i, Rank: rank(config.UplinkWifi)}
 		// How a wireless uplink gets its addresses belongs to the network
 		// it is on (or is joining).
 		if ssid := staStatus[id].SSID; ssid != "" {
+			joined[up.If] = ssid
 			for _, n := range cfg.WAN.Networks {
 				if n.SSID == ssid {
 					up.IP = n.IP
@@ -1132,6 +1144,8 @@ func (c *Core) reconcile() {
 	c.vpn.Apply(running.VPNs)
 	c.mpq.Apply(cfg.VPNs)
 	c.applyInbound(cfg, active)
+	c.shaped = shapeSources(cfg, uplinks, joined)
+	c.applyShaping()
 
 	// Firewall and routing.
 	var wanIfs []string
@@ -1387,6 +1401,41 @@ func (c *Core) applySystem(cfg *config.Config) {
 	if err := system.SetSSH(c.opt.DataDir, cfg.System.SSH.Enabled, cfg.System.SSH.AuthorizedKeys); err != nil {
 		c.log.Warn("SSH setup", "err", err)
 	}
+}
+
+// shapeSources lists the uplinks that are to be held to a speed, with
+// what the configuration says of each: a wired port's own setting, a
+// phone's, and for Wi-Fi that of the network the router has joined
+// (joined, by interface).
+func shapeSources(cfg *config.Config, uplinks []wan.Uplink, joined map[string]string) []shape.Source {
+	var out []shape.Source
+	for _, u := range uplinks {
+		set := cfg.ShapingOf(u.Key, joined[u.If])
+		if !set.Enabled {
+			continue
+		}
+		// The uplink's interface is the one its traffic leaves by, a
+		// session's or a VLAN's included: that is where the queue goes.
+		src := shape.Source{Key: u.Key, If: u.If, UpKbps: set.UpKbps, DownKbps: set.DownKbps, PPPoE: u.PPPoE.Enabled}
+		if port, wired := config.EthOfUplink(u.Key); wired {
+			for _, e := range cfg.Ethernet {
+				src.VLAN = src.VLAN || (e.Name == port && e.VLAN != 0)
+			}
+		}
+		out = append(out, src)
+	}
+	return out
+}
+
+// applyShaping holds the uplinks to their speeds: all that are to be,
+// except one whose speed is being measured.
+func (c *Core) applyShaping() {
+	list := make([]shape.Source, len(c.shaped))
+	for i, s := range c.shaped {
+		s.Bypass = s.Key == c.measuring
+		list[i] = s
+	}
+	c.shape.Apply(list)
 }
 
 // applyDiscovery runs the relay for multicast DNS between the networks the

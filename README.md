@@ -133,8 +133,8 @@ using Wi-Fi**.
 Addresses come from the network by default. Where a network wants a
 fixed address instead, set it by hand: for a wired port by tapping
 **Ethernet** in the list, for a Wi-Fi network by tapping it under
-**Saved Wi-Fi networks**. IPv4 and IPv6 are set separately, each with address, gateway
-and DNS servers.
+**Saved Wi-Fi networks** and then **Addresses**. IPv4 and IPv6 are set
+separately, each with address, gateway and DNS servers.
 
 ### On your provider's line at home
 
@@ -160,6 +160,41 @@ doing both jobs, your Wi-Fi uses the same channel as the network it
 joins, and 5 GHz is only used on channels where an access point is allowed
 (venues often use the radar channels, which are not). A second adapter
 has no such limit.
+
+### When one device's heavy use slows everyone down
+
+Someone uploads their photos, or a console downloads a game, and for
+everyone else calls stutter and pages hang. **Smooth out heavy use**
+stops that: the router holds the internet source a little below its
+real speed and shares it fairly between your devices, so that nothing
+has to wait behind the big transfer. It costs a few per cent of the top
+speed.
+
+It is set for each internet source, because it needs to know that
+source's speeds:
+
+1. Open the source's page. For a wired port tap **Ethernet** in the list
+   of internet sources, for a phone on USB tap the phone there, and for
+   Wi-Fi tap the network under **Saved Wi-Fi networks**: a hotel's
+   connection and the one at home are not equally fast, so each network
+   you have joined keeps its own.
+2. Tap **Smooth out heavy use** and turn it on.
+3. Tap **Measure**. The router tests that source for about 20 seconds
+   and fills in a little less than what it found. You can also type the
+   speeds. Then tap **Save**.
+
+The speeds have to be what the source really delivers. Set too high,
+this does nothing; set too low, the connection is slower than it could
+be. Measure again when the speed changes for good, with a new plan for
+instance. Once it is on, the page counts how often the router has made a
+transfer slow down. If that stays at zero while something big is
+downloading or uploading, the speeds are set too high.
+
+Two things it cannot do. A phone's connection changes speed as the
+signal does, so one pair of speeds fits it only roughly. And what your
+devices send through a VPN reaches the router's queue as one stream:
+the big transfer still cannot clog the line, but devices that share the
+VPN are not kept from slowing each other.
 
 ### Sign-in pages (captive portals)
 
@@ -381,7 +416,8 @@ these cases apart.
   country, and whether it went through the VPN.
 - **Speed test.** Overview → Speed test measures the router's own
   connection, directly or through a VPN. (It measures the venue's
-  internet, not the Wi-Fi between you and the router.)
+  internet, not the Wi-Fi between you and the router. Where **Smooth out
+  heavy use** is on, it measures the speeds the source is held to.)
 - **Another phone.** Briefly press the Pi's power button; the light
   blinks fast for two minutes while a new phone can pair. Or use
   Settings → Paired phones. Remove a phone there too.
@@ -463,6 +499,12 @@ to it.
 end of the cable answered the sign-in. Check that the cable goes to the
 modem's port for a router, that the modem itself is online, and whether
 your provider wants a VLAN ID.
+
+**Calls still stutter with Smooth out heavy use on.** Open the page
+for the internet source in use and look at the counts under **Slowed
+down** while something big is uploading. If they do not move, the
+speeds are set higher than the source delivers: tap **Measure** again,
+at a time when the connection is as slow as it gets.
 
 **Online, but a device has no internet.** Check it is not paused, and
 whether it is routed through a VPN that is down (kill switch).

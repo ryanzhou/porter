@@ -187,6 +187,60 @@ func PruneVLANs(ours func(name string) bool, keep map[string]bool) {
 	}
 }
 
+// Index returns the interface's index, or 0 when there is no such
+// interface. An interface that went and came back under the same name (a
+// phone plugged in again, a new PPPoE session) has another.
+func Index(name string) int {
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		return 0
+	}
+	return l.Attrs().Index
+}
+
+// EnsureIFB makes name an intermediate functional block device, the
+// stand-in on which what arrives on another interface can be queued, and
+// brings it up. made reports that it was not there, or not up, before:
+// whatever was redirected to it meanwhile was lost. An interface of that
+// name that is something else is replaced.
+func EnsureIFB(name string) (made bool, err error) {
+	if l, err := netlink.LinkByName(name); err == nil {
+		if l.Type() == "ifb" {
+			if l.Attrs().Flags&net.FlagUp != 0 {
+				return false, nil
+			}
+			return true, netlink.LinkSetUp(l)
+		}
+		if err := netlink.LinkDel(l); err != nil {
+			return false, fmt.Errorf("replace %s: %w", name, err)
+		}
+	}
+	if err := netlink.LinkAdd(&netlink.Ifb{LinkAttrs: netlink.LinkAttrs{Name: name}}); err != nil {
+		return false, fmt.Errorf("%s: %w", name, err)
+	}
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		return false, err
+	}
+	return true, netlink.LinkSetUp(l)
+}
+
+// IFBs lists the intermediate functional block devices whose names begin
+// with prefix.
+func IFBs(prefix string) []string {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, l := range links {
+		if l.Type() == "ifb" && strings.HasPrefix(l.Attrs().Name, prefix) {
+			out = append(out, l.Attrs().Name)
+		}
+	}
+	return out
+}
+
 // MTU returns the interface's MTU, or 0 when there is no such interface.
 func MTU(name string) int {
 	l, err := netlink.LinkByName(name)

@@ -44,6 +44,11 @@ jobs:
           # these must load.
           sudo modprobe -a 8021q ppp_generic pppox pppoe
           test -c /dev/ppp
+          # The same for holding an internet source to a speed: the CAKE
+          # queue, the queue for what arrives and its redirect to a
+          # stand-in (IFB) interface, of which none is wanted up front.
+          sudo modprobe -a sch_cake sch_ingress cls_u32 act_mirred
+          sudo modprobe ifb numifbs=0
           sudo systemctl stop hostapd wpa_supplicant 2>/dev/null || true
       - name: Kernel-level tests (firewall, policy routing) as root
         working-directory: daemon

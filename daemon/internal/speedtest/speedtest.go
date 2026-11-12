@@ -1,6 +1,6 @@
 // Package speedtest measures the uplink from the router itself: latency,
 // download and upload throughput against a configurable HTTP server,
-// optionally through a VPN tunnel.
+// optionally through a VPN tunnel or through one chosen uplink.
 package speedtest
 
 import (
@@ -37,6 +37,10 @@ type Options struct {
 	// Mark is the firewall mark for the test's sockets: policy routing
 	// sends them through the matching VPN. 0 means the default route.
 	Mark uint32
+	// Device is the interface the test's sockets are bound to: the test
+	// then goes out by that uplink, whichever is in use. Empty: wherever
+	// routing sends it.
+	Device string
 	// Duration of each of the download and upload phases.
 	Duration time.Duration
 	Streams  int
@@ -45,27 +49,108 @@ type Options struct {
 	Progress func(phase string, mbps float64)
 }
 
-func client(mark uint32) *http.Client {
+// sent keeps the connections of a test, to tell how much of what was
+// uploaded has arrived. What the transport has taken from the test is
+// not that: on a slow line much of it is still waiting in the kernel
+// when the test ends, and a figure that counts it comes out above what
+// the line carries. The other end's acknowledgements are what counts.
+type sent struct {
+	mu   sync.Mutex
+	open map[*conn]struct{}
+	// done is what was acknowledged on connections that have been closed
+	// since. unknown: a connection could not be asked.
+	done    uint64
+	unknown bool
+}
+
+type conn struct {
+	net.Conn
+	of *sent
+}
+
+// acked asks the kernel how many bytes the other end has acknowledged.
+func (c *conn) acked() (uint64, bool) {
+	tcp, ok := c.Conn.(*net.TCPConn)
+	if !ok {
+		return 0, false
+	}
+	raw, err := tcp.SyscallConn()
+	if err != nil {
+		return 0, false
+	}
+	var n uint64
+	ok = false
+	raw.Control(func(fd uintptr) {
+		if info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO); err == nil {
+			n, ok = info.Bytes_acked, true
+		}
+	})
+	return n, ok
+}
+
+func (c *conn) Close() error {
+	s := c.of
+	s.mu.Lock()
+	if _, open := s.open[c]; open {
+		n, ok := c.acked()
+		s.done, s.unknown = s.done+n, s.unknown || !ok
+		delete(s.open, c)
+	}
+	s.mu.Unlock()
+	return c.Conn.Close()
+}
+
+// acked is what the other end has acknowledged on all of the test's
+// connections so far, or false when that cannot be told.
+func (s *sent) acked() (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := s.done
+	for c := range s.open {
+		n, ok := c.acked()
+		total, s.unknown = total+n, s.unknown || !ok
+	}
+	return total, !s.unknown
+}
+
+func client(mark uint32, device string) (*http.Client, *sent) {
 	d := &net.Dialer{Timeout: 5 * time.Second}
-	if mark != 0 {
+	if mark != 0 || device != "" {
 		d.Control = func(network, address string, c syscall.RawConn) error {
 			var serr error
 			if err := c.Control(func(fd uintptr) {
-				serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, int(mark))
+				if mark != 0 {
+					serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, int(mark))
+				}
+				if device != "" && serr == nil {
+					serr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, device)
+				}
 			}); err != nil {
 				return err
 			}
 			return serr
 		}
 	}
+	s := &sent{open: map[*conn]struct{}{}}
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		c, err := d.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		tracked := &conn{Conn: c, of: s}
+		s.mu.Lock()
+		s.open[tracked] = struct{}{}
+		s.mu.Unlock()
+		return tracked, nil
+	}
 	return &http.Client{Transport: &http.Transport{
-		DialContext:           d.DialContext,
+		DialContext:           dial,
 		ForceAttemptHTTP2:     false, // separate connections, one per stream
 		MaxIdleConnsPerHost:   16,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,
 		DisableCompression:    true,
-	}}
+	}}, s
 }
 
 // Run performs a test. It always returns a Result; failures are reported
@@ -81,7 +166,7 @@ func Run(ctx context.Context, cfg config.SpeedTest, via string, opt Options) Res
 		opt.Progress = func(string, float64) {}
 	}
 	res := Result{Time: time.Now().Unix(), Via: via}
-	hc := client(opt.Mark)
+	hc, conns := client(opt.Mark, opt.Device)
 	defer hc.CloseIdleConnections()
 
 	opt.Progress("latency", 0)
@@ -92,14 +177,22 @@ func Run(ctx context.Context, cfg config.SpeedTest, via string, opt Options) Res
 	}
 	res.LatencyMs = lat
 
-	res.DownMbps, err = measure(ctx, opt, "download", func(ctx context.Context, count *atomic.Int64) error {
+	res.DownMbps, err = measure(ctx, opt, "download", nil, func(ctx context.Context, count *atomic.Int64) error {
 		return download(ctx, hc, cfg.DownloadURL, count)
 	})
 	if err != nil {
 		res.Error = "download: " + err.Error()
 		return res
 	}
-	res.UpMbps, err = measure(ctx, opt, "upload", func(ctx context.Context, count *atomic.Int64) error {
+	// An upload is counted by what the server has acknowledged since the
+	// phase began (with the little that the requests' own lines and any
+	// encryption add), where the kernel says.
+	before, _ := conns.acked()
+	arrived := func() (int64, bool) {
+		n, ok := conns.acked()
+		return int64(n - before), ok && n >= before
+	}
+	res.UpMbps, err = measure(ctx, opt, "upload", arrived, func(ctx context.Context, count *atomic.Int64) error {
 		return upload(ctx, hc, cfg.UploadURL, count)
 	})
 	if err != nil {
@@ -142,8 +235,9 @@ func latency(ctx context.Context, hc *http.Client, raw string) (float64, error) 
 }
 
 // measure runs the worker on several streams for the configured time and
-// returns the average rate in Mbit/s.
-func measure(ctx context.Context, opt Options, phase string, worker func(context.Context, *atomic.Int64) error) (float64, error) {
+// returns the average rate in Mbit/s. The bytes are those the workers
+// count, unless arrived knows better.
+func measure(ctx context.Context, opt Options, phase string, arrived func() (int64, bool), worker func(context.Context, *atomic.Int64) error) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, opt.Duration)
 	defer cancel()
 	var count atomic.Int64
@@ -162,12 +256,20 @@ func measure(ctx context.Context, opt Options, phase string, worker func(context
 			}
 		}()
 	}
+	bytes := func() int64 {
+		if arrived != nil {
+			if n, ok := arrived(); ok {
+				return n
+			}
+		}
+		return count.Load()
+	}
 	rate := func() float64 {
 		secs := time.Since(start).Seconds()
 		if secs <= 0 {
 			return 0
 		}
-		return float64(count.Load()) * 8 / secs / 1e6
+		return float64(bytes()) * 8 / secs / 1e6
 	}
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
@@ -190,7 +292,7 @@ func measure(ctx context.Context, opt Options, phase string, worker func(context
 					return 0, fmt.Errorf("no data was transferred")
 				}
 			}
-			return float64(count.Load()) * 8 / elapsed / 1e6, nil
+			return float64(bytes()) * 8 / elapsed / 1e6, nil
 		}
 	}
 }

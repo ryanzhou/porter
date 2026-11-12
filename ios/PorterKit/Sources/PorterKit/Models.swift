@@ -195,10 +195,66 @@ public struct EthernetPort: Codable, Equatable, Identifiable {
     /// The networks such a port carries tagged as well, by id, each under
     /// its own VLAN ID; nil reads as none.
     public var tagged: [String]?
+    /// The speeds the port is held to as an internet source; nil reads
+    /// as not held to any.
+    public var shaping: ShapingConfig?
     public var id: String { name }
 
     /// The tagged networks as a list, whichever way "none" was said.
     public var taggedNetworks: [String] { tagged ?? [] }
+}
+
+/// Holding an internet source a little below the speed of its line, so
+/// that one device's upload or download does not make everything else
+/// wait. The router keeps the speeds while this is switched off.
+public struct ShapingConfig: Codable, Equatable {
+    public var enabled: Bool
+    /// In kbit/s; both are needed while it is enabled.
+    public var downKbps: Int
+    public var upKbps: Int
+
+    public init(enabled: Bool = false, downKbps: Int = 0, upKbps: Int = 0) {
+        self.enabled = enabled
+        self.downKbps = downKbps
+        self.upKbps = upKbps
+    }
+
+    /// The speeds the router accepts, in kbit/s.
+    public static let slowestKbps = 100
+    public static let fastestKbps = 10_000_000
+
+    /// Whether a speed is one the router accepts.
+    public static func accepts(kbps: Int) -> Bool { kbps >= slowestKbps && kbps <= fastestKbps }
+
+    /// What to hold a source to, in kbit/s, after a speed test through
+    /// it measured `mbps`: 95 % of that, so that the queue is the
+    /// router's and not the modem's, rounded down to a figure that reads
+    /// well. 0 for a measurement that came to nothing.
+    public static func speed(measuredMbps mbps: Double) -> Int {
+        guard mbps.isFinite, mbps > 0 else { return 0 }
+        let kbps: Double = min(mbps * 1000 * 0.95, Double(fastestKbps))
+        let step: Double = kbps >= 10_000 ? 100 : 10
+        return max(slowestKbps, Int((kbps / step).rounded(.down) * step))
+    }
+
+    /// A speed as it is shown and typed, in Mbit/s: "88.7", "250", "0.5".
+    public static func mbpsText(kbps: Int) -> String {
+        guard kbps > 0 else { return "" }
+        var text = String(format: "%.2f", Double(kbps) / 1000)
+        while text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text
+    }
+
+    /// The speed typed, in kbit/s: 0 for nothing, nil for what is not a
+    /// number. A comma is taken for the decimal point it is on many
+    /// keyboards.
+    public static func kbps(mbpsText text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
+        if trimmed.isEmpty { return 0 }
+        guard let mbps = Double(trimmed), mbps.isFinite, mbps >= 0, mbps <= Double(fastestKbps) else { return nil }
+        return Int((mbps * 1000).rounded())
+    }
 }
 
 /// A provider's PPPoE sign-in for a wired uplink. The router keeps the
@@ -331,6 +387,9 @@ public extension RouterConfig {
     static let uplinkWifi = "wifi"
     static let uplinkPhone = "phone"
     static func uplinkEthernet(_ port: String) -> String { "eth:" + port }
+    /// The path of a speed test that goes out by one internet source,
+    /// whichever is in use: for `runSpeedTest(via:)`.
+    static func speedTestPath(source key: String) -> String { "source:" + key }
 
     func network(_ id: String) -> NetworkConfig? { networks.first { $0.id == id } }
     func networkName(_ id: String) -> String { network(id)?.name ?? id }
@@ -354,6 +413,9 @@ public struct SavedNetwork: Codable, Equatable, Identifiable {
     /// How the router gets its addresses on this network. Left out when
     /// joining, which keeps whatever is already set for the network.
     public var ip: IPSetup?
+    /// The speeds the router is held to while it is on this network.
+    /// Left out when joining, which keeps what is set, like `ip`.
+    public var shaping: ShapingConfig?
     public var id: String { ssid }
 
     public init(ssid: String, psk: String, hidden: Bool = false, priority: Int = 0) {
@@ -376,7 +438,47 @@ public struct WANConfig: Codable, Equatable {
     /// The uplinks, best first: "eth:<port>", "wifi", "phone". The router
     /// uses the first that works.
     public var order: [String]
+    /// What is set for a phone sharing its connection over USB; nil from
+    /// a router too old to have such settings.
+    public var phone: PhoneSourceConfig?
     public var probe: ProbeConfig
+}
+
+/// The settings of the internet source that is a phone on USB. They apply
+/// to whichever phone is plugged in.
+public struct PhoneSourceConfig: Codable, Equatable {
+    public var shaping: ShapingConfig
+
+    public init(shaping: ShapingConfig = ShapingConfig()) {
+        self.shaping = shaping
+    }
+}
+
+public extension RouterConfig {
+    /// The speeds set for the internet source with the given key
+    /// (`wan.order`); for Wi-Fi, those of the saved network `ssid`.
+    func shaping(source key: String, ssid: String? = nil) -> ShapingConfig {
+        if key == RouterConfig.uplinkPhone { return wan.phone?.shaping ?? ShapingConfig() }
+        if key == RouterConfig.uplinkWifi {
+            return wan.networks.first(where: { $0.ssid == ssid })?.shaping ?? ShapingConfig()
+        }
+        return ethernet.first(where: { RouterConfig.uplinkEthernet($0.name) == key })?.shaping ?? ShapingConfig()
+    }
+
+    /// Sets them, in the place each kind of source keeps them. A Wi-Fi
+    /// network that is not saved, or a port that is not there, is left
+    /// alone.
+    mutating func setShaping(_ shaping: ShapingConfig, source key: String, ssid: String? = nil) {
+        if key == RouterConfig.uplinkPhone {
+            wan.phone = PhoneSourceConfig(shaping: shaping)
+        } else if key == RouterConfig.uplinkWifi {
+            if let index = wan.networks.firstIndex(where: { $0.ssid == ssid }) {
+                wan.networks[index].shaping = shaping
+            }
+        } else if let index = ethernet.firstIndex(where: { RouterConfig.uplinkEthernet($0.name) == key }) {
+            ethernet[index].shaping = shaping
+        }
+    }
 }
 
 public struct LANConfig: Codable, Equatable {
@@ -612,6 +714,42 @@ public struct RouterStatus: Codable, Equatable {
     /// Whether and where the router can be reached from outside; nil
     /// from a router too old to let anything in.
     public var inbound: InboundStatus?
+    /// How each internet source that is to be held to a speed stands;
+    /// nil from a router too old to hold any.
+    public var shaping: [ShapingStatus]?
+}
+
+/// How holding one internet source to its speeds stands.
+public struct ShapingStatus: Codable, Equatable, Identifiable {
+    /// The source's entry in `wan.order`, and its interface.
+    public var key: String
+    public var iface: String
+    /// "active", "waiting" (the source is not there: nothing plugged
+    /// in, not signed in yet), "measuring" (left alone while its speed
+    /// is measured) or "error".
+    public var state: String
+    public var down: ShapingDirection
+    public var up: ShapingDirection
+    /// What went wrong, in the router's words, when `state` is "error".
+    public var error: String?
+    public var id: String { iface }
+
+    enum CodingKeys: String, CodingKey {
+        case iface = "if"
+        case key, state, down, up, error
+    }
+}
+
+/// One direction through a source that is held to a speed.
+public struct ShapingDirection: Codable, Equatable {
+    public var kbps: Int
+    /// Packets the router dropped, and packets it marked, to make a
+    /// sender slow down, since the source connected.
+    public var dropped: UInt64
+    public var marked: UInt64
+
+    /// How often the router has told a sender to slow down.
+    public var slowed: UInt64 { dropped + marked }
 }
 
 /// Whether and where the router can be reached from the internet, and
@@ -1050,7 +1188,7 @@ public struct Flow: Codable, Equatable, Identifiable {
 
 public struct SpeedTestResult: Codable, Equatable, Identifiable {
     public var t: Int64
-    /// "direct" or "vpn:<id>".
+    /// "direct", "vpn:<id>" or "source:<key>".
     public var via: String
     public var latencyMs: Double
     public var downMbps: Double
@@ -1228,7 +1366,10 @@ public extension RouterAPI {
     func topTalkers(hours: Int = 24) async throws -> [TopTalker] { try await call("stats.top", ["hours": hours]) }
     /// Connections of one device, or of every device when `mac` is empty.
     func flows(mac: String = "") async throws -> [Flow] { try await call("flows.list", ["mac": mac]) }
-    /// Runs a speed test from the router; takes about 20 seconds.
+    /// Runs a speed test from the router; takes about 20 seconds. `via`
+    /// is "direct", a VPN ("vpn:<id>") or one internet source
+    /// (`RouterConfig.speedTestPath(source:)`), which is then measured
+    /// as the line is, not held to the speeds set for it.
     func runSpeedTest(via: String = "direct") async throws -> SpeedTestResult { try await call("speedtest.run", ["via": via]) }
     func speedTestHistory() async throws -> [SpeedTestResult] { try await call("speedtest.history") }
 

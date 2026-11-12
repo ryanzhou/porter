@@ -41,7 +41,7 @@ public enum DemoRouter {
             case "hello":
                 return Data(#"{"name":"Porter","id":"3fa9c210","version":"v1.0.0","paired":true,"claimed":true,"pairing":false,"ready":true,"control":\#(DemoRouter.control(config))}"#.utf8)
             case "status.get":
-                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: DemoRouter.control(config), inbound: DemoRouter.inbound(config, now: now)).utf8)
+                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: DemoRouter.control(config), inbound: DemoRouter.inbound(config, now: now), shaping: DemoRouter.shaping(config)).utf8)
             case "devices.list":
                 return Data(DemoRouter.devices(now: now).utf8)
             case "config.check":
@@ -88,6 +88,14 @@ public enum DemoRouter {
             case "device.queries":
                 return Data(DemoRouter.queries(now: now).utf8)
             case "speedtest.run":
+                // Through one internet source, what is measured is the
+                // line: a little more than the speeds the sample router
+                // holds that source to.
+                struct Params: Decodable { let via: String? }
+                let via = (try? JSONDecoder().decode(Params.self, from: params))?.via ?? "direct"
+                if via.hasPrefix("source:") {
+                    return try RouterConnection.makeEncoder().encode(SpeedTestResult(t: now, via: via, latencyMs: 21.6, downMbps: 38.4, upMbps: 9.3, error: nil))
+                }
                 return Data("{\"t\":\(now),\"via\":\"direct\",\"latency_ms\":18.4,\"down_mbps\":93.7,\"up_mbps\":41.2}".utf8)
             case "speedtest.history":
                 return Data("""
@@ -158,15 +166,18 @@ public enum DemoRouter {
                {"id":"usb:9c:ef:d5:12:34:56","role":"wan","band":"","channel":0,"width":0}],
      "ethernet":[{"name":"end0","role":"wan","network":"lan","tagged":[],"vlan":7,
                   "ip":{"v4":{"mode":"auto","address":"","gateway":"","dns":[]},"v6":{"mode":"auto","address":"","gateway":"","dns":[]}},
-                  "pppoe":{"enabled":true,"username":"porter@fibre.example","password":"not-a-real-password"}},
+                  "pppoe":{"enabled":true,"username":"porter@fibre.example","password":"not-a-real-password"},
+                  "shaping":{"enabled":true,"down_kbps":237500,"up_kbps":38000}},
                  {"name":"\(adapter)","role":"lan","network":"lan","tagged":["things"],"vlan":0,
                   "ip":{"v4":{"mode":"auto","address":"","gateway":"","dns":[]},"v6":{"mode":"auto","address":"","gateway":"","dns":[]}},
-                  "pppoe":{"enabled":false,"username":"","password":""}}],
+                  "pppoe":{"enabled":false,"username":"","password":""},
+                  "shaping":{"enabled":false,"down_kbps":0,"up_kbps":0}}],
      "wifi":[{"id":"main","ssid":"Porter","passphrase":"correct horse battery","security":"wpa2","hidden":false,"isolate":false,"network":"lan","enabled":true},
              {"id":"guest","ssid":"Porter Guest","passphrase":"welcome aboard","security":"wpa2","hidden":false,"isolate":true,"network":"guest","enabled":true}],
-     "wan":{"networks":[{"ssid":"Harbour Hotel Guest","psk":"","hidden":false,"priority":3},
-                        {"ssid":"Home","psk":"not-a-real-password","hidden":false,"priority":2},
+     "wan":{"networks":[{"ssid":"Harbour Hotel Guest","psk":"","hidden":false,"priority":3,"shaping":{"enabled":true,"down_kbps":36400,"up_kbps":8830}},
+                        {"ssid":"Home","psk":"not-a-real-password","hidden":false,"priority":2,"shaping":{"enabled":false,"down_kbps":0,"up_kbps":0}},
                         {"ssid":"Airport Free WiFi","psk":"","hidden":false,"priority":1}],
+            "phone":{"shaping":{"enabled":false,"down_kbps":0,"up_kbps":0}},
             "wifi_mac":{"mode":"random","address":"06:5a:91:c3:7e:12"},"eth_mac":{"mode":"hardware"},
             "order":["eth:end0","eth:\(adapter)","wifi","phone"],
             "probe":{"url":"http://captive.apple.com/hotspot-detect.html","expect":"Success"}},
@@ -248,7 +259,37 @@ public enum DemoRouter {
         return #"{"port":7678,"addrs":["10.83.0.1","fd4c:91a7:20be:1::1"]}"#
     }
 
-    static func status(now: Int64, rev: UInt64, name: String, control: String, inbound: String) -> String {
+    /// The network the sample router has joined, the interface it joined
+    /// it with, and the phone that is plugged in.
+    static let joinedNetwork = "Harbour Hotel Guest"
+    static let wifiInterface = "wlan1"
+    static let phoneInterface = "enx3a1f0c2299d4"
+
+    /// How holding the sample router's internet sources to their speeds
+    /// stands: the hotel's network is the one in use, the cable for the
+    /// wired port is at home.
+    static func shaping(_ config: RouterConfig) -> String {
+        var out: [String] = []
+        func entry(_ key: String, _ iface: String, _ state: String, _ set: ShapingConfig, _ down: (Int, Int), _ up: (Int, Int)) -> String {
+            "{\"key\":\"\(key)\",\"if\":\"\(iface)\",\"state\":\"\(state)\",\"down\":{\"kbps\":\(set.downKbps),\"dropped\":\(down.0),\"marked\":\(down.1)},\"up\":{\"kbps\":\(set.upKbps),\"dropped\":\(up.0),\"marked\":\(up.1)}}"
+        }
+        for port in config.ethernet where port.role == .wan {
+            if let set = port.shaping, set.enabled {
+                out.append(entry(RouterConfig.uplinkEthernet(port.name), "ppp-" + port.name, "waiting", set, (0, 0), (0, 0)))
+            }
+        }
+        let hotel = config.shaping(source: RouterConfig.uplinkWifi, ssid: joinedNetwork)
+        if hotel.enabled {
+            out.append(entry(RouterConfig.uplinkWifi, wifiInterface, "active", hotel, (1834, 212), (96, 41)))
+        }
+        let phone = config.shaping(source: RouterConfig.uplinkPhone)
+        if phone.enabled {
+            out.append(entry(RouterConfig.uplinkPhone, phoneInterface, "active", phone, (57, 0), (12, 0)))
+        }
+        return "[" + out.joined(separator: ",") + "]"
+    }
+
+    static func status(now: Int64, rev: UInt64, name: String, control: String, inbound: String, shaping: String) -> String {
         let safeName = name.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "\"", with: "'")
         return """
         {"name":"\(safeName)","id":"3fa9c210","version":"v1.0.0","time":\(now),"uptime":93784,"temp":51.3,"ready":true,"rev":\(rev),"pairing":false,
@@ -269,6 +310,7 @@ public enum DemoRouter {
          "vpns":[{"id":"home","name":"Home","if":"wg-home","state":"up","endpoint":"203.0.113.24:51820","handshake":\(now - 47),"rx":1843200512,"tx":211812352},
                  {"id":"us","name":"Streaming (US)","state":"off","rx":0,"tx":0}],
          "inbound":\(inbound),
+         "shaping":\(shaping),
          "geoip":{"available":true,"date":"2026-11"},
          "adblock":{"enabled":true,"domains":78215,"blocked":1284,
                     "lists":[{"url":"https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts","domains":78215,"updated":\(now - 21_600)}]}}

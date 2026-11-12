@@ -95,6 +95,14 @@ struct DemoScreen: View {
     @EnvironmentObject private var model: AppModel
     let name: String
 
+    /// The Wi-Fi network the router has joined, as the internet source
+    /// whose smoothing page is shown.
+    private var joinedSource: SmoothingTarget {
+        let stations: [StationStatus] = model.status?.stas ?? []
+        let joined: String = stations.first(where: { $0.state == "connected" })?.ssid ?? ""
+        return SmoothingTarget(key: RouterConfig.uplinkWifi, ssid: joined)
+    }
+
     var body: some View {
         switch name {
         case "traffic":
@@ -113,6 +121,8 @@ struct DemoScreen: View {
             NavigationStack { NetworkSetupPage() }
         case "outside":
             NavigationStack { InboundPage() }
+        case "smoothing":
+            NavigationStack { SmoothingPage(title: "Smooth out heavy use", heading: false, target: joinedSource) }
         case "setup":
             NavigationStack { SetupView() }
         case "connect":

@@ -239,12 +239,32 @@ private struct SourcesSection: View {
         return uplink.iface == active
     }
 
+    /// The saved network the router has joined, if it has joined one.
+    private var joinedNetwork: String? {
+        let stations: [StationStatus] = model.status?.stas ?? []
+        guard let name = stations.first(where: { $0.state == "connected" })?.ssid else { return nil }
+        let saved: [SavedNetwork] = model.config?.wan.networks ?? []
+        return saved.contains(where: { $0.ssid == name }) ? name : nil
+    }
+
     var body: some View {
         Section {
             ForEach(sources) { source in
                 if let port = source.port {
                     NavigationLink {
                         WiredSourcePage(port: port)
+                    } label: {
+                        SourceRow(source: source, active: isActive(source))
+                    }
+                } else if source.kind == "phone" {
+                    NavigationLink {
+                        SmoothingPage(title: "Phone on USB", heading: true, target: SmoothingTarget(key: source.key))
+                    } label: {
+                        SourceRow(source: source, active: isActive(source))
+                    }
+                } else if let network = joinedNetwork {
+                    NavigationLink {
+                        SavedNetworkPage(ssid: network)
                     } label: {
                         SourceRow(source: source, active: isActive(source))
                     }
@@ -541,6 +561,9 @@ private struct WiredSourcePage: View {
                     Text("Your provider has given the router these IPv6 addresses for the devices on your networks.")
                 }
             }
+            Section {
+                SmoothingLink(target: SmoothingTarget(key: RouterConfig.uplinkEthernet(port)))
+            }
         }
         .navigationTitle("Ethernet")
         .navigationBarTitleDisplayMode(.inline)
@@ -724,9 +747,7 @@ private struct SavedNetworksSection: View {
         Section {
             ForEach(networks) { network in
                 NavigationLink {
-                    IPSetupPage(title: network.ssid, initial: network.ip ?? IPSetup()) { setup in
-                        await saveAddresses(network.ssid, setup)
-                    }
+                    SavedNetworkPage(ssid: network.ssid)
                 } label: {
                     HStack {
                         Text(network.ssid)
@@ -753,10 +774,44 @@ private struct SavedNetworksSection: View {
     private func forget(_ ssid: String) {
         Task { await model.attempt { try await $0.forgetWifi(ssid: ssid) } }
     }
+}
 
-    private func saveAddresses(_ ssid: String, _ setup: IPSetup) async -> Bool {
-        await model.update { cfg in
-            if let index = cfg.wan.networks.firstIndex(where: { $0.ssid == ssid }) {
+/// What is set for one saved Wi-Fi network: how the router gets its
+/// addresses there, and the speeds it is held to there.
+private struct SavedNetworkPage: View {
+    @EnvironmentObject private var model: AppModel
+    let ssid: String
+
+    private var network: SavedNetwork? {
+        let saved: [SavedNetwork] = model.config?.wan.networks ?? []
+        return saved.first(where: { $0.ssid == ssid })
+    }
+
+    private var addresses: String {
+        (network?.ip?.isAutomatic ?? true) ? "Automatic" : "Manual"
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                NavigationLink {
+                    IPSetupPage(title: "Addresses", initial: network?.ip ?? IPSetup()) { setup in
+                        await saveAddresses(setup)
+                    }
+                } label: {
+                    LabeledContent("Addresses", value: addresses)
+                }
+                SmoothingLink(target: SmoothingTarget(key: RouterConfig.uplinkWifi, ssid: ssid))
+            }
+        }
+        .navigationTitle(ssid)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func saveAddresses(_ setup: IPSetup) async -> Bool {
+        let name: String = ssid
+        return await model.update { cfg in
+            if let index = cfg.wan.networks.firstIndex(where: { $0.ssid == name }) {
                 cfg.wan.networks[index].ip = setup
             }
         }

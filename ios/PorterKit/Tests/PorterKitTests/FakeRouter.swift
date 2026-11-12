@@ -395,7 +395,7 @@ final class FakeRouter: @unchecked Sendable {
         var endpoints = "null"
         if let control, let data = try? JSONEncoder().encode(control) { endpoints = String(decoding: data, as: UTF8.self) }
         let now = Int64(Date().timeIntervalSince1970)
-        return DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: endpoints, inbound: DemoRouter.inbound(config, now: now))
+        return DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: endpoints, inbound: DemoRouter.inbound(config, now: now), shaping: DemoRouter.shaping(config))
     }
 
     /// Called with the lock held.

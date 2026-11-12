@@ -120,7 +120,7 @@ inside sh -c 'cd /tmp && /opt/porter-test/e2e.test -test.count=1 -test.v -test.t
 
 # A test that skipped itself here did so because the image lacks something
 # it needs, which is exactly what this run exists to find.
-if grep -E '^(--- SKIP: (TestRender|TestRouter)\b|    --- SKIP: TestRouter/(MPQUIC|TaggedPort|PPPoE|PrefixDelegation|Discovery|Trunk|ReachHome|PortForwards)\b)' "$WORK/fw.log" "$WORK/e2e.log"; then
+if grep -E '^(--- SKIP: (TestRender|TestRouter)\b|    --- SKIP: TestRouter/(MPQUIC|TaggedPort|PPPoE|PrefixDelegation|Discovery|Trunk|ReachHome|PortForwards|Smoothing)\b)' "$WORK/fw.log" "$WORK/e2e.log"; then
     echo "a test that must run inside the image's userland was skipped" >&2
     exit 1
 fi

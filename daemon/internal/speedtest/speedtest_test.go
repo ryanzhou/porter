@@ -3,6 +3,7 @@ package speedtest
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -63,5 +64,68 @@ func TestRun(t *testing.T) {
 		Options{Duration: 500 * time.Millisecond})
 	if gone.Error == "" {
 		t.Errorf("unreachable server: %+v", gone)
+	}
+}
+
+// An upload is counted by what the other end has acknowledged, on
+// connections that are open and on those closed since, and not by what
+// was handed to the kernel on this side.
+func TestUploadCountsWhatArrived(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go io.Copy(io.Discard, c)
+		}
+	}()
+	hc, conns := client(0, "")
+	dial := hc.Transport.(*http.Transport).DialContext
+	const size = 300_000
+	arrived := func(want uint64) bool {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			// The opening of a connection counts as a byte, where it is
+			// counted at all.
+			if n, ok := conns.acked(); ok && n >= want && n <= want+4 {
+				return true
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return false
+	}
+	first, err := dial(context.Background(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Write(make([]byte, size)); err != nil {
+		t.Fatal(err)
+	}
+	if !arrived(size) {
+		n, ok := conns.acked()
+		t.Fatalf("after sending %d bytes: %d acknowledged (known: %v)", size, n, ok)
+	}
+	second, err := dial(context.Background(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if _, err := second.Write(make([]byte, size)); err != nil {
+		t.Fatal(err)
+	}
+	if !arrived(2 * size) {
+		t.Fatal("a second connection's bytes were not added")
+	}
+	// Closed, a connection's count is kept.
+	first.Close()
+	first.Close()
+	if n, ok := conns.acked(); !ok || n < 2*size || n > 2*size+4 {
+		t.Errorf("after closing a connection: %d acknowledged (known: %v)", n, ok)
 	}
 }

@@ -451,6 +451,9 @@ func (c *Config) validateRadios() error {
 		if err := e.validatePPPoE(); err != nil {
 			return err
 		}
+		if err := e.Shaping.validate(); err != nil {
+			return err
+		}
 		if err := c.validatePortNetworks(e); err != nil {
 			return err
 		}
@@ -486,6 +489,21 @@ func (c *Config) validatePortNetworks(e EthPort) error {
 		if n.VLAN == 0 {
 			return fmt.Errorf("%s has no VLAN ID, so the port %s cannot carry it tagged. Give the network a VLAN ID first.", n.Name, e.Name)
 		}
+	}
+	return nil
+}
+
+// validate checks the rates an uplink is held to. Both have to be there
+// while it is switched on; switched off, what is kept still has to be a
+// rate, or nothing.
+func (s Shaping) validate() error {
+	for _, kbps := range []int{s.DownKbps, s.UpKbps} {
+		if kbps != 0 && (kbps < MinShapeKbps || kbps > MaxShapeKbps) {
+			return fmt.Errorf("A speed to hold an internet source to is between %.1f and %d Mbit/s.", float64(MinShapeKbps)/1000, MaxShapeKbps/1000)
+		}
+	}
+	if s.Enabled && (s.DownKbps == 0 || s.UpKbps == 0) {
+		return fmt.Errorf("Smoothing out heavy use needs both speeds of the internet source, download and upload.")
 	}
 	return nil
 }
@@ -723,6 +741,12 @@ func (c *Config) validateWAN() error {
 		if err := n.IP.validate(n.SSID, len(c.DNS.Upstreams) > 0); err != nil {
 			return err
 		}
+		if err := n.Shaping.validate(); err != nil {
+			return err
+		}
+	}
+	if err := w.Phone.Shaping.validate(); err != nil {
+		return err
 	}
 	if err := validMACPolicy(w.WifiMAC, "wan.wifi_mac"); err != nil {
 		return err

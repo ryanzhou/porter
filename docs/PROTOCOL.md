@@ -201,10 +201,11 @@ devices behind a wired port losing their connection when the port
 changes hands or a network on it changes its VLAN ID).
 
 The document's format is `version` 3. (Format 3 added
-`system.bluetooth_only`; `vlan`, `pppoe` and `tagged` for wired ports;
-`vlan` and `discovery` for networks; and `inbound`, to format 2 and
+`system.bluetooth_only`; `vlan`, `pppoe`, `tagged` and `shaping` for
+wired ports; `vlan` and `discovery` for networks; `shaping` for saved
+Wi-Fi networks and `wan.phone`; and `inbound`, to format 2 and
 changed nothing else; a router that stored format 2 carries it over as
-it is, with nothing let in.) Its
+it is, with nothing let in and no source held to a speed.) Its
 parts, briefly:
 
 ```
@@ -223,7 +224,7 @@ networks[]  {id name address ula_prefix isolated route vlan discovery}
             network and every network that is not isolated, both ways
 lan         {auto_renumber lease_minutes domain ipv6}   shared by all networks
 radios[]    {id role band channel width}   role "off" | "ap" | "wan" | "ap+wan"
-ethernet[]  {name role ip vlan pppoe network tagged[]}
+ethernet[]  {name role ip vlan pppoe shaping network tagged[]}
             role "wan" | "lan" | "off".
             For a "lan" port: network: the id of the network it carries
             untagged, "" for none; tagged: the ids of the networks it
@@ -237,8 +238,16 @@ ethernet[]  {name role ip vlan pppoe network tagged[]}
             sign in to the provider, in place of ip.v4 (both families of
             ip must then be "auto"). The router clears username and
             password when pppoe is not enabled.
-wan         {networks[] wifi_mac eth_mac order[] probe}
+            shaping {enabled down_kbps up_kbps}: the uplink is held to
+            these rates, in kbit/s, each from 100 to 10000000. Both are
+            needed while it is enabled; they are kept while it is not.
+wan         {networks[] wifi_mac eth_mac order[] phone probe}
+            networks[] {ssid psk hidden priority ip shaping}: the saved
+            Wi-Fi networks; shaping as for a wired port, applied while
+            the router is on that network.
             order: uplink keys, best first: "eth:<port>", "wifi", "phone"
+            phone {shaping}: what is set for a phone sharing its
+            connection over USB, whichever phone it is
 policy      {default rules[{id name enabled src{devices cidrs networks} dst action}]}
 inbound     {server forwards[] ddns check_url}   what may come in from the internet
   server    {enabled port private_key address ula_prefix peers[]}
@@ -332,6 +341,18 @@ inbound    {reach address public public6 host server forwards[] ddns}
            ddns {state updated address address6 error}
            state "off" | "waiting" (no address to publish, or not
            updated yet) | "ok" | "error"; error is for people.
+shaping[]  {key if state down up error?}
+           one entry for each uplink that is there and has shaping
+           enabled. key: its entry in wan.order; if: the interface the
+           queues are on (as in wan[]).
+           state "active" | "waiting" (the interface is not there yet:
+           a PPPoE session that is not up) | "measuring" (left unshaped
+           while a speed test runs through it) | "error" (error: what
+           the tc program said).
+           down, up {kbps dropped marked}: the rate, and how many
+           packets the queue has dropped or marked (ECN) to make a
+           sender slow down since it was put there. The counters are
+           read every few seconds and do not cause status events.
 ```
 
 ### Radios and upstream Wi-Fi
@@ -341,7 +362,7 @@ inbound    {reach address public public6 host server forwards[] ddns}
 | `radios.list` | – | `[{id,phy,iface,driver,bus,product,mac,bands[],ap,sta,ap_sta,max_ap,max_ap_sta,present,role}]` |
 | `wifi.uplink` | `{radio}` | `{}` – makes that radio the one that joins upstream networks (`""`: none) |
 | `wifi.scan` | `{quick?}` | `[{ssid,signal,freq,security,known}]`; takes several seconds, or with `quick` answers at once from the last scan and starts a new one |
-| `wifi.connect` | `{ssid,psk,hidden}` | `{}` – saves the network with top priority |
+| `wifi.connect` | `{ssid,psk,hidden}` | `{}` – saves the network with top priority; one that is saved already keeps its `ip` and `shaping` |
 | `wifi.forget` | `{ssid}` | `{}` |
 | `wan.new_mac` | `{kind: "wifi"\|"eth"}` | `{}` – new random upstream MAC |
 | `wan.recheck` | – | `{}` – probe reachability now |
@@ -372,7 +393,7 @@ the network that was refused.
 | `stats.get` | `{mac}` (`""` = whole network) | `{minutes: [60 × {t,up,down}], hours: [72 × {t,up,down}]}`, oldest first, evenly spaced |
 | `stats.top` | `{hours}` | `[{mac,up,down}]`, busiest first |
 | `flows.list` | `{mac}` (`""` = all devices) | `[{mac,proto,dst,port,name?,country?,path,up,down,started,last,active}]` – active first (busiest first), then recently ended (latest first) |
-| `speedtest.run` | `{via: "direct"\|"vpn:<id>"}` | `{t,via,latency_ms,down_mbps,up_mbps,error?}` after about 20 s |
+| `speedtest.run` | `{via: "direct"\|"vpn:<id>"\|"source:<key>"}` | `{t,via,latency_ms,down_mbps,up_mbps,error?}` after about 20 s |
 | `speedtest.history` | – | the last 20 results, newest first |
 
 A flow is a connection from a LAN device to somewhere beyond the router,
@@ -385,6 +406,15 @@ enter connection tracking and are not listed.
 `speedtest.run` measures from the router itself, against the server in
 `config.speedtest`, optionally through a connected VPN. While it runs the
 router sends `speedtest` events.
+
+With `via` `"source:<key>"` (a key as in `wan.order`: `source:eth:eth0`,
+`source:wifi`, `source:phone`) the test goes out by that uplink, whether
+or not it is the one in use, and measures the line itself: an uplink
+with `shaping` enabled is left unshaped for as long as the test runs
+(`shaping[].state` is `measuring`). The app fills 95 % of the result in
+as the rates to hold the uplink to. Such a test is refused (`invalid`)
+for an uplink that is not connected, and is not kept in
+`speedtest.history`.
 
 ### VPN
 

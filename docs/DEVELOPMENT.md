@@ -22,6 +22,7 @@ the project's GitHub releases, and only when asked for from the app.
                                                     ├─ pppd             (uplink PPPoE)
                                                     ├─ dnsmasq          (LAN DHCP and router advertisements)
                                                     ├─ nftables         (firewall, NAT44/NAT66, classification)
+                                                    ├─ tc               (CAKE queues on uplinks held to a speed)
                                                     ├─ policy routing   (one table per VPN profile)
                                                     ├─ WireGuard        (kernel: profiles, and the router's own server)
                                                     ├─ DNS forwarder    (built in)
@@ -192,6 +193,72 @@ every subsystem against it and against what the network is doing.
   uplink whose MTU is below Ethernet's. The routing table that names
   the uplink in use names a session by its interface, since it has no
   gateway.
+- **Holding an uplink to a speed.** When a line is full, something has
+  to wait. Left alone it waits in the modem, in one long queue where a
+  call's packets stand behind an upload's. So an uplink can be held to
+  rates a little below what its line carries (`shaping`: per wired
+  port, per saved Wi-Fi network, and for the phone on USB), which moves
+  the waiting into the router, and there the queue is CAKE (`sch_cake`),
+  which shares the rate between devices first and then between each
+  device's connections, and tells a sender to slow down long before
+  the queue is long. `internal/shape` does it with the `tc` program:
+  CAKE's options and its keywords for what a line adds to each packet
+  are tc's to know, and a netlink library would have to be taught each.
+  What leaves is queued on the uplink's own interface, the one the
+  traffic really leaves by (a PPPoE session's, a VLAN's):
+  `cake bandwidth <up> … nat dual-srchost`. What arrives cannot be
+  queued where it arrives, so everything is redirected (an ingress
+  queue with one `u32` filter and `mirred`) to a stand-in interface,
+  an IFB device per shaped uplink named `ifb-<interface>`, and queued
+  there: `cake bandwidth <down> … nat dual-dsthost ingress besteffort`.
+  `nat` makes CAKE look each packet up in connection tracking: after
+  the router's address translation every packet on the uplink has the
+  router's own address, and fairness is about the device behind it.
+  `ingress` counts what CAKE drops against the rate, since it has used
+  the line already. `besteffort` ignores the priority marks of packets
+  from the internet, which a stranger set; what leaves keeps CAKE's
+  default, so that a phone at home that marks its calls gets them
+  ahead. What a line adds to a packet is told from what the router
+  knows of it: `pppoe-ptm` for a PPPoE session (taken to run over
+  VDSL2, where most do; over fibre that is 1.5 % too careful and
+  nothing worse), `ethernet` for everything else (right for a cable to
+  a modem, and the least any line adds for what is behind a Wi-Fi
+  network or a phone), and `ether-vlan` on top where the uplink is
+  tagged.
+  The control loop names the uplinks to shape on every pass
+  (`shapeSources`), for Wi-Fi with the setting of the network the
+  station is on, and `shape.Manager.Apply` makes the kernel agree: it
+  reads every queue with one `tc -s -j qdisc show` (which is also where
+  the status's counters come from), leaves alone what is as wanted,
+  changes rates in place (`tc qdisc replace` with the handle the queues
+  are known by, `1ca:`, so that nothing passes unshaped meanwhile), and
+  sets up anew what is missing: after a restart of the daemon, on an
+  interface that was unplugged and plugged in again (it has the name
+  and nothing else; the interface index tells), on a new PPPoE session.
+  Whatever is not wanted goes: the queues of a source no longer shaped,
+  and anything an earlier run left behind. The order matters in one
+  place. A redirect to a stand-in interface that is gone or down loses
+  every packet that arrives on the uplink, so the stand-in and its
+  queue are made before the redirect and the redirect is removed
+  before the stand-in. A router that shapes nothing runs tc once after
+  it starts and not again. Like the firewall, the queues are left in
+  place when the daemon stops.
+  The rates come from the person or from **Measure**, which is
+  `speedtest.run` with `via` `source:<key>`: the test's sockets are
+  bound to the uplink's interface (as the reachability probe's are),
+  so it measures that uplink whichever is in use, and for as long as
+  it runs the uplink is left unshaped (`Core.measuring`), or it would
+  measure the setting. The app fills in 95 % of the result.
+  *Through a VPN* the fairness is lost: a tunnel's packets are
+  encrypted before they reach the uplink's queue, and all CAKE sees of
+  them is one flow per tunnel between the router and the VPN's server.
+  The rate still holds, so the queue is still here and still short,
+  and the tunnel as a whole gets its fair share next to devices that
+  go out directly; but two devices inside the same tunnel are not kept
+  from crowding each other. (That would take a queue on the tunnel's
+  own interface, which nothing sets up.) The router's WireGuard server
+  and the profiles' interfaces are not uplinks and are never shaped
+  themselves.
 - **MPQUIC.** A VPN profile of this type runs the `mpquic` program as it
   is released (`mpquic local`), attached to a network interface: its
   TUN mode, in which it proxies whatever the system routes there. Each
@@ -460,7 +527,9 @@ need root and `ip`, `nft`, `dnsmasq`, `dhcpcd` and `wg` (with the
 kernel's WireGuard, or a userspace one named by `PORTER_WG_USERSPACE`);
 for PPPoE also
 `pppd` and `pppoe-server`, and a kernel with VLANs, PPPoE and IPv6 for
-the tests of those (which skip themselves, saying why, where it has
+the tests of those, and with CAKE and IFB interfaces (`sch_cake`,
+`sch_ingress`, `cls_u32`, `act_mirred`, `ifb`) for the test of holding
+an uplink to a speed (they skip themselves, saying why, where it has
 none; the relay for multicast DNS is tested over IPv4 on any kernel):
 
 ```bash
@@ -490,7 +559,17 @@ CI runs the end-to-end tests this way.
   switches it off); a second network (its own addresses, isolation, a
   route and a rule of its own, and its removal); a second uplink
   standing in for a phone (the order of uplinks, and falling back when
-  the first stops reaching the internet); coming in from outside
+  the first stops reaching the internet); an uplink held to a speed
+  (`shape_test.go`: the queues for both directions with their options,
+  a device's download and upload landing near the rates set where they
+  ran at hundreds of times that a moment before, the status counting
+  what was slowed down, a measurement through the uplink seeing the
+  line and not the setting, a change of rates, queues and a stand-in
+  interface removed behind the router's back and put back, a phone
+  that is unplugged and plugged in again, and everything gone when it
+  is switched off; the band a measured rate has to land in is wide and
+  a measurement is repeated once, because the machines these run on
+  are shared); coming in from outside
   (`inbound_test.go`: a namespace beyond the upstream network brings up
   WireGuard from the configuration `server.peer_add` gave it and
   reaches a device at home, the router's DNS, the internet through the
@@ -559,7 +638,7 @@ project file.
 sample router and never touches Bluetooth. `-demoScreen <name>` opens one
 screen directly: a tab name (`overview`, `internet`, `devices`, `vpn`,
 `settings`) or `traffic`, `flows`, `speedtest`, `device`, `adblock`,
-`networks`, `outside`, `software`, `setup`, `connect`, `share`. The *iOS* workflow
+`networks`, `outside`, `smoothing`, `software`, `setup`, `connect`, `share`. The *iOS* workflow
 uses this to publish screenshots as an artifact.
 
 **Two ways of changing things.** Most controls apply at once: the app
@@ -661,3 +740,15 @@ draft or pre-release. The router and the app both show the version.
 - A delegated prefix is announced to devices with the lifetimes of the
   router's own address leases (`lan.lease_minutes`), not with those of
   the delegation, and taken back when the delegation ends.
+- An uplink held to a speed is held to the rates typed or measured
+  once. A line whose speed moves (a phone's, a busy hotel's) is then
+  shaped too loosely at its slow moments, when the queue is the
+  modem's again, and too tightly at its fast ones. What a line adds to
+  each packet is a guess from the kind of uplink (see *Holding an
+  uplink to a speed*).
+- A speed test counts a download by what it has read, and an upload by
+  what the server has acknowledged (`TCP_INFO`), not by what it has
+  handed to the kernel: on a slow line with a deep queue, a good part
+  of that is still waiting to be sent when the test ends, and a figure
+  that counted it would have **Measure** set an upload rate the line
+  does not carry.

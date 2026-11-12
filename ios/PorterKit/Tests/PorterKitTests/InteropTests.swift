@@ -191,6 +191,25 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(untaggable.error, "Main has no VLAN ID, so the port \(config.ethernet[0].name) cannot carry it tagged. Give the network a VLAN ID first.")
         config.ethernet[0].tagged = ["guest"]
 
+        // Holding internet sources to a speed: a router answers with the
+        // setting for every port and for the phone, switched off, and
+        // holds it there and for each saved Wi-Fi network.
+        XCTAssertEqual(config.ethernet.first?.shaping, ShapingConfig())
+        XCTAssertEqual(config.wan.phone, PhoneSourceConfig())
+        XCTAssertEqual(status.shaping, [])
+        let wiredKey = RouterConfig.uplinkEthernet(config.ethernet[0].name)
+        var halfSet = config
+        halfSet.setShaping(ShapingConfig(enabled: true, downKbps: 95_000), source: wiredKey)
+        let noUpload = try await router.checkConfig(halfSet)
+        XCTAssertEqual(noUpload.error, "Smoothing out heavy use needs both speeds of the internet source, download and upload.")
+        halfSet.setShaping(ShapingConfig(enabled: true, downKbps: 95_000, upKbps: ShapingConfig.slowestKbps - 1), source: wiredKey)
+        let tooSlow = try await router.checkConfig(halfSet)
+        XCTAssertNotNil(tooSlow.error)
+        config.setShaping(ShapingConfig(enabled: true, downKbps: 95_000, upKbps: 19_000), source: wiredKey)
+        config.setShaping(ShapingConfig(enabled: false, downKbps: 20_000, upKbps: 4_000), source: RouterConfig.uplinkPhone)
+        config.wan.networks = [SavedNetwork(ssid: "Hotel", psk: ""), SavedNetwork(ssid: "Home", psk: "password1")]
+        config.setShaping(ShapingConfig(enabled: true, downKbps: 8_000, upKbps: 2_500), source: RouterConfig.uplinkWifi, ssid: "Hotel")
+
         // What comes in from outside. A router answers with its WireGuard
         // server complete (key, ranges, port) and switched off, and holds
         // devices for it, forwarded ports and a name to keep up to date.
@@ -255,6 +274,18 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(stored.wan.wifiMac.mode, .random)
         XCTAssertNotNil(stored.wan.wifiMac.address) // the router picked one
 
+        XCTAssertEqual(stored.shaping(source: wiredKey), ShapingConfig(enabled: true, downKbps: 95_000, upKbps: 19_000))
+        XCTAssertEqual(stored.shaping(source: RouterConfig.uplinkPhone), ShapingConfig(enabled: false, downKbps: 20_000, upKbps: 4_000))
+        XCTAssertEqual(stored.shaping(source: RouterConfig.uplinkWifi, ssid: "Hotel"), ShapingConfig(enabled: true, downKbps: 8_000, upKbps: 2_500))
+        XCTAssertEqual(stored.shaping(source: RouterConfig.uplinkWifi, ssid: "Home"), ShapingConfig())
+        // A source that is not connected cannot be measured.
+        do {
+            _ = try await router.runSpeedTest(via: RouterConfig.speedTestPath(source: RouterConfig.uplinkPhone))
+            XCTFail("the speed of a phone that is not plugged in was measured")
+        } catch let error as RouterError {
+            XCTAssertEqual(error.msg, "That internet source is not connected.")
+        }
+
         XCTAssertEqual(stored.inbound?.server.enabled, true)
         XCTAssertEqual(stored.inbound?.server.peers, config.inbound?.server.peers)
         XCTAssertEqual(stored.inbound?.forwards.first?.device, "02:aa:00:00:00:03") // normalised by the router
@@ -285,6 +316,12 @@ final class InteropTests: XCTestCase {
             XCTAssertEqual(error.code, "invalid")
             XCTAssertTrue(error.msg.contains("password"))
         }
+
+        // Joining a saved network again keeps the speeds set for it.
+        try await router.connectWifi(SavedNetwork(ssid: "Hotel", psk: "new password"))
+        let rejoined = try await router.config()
+        XCTAssertEqual(rejoined.shaping(source: RouterConfig.uplinkWifi, ssid: "Hotel"), ShapingConfig(enabled: true, downKbps: 8_000, upKbps: 2_500))
+        XCTAssertEqual(rejoined.wan.networks.first(where: { $0.ssid == "Hotel" })?.psk, "new password")
 
         // Device settings and events.
         try await router.setDevice(DeviceSettings(mac: "02:aa:00:00:00:02", name: "Phone", paused: true, noAdblock: true))

@@ -941,3 +941,90 @@ func TestDiscoveryPeers(t *testing.T) {
 		}
 	}
 }
+
+// Holding an internet source to a speed: where the setting lives for each
+// kind of source, and what is accepted for it.
+func TestShaping(t *testing.T) {
+	check := func(mutate func(c *Config)) error {
+		c := Default()
+		c.WAN.Networks = []WifiNetwork{{SSID: "Hotel"}, {SSID: "Home", PSK: "password1"}}
+		mutate(c)
+		c.Normalize()
+		return c.Validate()
+	}
+	// A document from before the setting existed reads as switched off,
+	// for every kind of source.
+	var old Config
+	if err := json.Unmarshal([]byte(`{"version":3,"ethernet":[{"name":"eth0","role":"wan"}],"wan":{"networks":[{"ssid":"Hotel"}]}}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	old.Normalize()
+	for _, key := range []string{UplinkEth("eth0"), UplinkWifi, UplinkPhone} {
+		if got := old.ShapingOf(key, "Hotel"); got != (Shaping{}) {
+			t.Errorf("%s, stored without the setting: %+v", key, got)
+		}
+	}
+
+	on := Shaping{Enabled: true, DownKbps: 95000, UpKbps: 19000}
+	for what, mutate := range map[string]func(c *Config){
+		"a wired port":          func(c *Config) { c.Ethernet[0].Shaping = on },
+		"a saved Wi-Fi network": func(c *Config) { c.WAN.Networks[1].Shaping = on },
+		"a phone":               func(c *Config) { c.WAN.Phone.Shaping = on },
+		"the slowest": func(c *Config) {
+			c.Ethernet[0].Shaping = Shaping{Enabled: true, DownKbps: MinShapeKbps, UpKbps: MinShapeKbps}
+		},
+		"the fastest": func(c *Config) {
+			c.Ethernet[0].Shaping = Shaping{Enabled: true, DownKbps: MaxShapeKbps, UpKbps: MaxShapeKbps}
+		},
+		"off, with the speeds kept": func(c *Config) { c.Ethernet[0].Shaping = Shaping{DownKbps: 95000, UpKbps: 19000} },
+		"off, with one speed":       func(c *Config) { c.WAN.Phone.Shaping = Shaping{DownKbps: 95000} },
+		"on a port for devices":     func(c *Config) { c.Ethernet[0].Role, c.Ethernet[0].Shaping = EthLAN, on },
+	} {
+		if err := check(mutate); err != nil {
+			t.Errorf("%s: %v", what, err)
+		}
+	}
+	for what, set := range map[string]Shaping{
+		"on without speeds":       {Enabled: true},
+		"on without an upload":    {Enabled: true, DownKbps: 95000},
+		"on without a download":   {Enabled: true, UpKbps: 19000},
+		"too slow":                {Enabled: true, DownKbps: MinShapeKbps - 1, UpKbps: 19000},
+		"too fast":                {Enabled: true, DownKbps: 95000, UpKbps: MaxShapeKbps + 1},
+		"a negative speed":        {Enabled: true, DownKbps: -95000, UpKbps: 19000},
+		"off, with a speed below": {DownKbps: 5},
+		"off, with a speed above": {UpKbps: MaxShapeKbps * 2},
+	} {
+		for where, mutate := range map[string]func(c *Config){
+			"a wired port":          func(c *Config) { c.Ethernet[0].Shaping = set },
+			"a saved Wi-Fi network": func(c *Config) { c.WAN.Networks[0].Shaping = set },
+			"a phone":               func(c *Config) { c.WAN.Phone.Shaping = set },
+		} {
+			if err := check(mutate); err == nil {
+				t.Errorf("%s, %s: accepted", where, what)
+			}
+		}
+	}
+
+	// Each source finds its own setting: a port by its name, Wi-Fi by the
+	// network joined, and a network that is not saved has none.
+	c := Default()
+	c.WAN.Networks = []WifiNetwork{{SSID: "Hotel", Shaping: Shaping{Enabled: true, DownKbps: 8000, UpKbps: 2000}}, {SSID: "Home", PSK: "password1", Shaping: on}}
+	c.Ethernet = append(c.Ethernet, EthPort{Name: "eth1", Role: EthWAN, Shaping: Shaping{Enabled: true, DownKbps: 1000, UpKbps: 500}})
+	c.WAN.Phone.Shaping = Shaping{Enabled: true, DownKbps: 20000, UpKbps: 4000}
+	c.Normalize()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		key, ssid string
+		down      int
+	}{
+		{UplinkEth("eth0"), "", 0}, {UplinkEth("eth1"), "", 1000}, {UplinkEth("eth2"), "", 0},
+		{UplinkWifi, "Hotel", 8000}, {UplinkWifi, "Home", 95000}, {UplinkWifi, "Airport", 0}, {UplinkWifi, "", 0},
+		{UplinkPhone, "", 20000}, {UplinkPhone, "Home", 20000}, {"nonsense", "", 0},
+	} {
+		if got := c.ShapingOf(tc.key, tc.ssid); got.DownKbps != tc.down {
+			t.Errorf("%s (%q): %+v, wanted a download of %d", tc.key, tc.ssid, got, tc.down)
+		}
+	}
+}
