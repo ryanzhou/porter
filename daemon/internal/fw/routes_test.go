@@ -156,6 +156,27 @@ func TestSyncRouting(t *testing.T) {
 	if v4, _ := exec.Command("ip", "route", "show", "table", "105").CombinedOutput(); strings.Contains(string(v4), "default") {
 		t.Errorf("override without a gateway: %q", v4)
 	}
+	// A link with only one other end (a PPPoE session) has no gateway,
+	// and is named all the same: the main table would otherwise prefer
+	// another uplink's route by its metric.
+	over.Direct4 = true
+	for i := 0; i < 2; i++ {
+		if err := SyncRouting(nil, over); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if v4 := ipOut(t, "route", "show", "table", "105"); !strings.Contains(v4, "default dev peer0") || strings.Contains(v4, "via") {
+		t.Errorf("override straight down the link: %q", v4)
+	}
+	// And is replaced by a gateway once there is one.
+	over.Gw4 = netip.MustParseAddr("192.0.2.1")
+	if err := SyncRouting(nil, over); err != nil {
+		t.Fatal(err)
+	}
+	if v4 := ipOut(t, "route", "show", "table", "105"); !strings.Contains(v4, "default via 192.0.2.1 dev peer0") || strings.Count(v4, "default") != 1 {
+		t.Errorf("override after the link got a gateway: %q", v4)
+	}
+	over.Gw4, over.Direct4 = netip.Addr{}, false
 	over.V4 = false
 	if err := SyncRouting(nil, over); err != nil {
 		t.Fatal(err)

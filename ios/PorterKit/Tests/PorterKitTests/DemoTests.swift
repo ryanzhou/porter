@@ -28,7 +28,17 @@ final class DemoTests: XCTestCase {
         XCTAssertEqual(status.vpns.first?.state, "up")
         XCTAssertTrue(status.geoip.available)
 
+        // A wired source that signs in to its provider under a VLAN ID,
+        // at home; on the road its cable is out.
+        let wired = try XCTUnwrap(status.wan.first)
+        XCTAssertEqual(wired.pppoe, "signing_in")
+        XCTAssertNil(wired.prefix)
+        XCTAssertEqual(status.lan.prefixes, [:])
+
         var config = try await router.config()
+        XCTAssertEqual(config.ethernet.first?.vlan, 7)
+        XCTAssertEqual(config.ethernet.first?.pppoe?.enabled, true)
+        XCTAssertEqual(config.ethernet.first?.pppoe?.username, "porter@fibre.example")
         XCTAssertEqual(config.vpns.count, 2)
         XCTAssertEqual(config.policy.rules.count, 3)
         XCTAssertEqual(config.policy.rules[1].dst.countries, ["JP"])

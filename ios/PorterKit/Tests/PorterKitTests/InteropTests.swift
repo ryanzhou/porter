@@ -154,6 +154,18 @@ final class InteropTests: XCTestCase {
         let refused = try await router.checkConfig(overlapping)
         XCTAssertNotNil(refused.error)
 
+        // The first wired port: the internet under a VLAN ID, with a
+        // PPPoE sign-in. A router answers with both set out for every
+        // port, whether it uses them or not.
+        XCTAssertEqual(config.ethernet.first?.vlan, 0)
+        XCTAssertEqual(config.ethernet.first?.pppoe, PPPoESetup())
+        var tagged = config
+        tagged.ethernet[0].vlan = 4095
+        let outOfRange = try await router.checkConfig(tagged)
+        XCTAssertNotNil(outOfRange.error)
+        config.ethernet[0].vlan = 35
+        config.ethernet[0].pppoe = PPPoESetup(enabled: true, username: "user@provider.example", password: "pa\"ss \\word #1")
+
         // The write names itself; sent again, as it is when its answer
         // was lost, it is answered again and made once.
         XCTAssertEqual(config.system.bluetoothOnly, false)
@@ -166,6 +178,8 @@ final class InteropTests: XCTestCase {
         let stored = try await router.config()
         XCTAssertEqual(stored.rev, rev)
         XCTAssertEqual(stored.system.bluetoothOnly, true)
+        XCTAssertEqual(stored.ethernet.first?.vlan, 35)
+        XCTAssertEqual(stored.ethernet.first?.pppoe, PPPoESetup(enabled: true, username: "user@provider.example", password: "pa\"ss \\word #1"))
         XCTAssertEqual(stored.system.name, "Swift Test")
         XCTAssertEqual(stored.wifi.map(\.ssid), ["Porter Tést", "Porter Guests"])
         XCTAssertEqual(stored.networks.map(\.id), ["lan", "guest"])

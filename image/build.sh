@@ -209,6 +209,14 @@ for mod in ipheth rndis_host cdc_ncm; do
 done
 echo "==> kernel has the drivers for phones on USB"
 
+# The same goes for the ways a home connection arrives: the internet under
+# a VLAN tag, and signing in to the provider with PPPoE.
+for mod in 8021q ppp_generic pppox pppoe; do
+    grep -Eqs "(^|/)$mod\.ko" "$ROOT"/lib/modules/*/modules.dep "$ROOT"/lib/modules/*/modules.builtin \
+        || { echo "the kernel in this image has no $mod module; a tagged internet port or a PPPoE sign-in could not work" >&2; exit 1; }
+done
+echo "==> kernel has VLANs and PPPoE"
+
 # Trim what was only needed to install packages.
 rm -rf "$ROOT"/var/lib/apt/lists/* "$ROOT"/var/cache/apt/* "$ROOT"/var/log/*.log "$ROOT"/var/log/apt
 

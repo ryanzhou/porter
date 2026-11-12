@@ -32,6 +32,10 @@ type UplinkOverride struct {
 	If       string
 	Gw4, Gw6 netip.Addr // invalid: no gateway known for that family
 	V4, V6   bool       // the uplink has an address of that family
+	// Direct4 and Direct6: the uplink's own default route for that
+	// family has no gateway because the link has only one other end (a
+	// PPPoE session), and everything is simply sent down it.
+	Direct4, Direct6 bool
 }
 
 // SyncRouting makes the policy-routing rules, the per-VPN tables and the
@@ -135,18 +139,18 @@ func syncRules(family int, vpns []VPNRoutes) error {
 }
 
 // syncUplink fills or empties the override table for one address family.
-// A family the uplink has a gateway for goes there. A family it has no
-// address for is refused, so that clients fall back to the other at once
-// instead of waiting on another uplink's route. A family it has an
-// address but no gateway for (a point-to-point link) is left to the main
-// table.
+// A family the uplink has a gateway for goes there, and one it sends
+// straight down a point-to-point link goes to the link. A family it has
+// no address for is refused, so that clients fall back to the other at
+// once instead of waiting on another uplink's route. A family it has an
+// address for but no known way out is left to the main table.
 func syncUplink(family int, o *UplinkOverride) error {
 	v6 := family == unix.AF_INET6
 	var want *netlink.Route
 	if o != nil {
-		gw, has := o.Gw4, o.V4
+		gw, has, direct := o.Gw4, o.V4, o.Direct4
 		if v6 {
-			gw, has = o.Gw6, o.V6
+			gw, has, direct = o.Gw6, o.V6, o.Direct6
 		}
 		def := netip.PrefixFrom(netip.IPv4Unspecified(), 0)
 		if v6 {
@@ -161,6 +165,12 @@ func syncUplink(family int, o *UplinkOverride) error {
 				return err
 			}
 			want = &netlink.Route{LinkIndex: link.Attrs().Index, Dst: ipnet(def), Table: TableUplink, Family: family, Gw: gw.AsSlice()}
+		case direct:
+			link, err := netlink.LinkByName(o.If)
+			if err != nil {
+				return err
+			}
+			want = &netlink.Route{LinkIndex: link.Attrs().Index, Dst: ipnet(def), Table: TableUplink, Family: family, Scope: netlink.SCOPE_LINK}
 		}
 		if want != nil {
 			if err := netlink.RouteReplace(want); err != nil {

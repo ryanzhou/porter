@@ -24,6 +24,7 @@ hostapd
 wpasupplicant
 dnsmasq-base
 dhcpcd-base
+ppp
 iw
 rfkill
 wireless-regdb

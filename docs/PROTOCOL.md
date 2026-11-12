@@ -193,8 +193,9 @@ network that fits on no radio), `effects` what will be noticed (Wi-Fi
 restarting, devices having to rejoin or getting new addresses).
 
 The document's format is `version` 3. (Format 3 added
-`system.bluetooth_only` to format 2 and changed nothing else; a router
-that stored format 2 carries it over as it is.) Its parts, briefly:
+`system.bluetooth_only`, and `vlan` and `pppoe` for wired ports, to
+format 2 and changed nothing else; a router that stored format 2 carries
+it over as it is.) Its parts, briefly:
 
 ```
 system      {name country ssh{enabled authorized_keys[]} bluetooth_only}
@@ -208,8 +209,14 @@ networks[]  {id name address ula_prefix isolated route}
             others. route: "", "direct", "block" or "vpn:<id>"
 lan         {auto_renumber lease_minutes domain ipv6}   shared by all networks
 radios[]    {id role band channel width}   role "off" | "ap" | "wan" | "ap+wan"
-ethernet[]  {name role ip network}         role "wan" | "lan" | "off";
-            network: the network a "lan" port belongs to
+ethernet[]  {name role ip vlan pppoe network}   role "wan" | "lan" | "off";
+            network: the network a "lan" port belongs to.
+            For a "wan" port: ip {v4 v6}, each {mode address gateway dns[]},
+            mode "auto" | "static"; vlan: the VLAN ID the internet arrives
+            under, 1 to 4094, 0 for none; pppoe {enabled username password}:
+            sign in to the provider, in place of ip.v4 (both families of
+            ip must then be "auto"). The router clears username and
+            password when pppoe is not enabled.
 wan         {networks[] wifi_mac eth_mac order[] probe}
             order: uplink keys, best first: "eth:<port>", "wifi", "phone"
 policy      {default rules[{id name enabled src{devices cidrs networks} dst action}]}
@@ -222,9 +229,16 @@ name id version time uptime temp ready rev pairing
 internet   "down" | "connecting" | "limited" | "captive" | "online"
 active     interface of the uplink in use: the first in the configured
            order that reaches the internet or stands behind a sign-in page
-wan[]      {if kind key label metric rank carrier internet ipv4 gateway ipv6[] has_v6 dns[] portal_url captive_api mac}
+wan[]      {if kind key label metric rank carrier internet ipv4 gateway ipv6[] has_v6 prefix? dns[] pppoe? portal_url captive_api mac}
            kind "eth" | "wifi" | "phone"; key: its entry in wan.order;
-           rank: its place in that order, 0 first
+           rank: its place in that order, 0 first.
+           if: the interface that reaches the internet, which for a wired
+           port is the port, its VLAN ("v35-eth0") or its PPPoE session
+           ("ppp-eth0"); key stays "eth:<port>".
+           prefix: the IPv6 prefix delegated to the router there.
+           pppoe: for a port that signs in, "signing_in" | "wrong_login"
+           (the provider refused the user name or password) | "no_answer"
+           (nothing answers PPPoE on the cable) | "up"
 portal     {captive url device}
 aps[]      {radio iface state band channel mode error ssids[]}
            ssids: ids of the Wi-Fi networks the radio carries
@@ -232,7 +246,10 @@ stas[]     {radio iface state ssid bssid freq signal failed fail_reason}
            state "connected" | "connecting" | "scanning" | "disconnected"
 off_air[]  ids of Wi-Fi networks that are switched on but fit on no radio
 ports[]    {name label phone carrier}   wired interfaces that are plugged in
-lan        {address ula clients networks{id: devices online}}
+lan        {address ula clients networks{id: devices online} prefixes{id: prefix}}
+           prefixes: the /64 each network has of the prefix delegated by
+           the uplink in use; a network that is not in it has its
+           ula_prefix only
 control    {port addrs[]}   where the app connects over TCP: the router's
            addresses in its networks that are not isolated (IPv4, and the
            ULA where IPv6 is on). port 0 and no addresses while it does

@@ -88,11 +88,17 @@ private struct PathCard: View {
         return "Ethernet"
     }
 
-    /// A Wi-Fi network that turned the router away.
+    /// A Wi-Fi network or an internet provider that turned the router
+    /// away.
     private var refusal: String? {
         for sta in status.stas {
             if let failed = sta.failed, !failed.isEmpty {
                 return joinFailureText(ssid: failed, reason: sta.failReason)
+            }
+        }
+        for source in status.wan where source.carrier {
+            if let text = signInFailureText(source.pppoe) {
+                return text
             }
         }
         return nil

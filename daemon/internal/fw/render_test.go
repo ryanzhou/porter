@@ -48,8 +48,14 @@ func TestRender(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	pfx := netip.MustParsePrefix
 	p := BuildPlan(c, Runtime{
-		WANIfs:     []string{"eth0", "wlan1"},
+		WANIfs: []string{"eth0", "ppp-eth1", "wlan1"},
+		// One uplink's network has delegated a prefix, of which two of
+		// the three networks have a /64; another is a PPPoE session.
+		Delegated:  map[string]netip.Prefix{"eth0": pfx("2001:db8:1000::/60")},
+		Global:     map[string]netip.Prefix{"lan": pfx("2001:db8:1000:3::1/64"), "guest": pfx("2001:db8:1000:a::1/64")},
+		WANMTU:     map[string]int{"ppp-eth1": 1492},
 		PortalDevs: []string{"02:00:00:00:00:09"},
 		GeoVersion: "2026-11",
 		Geo: func(cc string) ([]string, []string) {
@@ -83,6 +89,15 @@ func TestRender(t *testing.T) {
 		// Several networks.
 		`set lan_ifs { type ifname; elements = { "br-guest", "br-iot", "br-lan" } }`,
 		`set lan_nets4 { type ipv4_addr; flags interval; elements = { 10.83.0.0/24, 10.84.0.0/24, 10.85.0.0/24 } }`,
+		// A network's share of a delegated prefix is as much its own
+		// as its private prefix is.
+		`2001:db8:1000:3::/64, 2001:db8:1000:a::/64, fd00:0:0:84::/64, fd00:0:0:85::/64`,
+		// From a delegated address, out by the uplink that delegated
+		// it: as it is.
+		`oifname "eth0" ip6 saddr 2001:db8:1000::/60 accept`,
+		// Less room than Ethernet on the way in.
+		`iifname "ppp-eth1" meta nfproto ipv4 tcp flags syn / syn,rst tcp option maxseg size > 1452 tcp option maxseg size set 1452`,
+		`iifname "ppp-eth1" meta nfproto ipv6 tcp flags syn / syn,rst tcp option maxseg size > 1432 tcp option maxseg size set 1432`,
 		`ip daddr @lan_nets4 return`,
 		`iifname { "br-guest", "br-iot" } jump r_r7`,
 		`meta mark set iifname map { "br-guest" : 0x11, "br-iot" : 0x2 } ct mark set meta mark accept`,
@@ -111,18 +126,68 @@ func TestRender(t *testing.T) {
 		{`ether saddr @paused meta mark set 0x2`, `ether saddr @portal_devs`},                          // paused before the sign-in pass
 		{"chain lan_lan {\n\t\tether saddr @paused jump refuse", `iifname { "br-guest" } jump refuse`}, // paused before anything in lan_lan
 		{`meta mark & 0xff == 0x0 jump refuse`, `oifname @wan_ifs accept`},                             // unclassified refused before the uplink accept
+		{`oifname "eth0" ip6 saddr 2001:db8:1000::/60 accept`, `oifname @wan_ifs masquerade`},          // delegated addresses spared before the rest is masqueraded
 	} {
 		a, b := strings.Index(out, pair[0]), strings.LastIndex(out, pair[1])
 		if a < 0 || b < 0 || a > b {
 			t.Errorf("%q does not come before %q", pair[0], pair[1])
 		}
 	}
+	// Only the uplink that was delegated a prefix lets its addresses out
+	// as they are: by every other way out they are masqueraded like any.
+	if n := strings.Count(out, "ip6 saddr 2001:db8:1000::/60"); n != 1 {
+		t.Errorf("%d rules spare the delegated prefix from masquerading, want the one for its own uplink", n)
+	}
+	// What arrives from the internet for a device, unasked, is not
+	// forwarded: the forward chain drops what it does not accept, and it
+	// accepts nothing itself but what belongs to a connection there is.
+	// Everything else it lets through is decided in the chains for what
+	// comes from the router's own networks.
+	forward := out[strings.Index(out, "\tchain forward {"):]
+	forward = forward[:strings.Index(forward, "\t}")]
+	if !strings.Contains(forward, "type filter hook forward priority filter; policy drop;") {
+		t.Errorf("the forward chain does not drop by default:\n%s", forward)
+	}
+	for _, line := range strings.Split(forward, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "accept") && line != "ct state established,related accept" {
+			t.Errorf("the forward chain accepts by a rule of its own: %q", line)
+		}
+		if (strings.Contains(line, "jump") || strings.Contains(line, "goto")) && !strings.HasPrefix(line, "iifname @lan_ifs ") {
+			t.Errorf("the forward chain hands on what does not come from the router's networks: %q", line)
+		}
+	}
+	// Nor is anything let in to the router itself from an uplink beyond
+	// the answers to its own address requests.
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); strings.Contains(line, "iifname @wan_ifs") && strings.Contains(line, "accept") && line != "iifname @wan_ifs udp dport { 68, 546 } accept" {
+			t.Errorf("accepted from an uplink: %q", line)
+		}
+	}
+
 	// Who may reach the router, and the list of uplinks, are not part of
-	// what decides a connection's way.
+	// what decides a connection's way; nor is a delegated prefix.
 	alt := *p
 	alt.SSH, alt.Control, alt.Intercept, alt.WANIfs = !p.SSH, !p.Control, !p.Intercept, []string{"eth9"}
 	if ClassKey(&alt) != ClassKey(p) || Fingerprint(&alt) == Fingerprint(p) {
 		t.Error("ClassKey follows changes that reroute nothing")
+	}
+	bare := BuildPlan(c, Runtime{WANIfs: p.WANIfs, PortalDevs: p.PortalDevs, GeoVersion: p.GeoVersion, Geo: p.Geo, Learned: p.Learned})
+	if ClassKey(bare) != ClassKey(p) || Fingerprint(bare) == Fingerprint(p) {
+		t.Error("ClassKey follows a delegated prefix, or the ruleset does not")
+	}
+	if p.LANs[0].Global != pfx("2001:db8:1000:3::/64") {
+		t.Errorf("ClassKey changed the plan it was given: %v", p.LANs[0].Global)
+	}
+	if without := Render(bare); strings.Contains(without, "2001:db8:1000") || strings.Contains(without, "ppp-eth1\" meta nfproto") {
+		t.Error("a ruleset without a delegated prefix or a narrow uplink has rules for them")
+	}
+	// With IPv6 switched off for the router's networks there is no share
+	// of a prefix to speak of.
+	off := *c
+	off.LAN.IPv6 = false
+	if got := BuildPlan(&off, Runtime{Global: map[string]netip.Prefix{"lan": pfx("2001:db8:1000:3::1/64")}}); got.LANs[0].Global.IsValid() || got.LANs[0].Net6.IsValid() {
+		t.Errorf("IPv6 off, and the main network has %v and %v", got.LANs[0].Global, got.LANs[0].Net6)
 	}
 	alt = *p
 	alt.Paused = append([]string{"02:00:00:00:00:aa"}, p.Paused...)

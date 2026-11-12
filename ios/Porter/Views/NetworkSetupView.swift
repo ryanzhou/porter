@@ -624,6 +624,17 @@ private struct NetworkEditor: View {
 
     private var mainName: String { setup.networkName(RouterConfig.mainNetwork) }
 
+    /// The IPv6 addresses the network's devices go online with: out of
+    /// what the internet provider has given the router for its networks
+    /// when there is such a thing, and private ones otherwise.
+    private var ipv6Prefix: String? {
+        guard setup.lan.ipv6 else { return nil }
+        let delegated: [String: String] = model.status?.lan.prefixes ?? [:]
+        if let prefix = delegated[id], !prefix.isEmpty { return prefix }
+        if let prefix = current?.ulaPrefix, !prefix.isEmpty { return prefix }
+        return nil
+    }
+
     var body: some View {
         Form {
             Section {
@@ -635,7 +646,7 @@ private struct NetworkEditor: View {
                         .keyboardType(.numbersAndPunctuation)
                         .autocorrectionDisabled()
                 }
-                if let prefix = current?.ulaPrefix, !prefix.isEmpty, setup.lan.ipv6 {
+                if let prefix = ipv6Prefix {
                     LabeledContent("IPv6", value: prefix)
                 }
             } footer: {

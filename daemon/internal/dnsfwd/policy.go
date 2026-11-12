@@ -139,8 +139,10 @@ func (s SuffixSet) Match(name string) bool {
 	}
 }
 
-// RulesFrom compiles the enabled policy rules.
-func RulesFrom(c *config.Config) []Rule {
+// RulesFrom compiles the enabled policy rules. global holds, by network
+// id, the /64 a network has of a prefix delegated to the router, where
+// it has one: its devices ask from addresses in it as well.
+func RulesFrom(c *config.Config, global map[string]netip.Prefix) []Rule {
 	var out []Rule
 	for _, r := range c.Policy.Rules {
 		if !r.Enabled {
@@ -165,7 +167,7 @@ func RulesFrom(c *config.Config) []Rule {
 		// A network is, to the forwarder, the addresses its clients have.
 		for _, id := range r.Src.Networks {
 			if n := c.Network(id); n != nil {
-				cr.SrcCIDRs = append(cr.SrcCIDRs, prefixesOf(*n)...)
+				cr.SrcCIDRs = append(cr.SrcCIDRs, prefixesOf(*n, global)...)
 			}
 		}
 		out = append(out, cr)
@@ -173,18 +175,22 @@ func RulesFrom(c *config.Config) []Rule {
 	return out
 }
 
-func prefixesOf(n config.Network) []netip.Prefix {
+func prefixesOf(n config.Network, global map[string]netip.Prefix) []netip.Prefix {
 	_, v4 := n.Prefix()
 	_, v6 := n.ULA()
-	return []netip.Prefix{v4, v6}
+	out := []netip.Prefix{v4, v6}
+	if g, ok := global[n.ID]; ok && g.IsValid() {
+		out = append(out, g.Masked())
+	}
+	return out
 }
 
-// NetRoutesFrom lists the routes set on networks.
-func NetRoutesFrom(c *config.Config) []NetRoute {
+// NetRoutesFrom lists the routes set on networks; global as for RulesFrom.
+func NetRoutesFrom(c *config.Config, global map[string]netip.Prefix) []NetRoute {
 	var out []NetRoute
 	for _, n := range c.Networks {
 		if n.Route != "" {
-			out = append(out, NetRoute{Prefixes: prefixesOf(n), Action: n.Route})
+			out = append(out, NetRoute{Prefixes: prefixesOf(n, global), Action: n.Route})
 		}
 	}
 	return out

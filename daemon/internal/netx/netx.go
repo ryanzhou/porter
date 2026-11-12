@@ -139,6 +139,79 @@ func DeleteLink(name string) {
 	}
 }
 
+// EnsureVLAN makes name the sub-interface of the port parent that carries
+// the VLAN id, and brings both up: the sub-interface passes nothing while
+// the port under it is down. It is left alone when it is there already;
+// an interface of that name that is something else is replaced.
+func EnsureVLAN(name, parent string, id int) error {
+	p, err := netlink.LinkByName(parent)
+	if err != nil {
+		return err
+	}
+	if err := netlink.LinkSetUp(p); err != nil {
+		return err
+	}
+	if l, err := netlink.LinkByName(name); err == nil {
+		if v, ok := l.(*netlink.Vlan); ok && v.VlanId == id && v.Attrs().ParentIndex == p.Attrs().Index {
+			return netlink.LinkSetUp(l)
+		}
+		if err := netlink.LinkDel(l); err != nil {
+			return fmt.Errorf("replace %s: %w", name, err)
+		}
+	}
+	vlan := &netlink.Vlan{
+		LinkAttrs: netlink.LinkAttrs{Name: name, ParentIndex: p.Attrs().Index},
+		VlanId:    id, VlanProtocol: netlink.VLAN_PROTOCOL_8021Q,
+	}
+	if err := netlink.LinkAdd(vlan); err != nil {
+		return fmt.Errorf("VLAN %d on %s: %w", id, parent, err)
+	}
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		return err
+	}
+	return netlink.LinkSetUp(l)
+}
+
+// PruneVLANs removes the VLAN sub-interfaces whose names ours accepts
+// and that are not in keep: those the router made and no longer wants.
+func PruneVLANs(ours func(name string) bool, keep map[string]bool) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return
+	}
+	for _, l := range links {
+		if name := l.Attrs().Name; l.Type() == "vlan" && ours(name) && !keep[name] {
+			_ = netlink.LinkDel(l)
+		}
+	}
+}
+
+// MTU returns the interface's MTU, or 0 when there is no such interface.
+func MTU(name string) int {
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		return 0
+	}
+	return l.Attrs().MTU
+}
+
+// LinkLocal reports whether the interface has an IPv6 link-local address
+// it can use.
+func LinkLocal(name string) bool {
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		return false
+	}
+	list, _ := netlink.AddrList(l, unix.AF_INET6)
+	for _, a := range list {
+		if ip, ok := netip.AddrFromSlice(a.IP); ok && ip.IsLinkLocalUnicast() && a.Flags&unix.IFA_F_TENTATIVE == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // SetBridgePorts makes exactly the given interfaces (plus any whose name
 // keep() accepts) members of the bridge.
 func SetBridgePorts(bridge string, ports []string, keep func(name string) bool) error {
@@ -177,14 +250,15 @@ func SetBridgePorts(bridge string, ports []string, keep func(name string) bool) 
 
 // SyncAddrs makes the interface carry exactly the given global addresses
 // of each family present in want (link-local addresses are left alone).
-func SyncAddrs(name string, want []netip.Prefix) (changed bool, err error) {
+// It returns the addresses it took away and those it put there.
+func SyncAddrs(name string, want []netip.Prefix) (changed []netip.Prefix, err error) {
 	l, err := netlink.LinkByName(name)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	have, err := netlink.AddrList(l, unix.AF_UNSPEC)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	wantSet := map[string]bool{}
 	for _, p := range want {
@@ -200,16 +274,16 @@ func SyncAddrs(name string, want []netip.Prefix) (changed bool, err error) {
 			continue
 		}
 		ones, _ := a.Mask.Size()
-		key := netip.PrefixFrom(ip, ones).String()
-		if wantSet[key] {
-			delete(wantSet, key)
+		had := netip.PrefixFrom(ip, ones)
+		if wantSet[had.String()] {
+			delete(wantSet, had.String())
 			continue
 		}
 		a := a
 		if err := netlink.AddrDel(l, &a); err != nil {
 			return changed, err
 		}
-		changed = true
+		changed = append(changed, had)
 	}
 	for _, p := range want {
 		if !wantSet[p.String()] {
@@ -222,7 +296,7 @@ func SyncAddrs(name string, want []netip.Prefix) (changed bool, err error) {
 		if err := netlink.AddrAdd(l, addr); err != nil && !errors.Is(err, os.ErrExist) {
 			return changed, fmt.Errorf("add %s to %s: %w", p, name, err)
 		}
-		changed = true
+		changed = append(changed, p)
 	}
 	return changed, nil
 }

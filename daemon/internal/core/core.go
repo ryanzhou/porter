@@ -48,9 +48,11 @@ type Options struct {
 	DataDir string // persistent state
 	RunDir  string // runtime files
 	// Hook executables (symlinks to this binary) called by dhcpcd and
-	// dnsmasq.
+	// dnsmasq, and by pppd for each of its events ("ip-up", "ip-down",
+	// "ipv6-up", "ipv6-down").
 	DHCPHook  string
 	LeaseHook string
+	PPPHooks  map[string]string
 	// WGUserspace is a wireguard-go binary to use instead of the kernel
 	// module (tests).
 	WGUserspace string
@@ -129,6 +131,11 @@ type Core struct {
 	// radio carries, and ports the wired ports as last seen.
 	offAir []string
 	ports  []wiredPort
+	// global holds, by network id, the router's address in the /64 the
+	// network has of the prefix delegated by the uplink in use; vlanErr
+	// is the last problem making a tagged port's interface, said once.
+	global  map[string]netip.Prefix
+	vlanErr string
 	// apStarted is when each access point was last (re)started, by radio.
 	apStarted map[string]time.Time
 
@@ -241,7 +248,7 @@ func New(opt Options) (*Core, error) {
 	// The flow tracker is polled from the control loop, so its hooks may
 	// read the configuration directly.
 	c.flows = flows.New(flows.Hooks{
-		LAN:       func(a netip.Addr) bool { return c.cfg.NetworkOf(a) != nil },
+		LAN:       c.ownAddress,
 		LookupMAC: c.devs.LookupMAC,
 		NameFor:   func(a netip.Addr) string { return c.dns.NameFor(a) },
 		Country:   func(a netip.Addr) string { return c.geo.Lookup(a) },
@@ -274,7 +281,7 @@ func New(opt Options) (*Core, error) {
 	hookEnv := []string{HookSocketEnv + "=" + HookSocket(opt.RunDir)}
 	c.lan = &lan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.LeaseHook, HookEnv: hookEnv,
 		Verbose: c.log.Enabled(context.Background(), slog.LevelDebug)}
-	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, HookEnv: hookEnv, OnChange: c.Kick}
+	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, PPPHooks: opt.PPPHooks, HookEnv: hookEnv, OnChange: c.Kick}
 	c.mpq = &mpquic.Manager{Log: c.log, RunDir: opt.RunDir, Binaries: opt.MPQUIC, OnChange: c.Kick}
 	c.vpn = &vpn.Manager{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace, Resolve: c.resolveDirect}
 	c.vpn.Carrying = func(id string) (bool, string) {
@@ -311,6 +318,22 @@ func New(opt Options) (*Core, error) {
 		return "", false
 	}
 	return c, nil
+}
+
+// ownAddress reports whether an address is one of a device on the
+// router's networks: in a network's private ranges, or in its share of a
+// delegated prefix. It reads what the control loop writes, and is called
+// from there.
+func (c *Core) ownAddress(a netip.Addr) bool {
+	if c.cfg.NetworkOf(a) != nil {
+		return true
+	}
+	for _, g := range c.global {
+		if g.Masked().Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // Kick schedules a reconcile. Safe from any goroutine.
@@ -706,6 +729,10 @@ func (c *Core) reconcile() {
 	}
 	var uplinks []wan.Uplink
 	lanPorts := map[string][]string{}
+	// tagged are the sub-interfaces of ports whose internet arrives under
+	// a VLAN tag; any other the router once made goes, further down.
+	tagged := map[string]bool{}
+	vlanErr := ""
 	for i, e := range cfg.Ethernet {
 		hw, here := present[e.Name]
 		if !here {
@@ -716,7 +743,37 @@ func (c *Core) reconcile() {
 			if err := netx.SetMAC(e.Name, ethMAC); err != nil {
 				c.log.Warn("setting wired MAC", "if", e.Name, "err", err)
 			}
-			uplinks = append(uplinks, wan.Uplink{If: e.Name, Kind: "eth", Key: config.UplinkEth(e.Name), Label: hw.Label, Metric: 100 + i, Rank: rank(config.UplinkEth(e.Name)), IP: e.IP})
+			up := wan.Uplink{If: e.Name, Kind: "eth", Key: config.UplinkEth(e.Name), Label: hw.Label, Metric: 100 + i, Rank: rank(config.UplinkEth(e.Name)), IP: e.IP}
+			// A prefix for the router's networks is asked for wherever
+			// the network is asked for IPv6 addresses at all.
+			up.PD = cfg.LAN.IPv6 && !e.IP.V6.Static()
+			if e.VLAN != 0 {
+				// The uplink is the port's sub-interface for the tag.
+				// The port under it stays what it is to everything
+				// else: the uplink's key, its place in the order and
+				// its metric are the port's.
+				up.If = config.VLANIfName(e.Name, e.VLAN)
+				tagged[up.If] = true
+				if err := netx.EnsureVLAN(up.If, e.Name, e.VLAN); err != nil {
+					vlanErr = fmt.Sprintf("%s: %v", up.If, err)
+					continue
+				}
+				// A sub-interface has its port's hardware address, and
+				// on the kernels of the last years keeps to it when
+				// that changes. Where it does not, it is told.
+				if port, _, err := netx.HardwareAddr(e.Name); err == nil {
+					if sub, _, _ := netx.HardwareAddr(up.If); sub != port {
+						_ = netx.SetMAC(up.If, port)
+					}
+				}
+			}
+			if e.PPPoE.Enabled {
+				// The session runs over the port (or its tag) and is an
+				// interface of its own, which is the one that reaches
+				// the internet.
+				up.Link, up.If, up.PPPoE = up.If, config.PPPIfName(e.Name), e.PPPoE
+			}
+			uplinks = append(uplinks, up)
 		case config.EthLAN:
 			_ = netx.SetMAC(e.Name, "")
 			lanPorts[e.Network] = append(lanPorts[e.Network], e.Name)
@@ -725,7 +782,7 @@ func (c *Core) reconcile() {
 	nPhone := 0
 	for _, p := range c.ports {
 		if p.Phone {
-			uplinks = append(uplinks, wan.Uplink{If: p.Name, Kind: "phone", Key: config.UplinkPhone, Label: p.Label, Metric: 300 + nPhone, Rank: rank(config.UplinkPhone)})
+			uplinks = append(uplinks, wan.Uplink{If: p.Name, Kind: "phone", Key: config.UplinkPhone, Label: p.Label, Metric: 300 + nPhone, Rank: rank(config.UplinkPhone), PD: cfg.LAN.IPv6})
 			nPhone++
 		}
 	}
@@ -745,6 +802,7 @@ func (c *Core) reconcile() {
 				}
 			}
 		}
+		up.PD = cfg.LAN.IPv6 && !up.IP.V6.Static()
 		uplinks = append(uplinks, up)
 	}
 
@@ -777,6 +835,13 @@ func (c *Core) reconcile() {
 		}
 	}
 	c.wan.Apply(uplinks, cfg.WAN.Probe)
+	netx.PruneVLANs(config.MadeIf, tagged)
+	if vlanErr != c.vlanErr {
+		c.vlanErr = vlanErr
+		if vlanErr != "" {
+			c.log.Warn("the internet port's VLAN could not be set up", "err", vlanErr)
+		}
+	}
 	for id, spec := range wantSTA {
 		sta := c.stas[id]
 		// The address is set when the policy for it changes, and once
@@ -935,6 +1000,31 @@ func (c *Core) reconcile() {
 		portalDevs = []string{c.portalDev}
 	}
 
+	// A prefix an uplink's network has delegated belongs to that uplink:
+	// only while it is the one in use, and has a way out for IPv6, are
+	// its /64s given to the router's networks. Devices then hold
+	// addresses that the provider routes here and that leave as they
+	// are. When the router moves to another uplink they are taken back,
+	// and the devices told (see lan) to stop using them.
+	delegated := map[string]netip.Prefix{}
+	for _, s := range states {
+		if p, err := netip.ParsePrefix(s.Prefix); err == nil {
+			delegated[s.If] = p
+		}
+	}
+	global := map[string]netip.Prefix{}
+	if cfg.LAN.IPv6 && fw.HaveIPv6() && active != nil && active.HasV6 {
+		ids := make([]string, 0, len(cfg.Networks))
+		for _, n := range cfg.Networks {
+			ids = append(ids, n.ID)
+		}
+		global = lan.Carve(delegated[active.If], ids)
+	}
+	if fmt.Sprint(global) != fmt.Sprint(c.global) {
+		c.log.Info("delegated prefix shared out among the networks", "now", global, "before", c.global)
+	}
+	c.global = global
+
 	// LAN.
 	routerAddr := netip.MustParsePrefix(cfg.Main().Address)
 	d := lan.Desired{BridgeMAC: bridgeMAC(c.identity.Public), LeaseMinutes: cfg.LAN.LeaseMinutes, Domain: cfg.LAN.Domain}
@@ -943,6 +1033,7 @@ func (c *Core) reconcile() {
 		if cfg.LAN.IPv6 {
 			ula, pfx := n.ULA()
 			ln.ULA = netip.PrefixFrom(ula, pfx.Bits())
+			ln.Global = global[n.ID]
 		}
 		d.Nets = append(d.Nets, ln)
 	}
@@ -982,10 +1073,25 @@ func (c *Core) reconcile() {
 
 	// Firewall and routing.
 	var wanIfs []string
+	wanMTU := map[string]int{}
 	for _, u := range uplinks {
 		wanIfs = append(wanIfs, u.If)
+		// An uplink on which packets have less room than on Ethernet.
+		// A PPPoE session's interface is only there while the session
+		// is, and has the same 1492 bytes every time: the rules for it
+		// do not come and go with it.
+		mtu := netx.MTU(u.If)
+		if mtu == 0 && u.PPPoE.Enabled {
+			mtu = pppoeMTU
+		}
+		if mtu >= 1280 && mtu < 1500 {
+			wanMTU[u.If] = mtu
+		}
 	}
-	plan := fw.BuildPlan(&running, fw.Runtime{WANIfs: wanIfs, PortalDevs: portalDevs, Geo: c.geo.Ranges, GeoVersion: c.geo.Version()})
+	plan := fw.BuildPlan(&running, fw.Runtime{
+		WANIfs: wanIfs, Delegated: delegated, WANMTU: wanMTU, Global: global,
+		PortalDevs: portalDevs, Geo: c.geo.Ranges, GeoVersion: c.geo.Version(),
+	})
 	flush := false
 	if key := fw.Fingerprint(plan); key != c.planKey {
 		if err := c.fwm.Apply(plan); err != nil {
@@ -1024,6 +1130,12 @@ func (c *Core) reconcile() {
 		if active.HasV6 {
 			override.Gw6, _ = netx.DefaultRoute(active.If, unix.AF_INET6)
 		}
+		// A PPPoE session has no gateway: its default route is the
+		// link itself.
+		if _, routed := netx.DefaultRoute(active.If, unix.AF_INET); routed && override.V4 && !override.Gw4.IsValid() {
+			override.Direct4 = true
+		}
+		override.Direct6 = override.V6 && !override.Gw6.IsValid()
 	}
 	if (override == nil) != (c.overrideIf == "") || (override != nil && override.If != c.overrideIf) {
 		c.overrideIf = ""
@@ -1050,7 +1162,7 @@ func (c *Core) reconcile() {
 		}
 	}
 
-	c.applyDNS(&running, states, active, portalDevs, routerAddr, routes)
+	c.applyDNS(&running, states, active, portalDevs, routerAddr, routes, global)
 	c.applySystem(cfg)
 	c.applyControl(cfg)
 
@@ -1068,12 +1180,12 @@ func (c *Core) reconcile() {
 	c.publishStatus()
 }
 
-func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.State, portalDevs []string, router netip.Prefix, routes []fw.VPNRoutes) {
+func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.State, portalDevs []string, router netip.Prefix, routes []fw.VPNRoutes, global map[string]netip.Prefix) {
 	pol := &dnsfwd.Policy{
 		Hosts:       map[string][]netip.Addr{},
 		Reverse:     map[netip.Addr]string{},
 		Blocked:     dnsfwd.NewSuffixSet(cfg.DNS.Blocked),
-		Rules:       dnsfwd.RulesFrom(cfg),
+		Rules:       dnsfwd.RulesFrom(cfg, global),
 		Adblock:     cfg.DNS.Adblock.Enabled,
 		AdAllow:     dnsfwd.NewSuffixSet(cfg.DNS.Adblock.Allow),
 		AdExempt:    map[string]bool{},
@@ -1082,10 +1194,15 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 		Default:     cfg.Policy.Default,
 		PortalDevs:  map[string]bool{},
 		VPN:         map[string]dnsfwd.VPNDNS{},
-		NetRoute:    dnsfwd.NetRoutesFrom(cfg),
+		NetRoute:    dnsfwd.NetRoutesFrom(cfg, global),
 	}
 	// The forwarder answers on the router's address in every network;
-	// the router's own name is its address in the main one.
+	// the router's own name is its address in the main one. Devices are
+	// told the private addresses, which stay the same whatever the
+	// provider does. The forwarder answers on the router's addresses in a
+	// delegated prefix all the same: a lookup that is redirected to the
+	// router (dns.intercept) arrives at whichever of the bridge's
+	// addresses the kernel picks, and it picks the newest.
 	listen := []string{"127.0.0.1:53"}
 	own := []netip.Addr{router.Addr()}
 	for i, n := range cfg.Networks {
@@ -1096,6 +1213,9 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 			listen = append(listen, net.JoinHostPort(ula.String(), "53"))
 			if i == 0 {
 				own = append(own, ula)
+			}
+			if g, ok := global[n.ID]; ok {
+				listen = append(listen, net.JoinHostPort(g.Addr().String(), "53"))
 			}
 		}
 	}
@@ -1288,6 +1408,10 @@ func (c *Core) uplinkFreq(radio string) int {
 	return 0
 }
 
+// pppoeMTU is what is left of an Ethernet frame for a packet inside a
+// PPPoE session.
+const pppoeMTU = 1492
+
 // wiredPort is a physical non-wireless network interface.
 type wiredPort struct {
 	Name string
@@ -1310,7 +1434,9 @@ func wiredPorts() []wiredPort {
 				continue
 			}
 		}
-		if wifi.IsWireless(name) || strings.HasPrefix(name, "wg-") || strings.HasPrefix(name, "br-") {
+		// Nor the router's own interfaces, among them those it makes on
+		// top of a port (a VLAN's, a PPPoE session's).
+		if wifi.IsWireless(name) || strings.HasPrefix(name, "wg-") || strings.HasPrefix(name, "br-") || config.MadeIf(name) {
 			continue
 		}
 		p := wiredPort{Name: name}

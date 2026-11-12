@@ -366,6 +366,33 @@ func joinFailureText(ssid: String, reason: String?) -> String {
     }
 }
 
+/// How a wired source's sign-in to the provider (PPPoE) stands, while it
+/// is not signed in; nil once it is, and for a source that does not sign
+/// in.
+func signInLabel(_ state: String?) -> String? {
+    switch state ?? "" {
+    case "signing_in": return "Signing in to your provider"
+    case "wrong_login": return "Wrong user name or password"
+    case "no_answer": return "No answer from the provider"
+    default: return nil
+    }
+}
+
+/// Whether a sign-in has failed in a way that waiting will not mend.
+func signInFailed(_ state: String?) -> Bool {
+    state == "wrong_login" || state == "no_answer"
+}
+
+/// A provider that turned the router away or does not answer, as one
+/// line that makes sense away from the source it is about.
+func signInFailureText(_ state: String?) -> String? {
+    switch state ?? "" {
+    case "wrong_login": return "Wrong PPPoE user name or password"
+    case "no_answer": return "No answer from your internet provider"
+    default: return nil
+    }
+}
+
 func vpnStateLabel(_ status: VPNStatus) -> String {
     switch status.state {
     case "off": return "Off"

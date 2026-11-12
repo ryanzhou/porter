@@ -7,7 +7,9 @@
 //
 // It needs root and: ip, nft, dnsmasq, dhcpcd, wg. WireGuard uses the
 // kernel module when present, otherwise the wireguard-go binary named by
-// PORTER_WG_USERSPACE; without either the VPN checks are skipped.
+// PORTER_WG_USERSPACE; without either the VPN checks are skipped. The
+// subtests for a home connection (home_test.go) also need pppd and
+// pppoe-server, and a kernel with VLANs, PPPoE and IPv6.
 //
 //	go test -tags e2e -count=1 ./e2e/
 package e2e
@@ -160,18 +162,26 @@ func eventually(t *testing.T, what string, d time.Duration, f func() bool) {
 	}
 }
 
-type status struct {
+// uplinkState is one internet source as the status describes it.
+type uplinkState struct {
+	If       string `json:"if"`
+	Kind     string `json:"kind"`
+	Key      string `json:"key"`
 	Internet string `json:"internet"`
-	Active   string `json:"active"`
-	WAN      []struct {
-		If       string `json:"if"`
-		Kind     string `json:"kind"`
-		Key      string `json:"key"`
-		Internet string `json:"internet"`
-		IPv4     string `json:"ipv4"`
-		HasV6    bool   `json:"has_v6"`
-	} `json:"wan"`
-	Portal struct {
+	IPv4     string `json:"ipv4"`
+	HasV6    bool   `json:"has_v6"`
+	MAC      string `json:"mac"`
+	// A wired source that signs in to its provider says how that stands,
+	// and any source which prefix was delegated to it.
+	PPPoE  string `json:"pppoe"`
+	Prefix string `json:"prefix"`
+}
+
+type status struct {
+	Internet string        `json:"internet"`
+	Active   string        `json:"active"`
+	WAN      []uplinkState `json:"wan"`
+	Portal   struct {
 		Captive bool   `json:"captive"`
 		URL     string `json:"url"`
 		Device  string `json:"device"`
@@ -185,6 +195,8 @@ type status struct {
 	} `json:"vpns"`
 	LAN struct {
 		Clients int `json:"clients"`
+		// Each network's /64 of a delegated prefix, by network id.
+		Prefixes map[string]string `json:"prefixes"`
 	} `json:"lan"`
 	Control struct {
 		Port  int      `json:"port"`
@@ -1532,6 +1544,13 @@ func TestRouter(t *testing.T) {
 			return s.Active == "eth0" && s.Internet == "online" && wired() == wiredIP
 		})
 	})
+
+	// How a home connection arrives: under a VLAN tag, through a PPPoE
+	// sign-in, and with a prefix for the router's own networks.
+	home := &rig{dir: dir, run: run, c: c, v6: v6, mac1: mac1, mac2: mac2, start: start}
+	t.Run("TaggedPort", func(t *testing.T) { taggedPort(t, home) })
+	t.Run("PPPoE", func(t *testing.T) { pppoe(t, home) })
+	t.Run("PrefixDelegation", func(t *testing.T) { prefixDelegation(t, home) })
 
 	t.Run("Events", func(t *testing.T) {
 		var evs []struct {

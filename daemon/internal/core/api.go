@@ -319,9 +319,11 @@ func (c *Core) controlStatus() ControlStatus {
 	return st
 }
 
-// HookMessage is what the dhcpcd and dnsmasq hook helpers send.
+// HookMessage is what the dhcpcd, dnsmasq and pppd hook helpers send.
+// For pppd, Args are the event ("ip-up", ...) and then what pppd gives
+// its scripts: the session's interface first.
 type HookMessage struct {
-	Kind string            `json:"kind"` // "dhcpcd" or "lease"
+	Kind string            `json:"kind"` // "dhcpcd", "lease" or "ppp"
 	Args []string          `json:"args,omitempty"`
 	Env  map[string]string `json:"env,omitempty"`
 }
@@ -358,6 +360,10 @@ func (c *Core) serveHooks(ctx context.Context) error {
 				switch m.Kind {
 				case "dhcpcd":
 					c.wan.HandleHook(m.Env)
+				case "ppp":
+					if len(m.Args) >= 2 {
+						c.wan.HandlePPP(m.Args[0], m.Args[1], m.Env)
+					}
 				case "lease":
 					// dnsmasq: <add|old|del> <mac> <ip> [hostname]
 					if len(m.Args) >= 3 && strings.Count(m.Args[1], ":") == 5 {
@@ -424,6 +430,10 @@ type LANStatus struct {
 	Clients int    `json:"clients"`
 	// Networks counts the devices online in each network, by id.
 	Networks map[string]int `json:"networks"`
+	// Prefixes holds, by id, the /64 each network has of the prefix
+	// delegated by the uplink in use. A network that is not in it has
+	// its private prefix only.
+	Prefixes map[string]string `json:"prefixes"`
 }
 
 // PortStatus is one wired interface.
@@ -455,7 +465,7 @@ func (c *Core) status() Status {
 		Ready: cfg.Ready(), Rev: cfg.Rev, Pairing: c.pairingOpen(),
 		Internet: wan.StDown, WAN: states, APs: []wifi.APStatus{}, STAs: []wifi.STAStatus{}, VPNs: []VPNStatus{},
 		OffAir: append([]string{}, c.offAir...), Ports: []PortStatus{},
-		LAN:     LANStatus{Address: cfg.Main().Address, Networks: map[string]int{}},
+		LAN:     LANStatus{Address: cfg.Main().Address, Networks: map[string]int{}, Prefixes: map[string]string{}},
 		Control: c.controlStatus(),
 	}
 	for _, p := range c.ports {
@@ -476,6 +486,9 @@ func (c *Core) status() Status {
 	}
 	if cfg.LAN.IPv6 {
 		st.LAN.ULA = cfg.Main().ULAPrefix
+	}
+	for id, g := range c.global {
+		st.LAN.Prefixes[id] = g.Masked().String()
 	}
 	for _, d := range c.devs.List() {
 		if d.Online {

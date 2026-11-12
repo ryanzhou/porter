@@ -630,3 +630,134 @@ func TestSetWifiUplink(t *testing.T) {
 		t.Error("a radio that is not there was made the uplink")
 	}
 }
+
+func TestTaggedPortAndPPPoE(t *testing.T) {
+	port := func(c *Config) *EthPort { return &c.Ethernet[0] }
+	check := func(mutate func(c *Config)) error {
+		c := Default()
+		mutate(c)
+		c.Normalize()
+		return c.Validate()
+	}
+	// A router that has never heard of either reads as neither.
+	var old Config
+	if err := json.Unmarshal([]byte(`{"version":3,"ethernet":[{"name":"eth0","role":"wan"}]}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	old.Normalize()
+	if e := old.Ethernet[0]; e.VLAN != 0 || e.PPPoE != (PPPoE{}) {
+		t.Errorf("a port stored without the fields: %+v", e)
+	}
+
+	for _, id := range []int{0, 1, 35, 4094} {
+		if err := check(func(c *Config) { port(c).VLAN = id }); err != nil {
+			t.Errorf("VLAN %d: %v", id, err)
+		}
+	}
+	for _, id := range []int{-1, 4095, 70000} {
+		if err := check(func(c *Config) { port(c).VLAN = id }); err == nil {
+			t.Errorf("VLAN %d accepted", id)
+		}
+	}
+
+	login := PPPoE{Enabled: true, Username: "user@provider.example", Password: `p"a\ss word#1`}
+	if err := check(func(c *Config) { port(c).PPPoE, port(c).VLAN = login, 7 }); err != nil {
+		t.Errorf("PPPoE on a tagged port: %v", err)
+	}
+	static4 := IPFamily{Mode: IPStatic, Address: "192.0.2.10/24", Gateway: "192.0.2.1", DNS: []string{"192.0.2.1"}}
+	static6 := IPFamily{Mode: IPStatic, Address: "2001:db8::10/64", Gateway: "fe80::1"}
+	for what, mutate := range map[string]func(c *Config){
+		"no user name":            func(c *Config) { port(c).PPPoE = PPPoE{Enabled: true, Password: "secret"} },
+		"no password":             func(c *Config) { port(c).PPPoE = PPPoE{Enabled: true, Username: "user"} },
+		"a user name of spaces":   func(c *Config) { port(c).PPPoE = PPPoE{Enabled: true, Username: "  ", Password: "secret"} },
+		"a newline in the name":   func(c *Config) { port(c).PPPoE = PPPoE{Enabled: true, Username: "us\ner", Password: "secret"} },
+		"a newline in the secret": func(c *Config) { port(c).PPPoE = PPPoE{Enabled: true, Username: "user", Password: "sec\nret"} },
+		"a very long user name": func(c *Config) {
+			port(c).PPPoE = PPPoE{Enabled: true, Username: strings.Repeat("u", 129), Password: "x"}
+		},
+		"a very long password": func(c *Config) {
+			port(c).PPPoE = PPPoE{Enabled: true, Username: "u", Password: strings.Repeat("p", 129)}
+		},
+		"with a fixed IPv4 as well": func(c *Config) { port(c).PPPoE, port(c).IP.V4 = login, static4 },
+		"with a fixed IPv6 as well": func(c *Config) { port(c).PPPoE, port(c).IP.V6 = login, static6 },
+	} {
+		if err := check(mutate); err == nil {
+			t.Errorf("PPPoE %s: accepted", what)
+		}
+	}
+
+	// Switched off, the sign-in is not kept; the tag is, whatever the
+	// port is used for.
+	c := Default()
+	port(c).PPPoE = PPPoE{Username: " user ", Password: " secret "}
+	port(c).VLAN, port(c).Role = 35, EthLAN
+	c.Normalize()
+	if port(c).PPPoE != (PPPoE{}) || port(c).VLAN != 35 {
+		t.Errorf("after normalizing: %+v", port(c))
+	}
+	// A user name loses the spaces around it, a password does not.
+	port(c).PPPoE = PPPoE{Enabled: true, Username: " user ", Password: " secret "}
+	c.Normalize()
+	if port(c).PPPoE.Username != "user" || port(c).PPPoE.Password != " secret " {
+		t.Errorf("trimming: %+v", port(c).PPPoE)
+	}
+}
+
+func TestMadeInterfaceNames(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{VLANIfName("eth0", 35), "v35-eth0"},
+		{VLANIfName("end0", 4094), "v4094-end0"},
+		{VLANIfName("enp1s0f0", 4094), "v4094-enp1s0f0"},
+		{PPPIfName("eth0"), "ppp-eth0"},
+		{PPPIfName("enp1s0f0np0"), "ppp-enp1s0f0np0"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("got %s, want %s", tc.got, tc.want)
+		}
+	}
+	// A port whose name leaves no room: still 15 bytes at most, still
+	// one name per port and tag, the same every time.
+	const a, b = "enx3a1f0c2299d4", "enx3a1f0c2299d5"
+	seen := map[string]string{}
+	for _, port := range []string{a, b} {
+		for _, name := range []string{VLANIfName(port, 7), VLANIfName(port, 4094), PPPIfName(port)} {
+			if len(name) > 15 || !reIface.MatchString(name) {
+				t.Errorf("%q is not an interface name", name)
+			}
+			if other, taken := seen[name]; taken {
+				t.Errorf("%q names both %s and %s", name, other, port)
+			}
+			seen[name] = port
+		}
+	}
+	if VLANIfName(a, 7) != VLANIfName(a, 7) || !strings.HasPrefix(VLANIfName(a, 7), "v7-") || !strings.HasPrefix(PPPIfName(a), "ppp-") {
+		t.Errorf("names for a long port name: %s %s", VLANIfName(a, 7), PPPIfName(a))
+	}
+
+	// None of them is ever taken for a wired port, and no port's own name
+	// is taken for one of them.
+	for name := range seen {
+		if !MadeIf(name) {
+			t.Errorf("%s not recognised as made by the router", name)
+		}
+	}
+	for _, name := range []string{"v35-eth0", "v1-lan1", "ppp-eth0", "ppp0"} {
+		if !MadeIf(name) {
+			t.Errorf("%s not recognised as made by the router", name)
+		}
+	}
+	for _, name := range []string{"eth0", "end0", "lan1", "usb0", "enx3a1f0c2299d4", "enp1s0", "veth0", "vlan1", "v6"} {
+		if MadeIf(name) {
+			t.Errorf("the port %s taken for an interface the router made", name)
+		}
+	}
+	// One remembered as a port by mistake is forgotten, with its place
+	// in the order.
+	c := Default()
+	c.Ethernet = append(c.Ethernet, EthPort{Name: "v35-eth0", Role: EthWAN}, EthPort{Name: "ppp-eth0", Role: EthWAN})
+	c.WAN.Order = []string{"eth:v35-eth0", "eth:eth0", "eth:ppp-eth0", "wifi", "phone"}
+	c.Normalize()
+	if len(c.Ethernet) != 1 || strings.Join(c.WAN.Order, " ") != "eth:eth0 wifi phone" {
+		t.Errorf("after forgetting: %+v %v", c.Ethernet, c.WAN.Order)
+	}
+}

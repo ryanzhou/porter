@@ -5,6 +5,7 @@ package config
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -111,9 +112,49 @@ type EthPort struct {
 	Role string `json:"role"`
 	// IP is how the port gets its addresses when it is an uplink.
 	IP IPSetup `json:"ip"`
+	// VLAN is the tag the provider delivers the internet under, 1 to
+	// 4094, for a port that is an uplink; 0 for none. The uplink then
+	// runs on a sub-interface of the port (VLANIfName).
+	VLAN int `json:"vlan"`
+	// PPPoE makes the uplink sign in to the provider, in place of DHCP
+	// or a fixed address for IPv4.
+	PPPoE PPPoE `json:"pppoe"`
 	// Network is the network a LAN port belongs to.
 	Network string `json:"network"`
 }
+
+// PPPoE is a provider's sign-in for a wired uplink. Username and Password
+// are used, and kept, only while it is Enabled.
+type PPPoE struct {
+	Enabled  bool   `json:"enabled"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// VLANIfName is the interface that carries one VLAN of a wired port, and
+// PPPIfName the interface of a PPPoE session over a port (tagged or not:
+// a port has one session at most). Both are named after the port so that
+// they are the same after every start, with a prefix no port's own name
+// begins with: see MadeIf.
+func VLANIfName(port string, id int) string { return madeName(fmt.Sprintf("v%d-", id), port) }
+func PPPIfName(port string) string          { return madeName("ppp-", port) }
+
+// madeName is prefix and port where that fits in an interface name (15
+// bytes). A port with a longer name, such as a USB adapter named after
+// its hardware address, is named by a hash instead: not readable, but
+// just as much its own.
+func madeName(prefix, port string) string {
+	if len(prefix)+len(port) <= 15 {
+		return prefix + port
+	}
+	sum := sha256.Sum256([]byte(port))
+	return (prefix + hex.EncodeToString(sum[:]))[:15]
+}
+
+// MadeIf reports whether a name is that of an interface the router makes
+// on top of a wired port (VLANIfName, PPPIfName), which is never itself
+// a wired port.
+func MadeIf(name string) bool { return reMade.MatchString(name) }
 
 // IPSetup is how an uplink gets its addresses, per address family. The
 // zero value is automatic for both: DHCP for IPv4; router advertisements
@@ -667,9 +708,10 @@ func (s *Store) Load() (*Config, error) {
 // When SchemaVersion is raised, the step from the previous version goes
 // here. Without it a router that updates itself would lose its settings.
 //
-// Format 3 only added system.bluetooth_only, so format 2 has no entry. The
-// number was raised all the same: an app that knows format 2 would write
-// the document back without the field, and has to be told that it cannot.
+// Format 3 only added fields (system.bluetooth_only, and a wired port's
+// vlan and pppoe), so format 2 has no entry. The number was raised all the
+// same: an app that knows format 2 would write the document back without
+// them, and has to be told that it cannot.
 var migrations = map[int]func(doc map[string]any) error{
 	1: networksAndOrder,
 }

@@ -890,5 +890,29 @@ final class NetworkControlModelTests: XCTestCase {
         let written = String(decoding: try RouterConnection.makeEncoder().encode(current), as: UTF8.self)
         XCTAssertTrue(written.contains("\"bluetooth_only\":true"), written)
         XCTAssertEqual(RouterConfig.format, 3)
+
+        // A wired port as a router says it that knows nothing of VLAN
+        // IDs or PPPoE, and as one says it that does.
+        let plain = try decoder.decode(EthernetPort.self, from: Data(#"{"name":"eth0","role":"wan","network":"lan"}"#.utf8))
+        XCTAssertNil(plain.vlan)
+        XCTAssertNil(plain.pppoe)
+        let fibre = try decoder.decode(EthernetPort.self, from: Data(#"{"name":"eth0","role":"wan","ip":{"v4":{"mode":"auto","address":"","gateway":"","dns":[]},"v6":{"mode":"auto","address":"","gateway":"","dns":[]}},"vlan":7,"pppoe":{"enabled":true,"username":"user@provider.example","password":"se cret"},"network":"lan"}"#.utf8))
+        XCTAssertEqual(fibre.vlan, 7)
+        XCTAssertEqual(fibre.pppoe, PPPoESetup(enabled: true, username: "user@provider.example", password: "se cret"))
+        let port = String(decoding: try RouterConnection.makeEncoder().encode(fibre), as: UTF8.self)
+        XCTAssertTrue(port.contains("\"vlan\":7") && port.contains("\"pppoe\":{") && port.contains("\"username\":\"user@provider.example\""), port)
+        XCTAssertEqual(try decoder.decode(EthernetPort.self, from: Data(port.utf8)), fibre)
+
+        // An internet source with and without what is new about it.
+        let before = try decoder.decode(UplinkStatus.self, from: Data(#"{"if":"eth0","kind":"eth","key":"eth:eth0","metric":100,"rank":0,"carrier":true,"internet":"online","has_v6":true}"#.utf8))
+        XCTAssertNil(before.prefix)
+        XCTAssertNil(before.pppoe)
+        let after = try decoder.decode(UplinkStatus.self, from: Data(#"{"if":"ppp-eth0","kind":"eth","key":"eth:eth0","metric":100,"rank":0,"carrier":true,"internet":"connecting","has_v6":false,"prefix":"2001:db8:1000::/56","pppoe":"wrong_login"}"#.utf8))
+        XCTAssertEqual(after.prefix, "2001:db8:1000::/56")
+        XCTAssertEqual(after.pppoe, "wrong_login")
+        let lan = try decoder.decode(LANStatus.self, from: Data(#"{"address":"10.83.0.1/24","clients":2,"networks":{"lan":2}}"#.utf8))
+        XCTAssertNil(lan.prefixes)
+        let shared = try decoder.decode(LANStatus.self, from: Data(#"{"address":"10.83.0.1/24","clients":2,"networks":{"lan":2},"prefixes":{"lan":"2001:db8:1000:a3::/64"}}"#.utf8))
+        XCTAssertEqual(shared.prefixes?["lan"], "2001:db8:1000:a3::/64")
     }
 }

@@ -1,5 +1,5 @@
 // Package proc supervises the helper daemons the router drives (hostapd,
-// wpa_supplicant, dnsmasq, dhcpcd).
+// wpa_supplicant, dnsmasq, dhcpcd, pppd).
 package proc
 
 import (

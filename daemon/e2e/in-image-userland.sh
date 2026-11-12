@@ -64,9 +64,12 @@ echo "$DEBIAN_KEYRING_SHA256  $WORK/keyring.deb" | sha256sum -c --quiet - \
 dpkg-deb -x "$WORK/keyring.deb" "$WORK/keyring"
 PACKAGES=$(grep -vE '^\s*(#|$)' "$REPO/image/packages" \
     | grep -vE '^(raspberrypi-archive-keyring|linux-image-|raspi-firmware|firmware-|bluez-firmware)' | paste -sd,)
+# What only the tests need, and the router does not: a PPPoE server
+# (pppoe-server, from the package "pppoe") to stand in for a provider.
+TEST_PACKAGES=pppoe
 mmdebstrap --variant=minbase --mode=root \
     --keyring="$WORK/keyring/usr/share/keyrings/debian-archive-keyring.gpg" \
-    --include="$PACKAGES" \
+    --include="$PACKAGES,$TEST_PACKAGES" \
     --aptopt='Apt::Install-Recommends "false"' \
     --dpkgopt='force-confold' \
     --dpkgopt='path-exclude=/usr/share/man/*' \
@@ -113,11 +116,11 @@ inside() {
 echo "==> firewall and policy routing"
 inside sh -c 'cd /tmp && /opt/porter-test/fw.test -test.count=1 -test.v' | tee "$WORK/fw.log"
 echo "==> end to end"
-inside sh -c 'cd /tmp && /opt/porter-test/e2e.test -test.count=1 -test.v -test.timeout 10m "$@"' sh "$@" | tee "$WORK/e2e.log"
+inside sh -c 'cd /tmp && /opt/porter-test/e2e.test -test.count=1 -test.v -test.timeout 20m "$@"' sh "$@" | tee "$WORK/e2e.log"
 
 # A test that skipped itself here did so because the image lacks something
 # it needs, which is exactly what this run exists to find.
-if grep -E '^(--- SKIP: (TestRender|TestRouter)\b|    --- SKIP: TestRouter/MPQUIC\b)' "$WORK/fw.log" "$WORK/e2e.log"; then
+if grep -E '^(--- SKIP: (TestRender|TestRouter)\b|    --- SKIP: TestRouter/(MPQUIC|TaggedPort|PPPoE|PrefixDelegation)\b)' "$WORK/fw.log" "$WORK/e2e.log"; then
     echo "a test that must run inside the image's userland was skipped" >&2
     exit 1
 fi

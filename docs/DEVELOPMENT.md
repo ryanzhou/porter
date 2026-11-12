@@ -18,7 +18,8 @@ the project's GitHub releases, and only when asked for from the app.
 ```
  iPhone app ─┬─ BLE GATT ── bluetoothd ─┬─ porterd ─┬─ hostapd          (access points)
              └─ TCP, on the router's ───┘           ├─ wpa_supplicant   (Wi-Fi uplink)
-                own networks                        ├─ dhcpcd           (uplink DHCP / RA / DHCPv6)
+                own networks                        ├─ dhcpcd           (uplink DHCP / RA / DHCPv6, prefix delegation)
+                                                    ├─ pppd             (uplink PPPoE)
                                                     ├─ dnsmasq          (LAN DHCP and router advertisements)
                                                     ├─ nftables         (firewall, NAT44/NAT66, classification)
                                                     ├─ policy routing   (one table per VPN profile)
@@ -84,8 +85,64 @@ every subsystem against it and against what the network is doing.
   iPhone is plugged in, asks it, and keeps the pairing record in
   `/data/lockdown` (linked from `/var/lib/lockdown`).
 - **IPv6.** Each network gets a ULA /64; the uplink takes whatever RA or
-  DHCPv6 offers; traffic is masqueraded (NAT66). No prefix delegation is
-  needed.
+  DHCPv6 offers; traffic is masqueraded (NAT66). That works on any
+  network the router joins. Where the network delegates a prefix, devices
+  get addresses out of it as well, and those are not translated: see
+  *Prefix delegation*.
+- **Prefix delegation.** dhcpcd asks for a prefix on every uplink whose
+  IPv6 is automatic (`ia_pd 1 -`: obtain it, assign it to nothing) and
+  reports it to the hook, where `internal/wan` reads prefix, length and
+  lifetime from dhcpcd's variables (`new_dhcp6_ia_pd1_prefix1…`) into
+  the uplink's state. dhcpcd also adds the reject route for the whole
+  prefix, so that what no network uses of it is not sent back to the
+  provider. Sharing it out is the control loop's: of the prefix of the
+  uplink *in use*, each network has a /64 (`lan.Carve`), found from the
+  network's id so that it keeps it while other networks come and go, the
+  main network first where there are too few. The router's address in
+  it (`::1`) goes on the bridge next to the ULA one. dnsmasq announces
+  every prefix it finds there (`constructor:`), and when an address is
+  taken away again (another uplink in use, the lease gone) goes on
+  announcing its prefix with a preferred lifetime of zero for up to two
+  hours: devices keep what they have open and start nothing new from
+  it. The addresses have to be permanent ones for that, which is why the
+  lease's lifetimes are tracked in `internal/wan` and not put on the
+  bridge. The firewall leaves a source address in an uplink's delegated
+  prefix alone when the packet leaves by that uplink, and masquerades
+  it like any other when it leaves any other way: one provider does not
+  route another's addresses, and neither does a VPN. Nothing comes in:
+  the forward chain accepts only what belongs to a connection made from
+  inside, which includes the ICMPv6 errors about it. Devices are still
+  told the router's ULA address as their DNS server, because it stays
+  the same whatever the provider does; the forwarder listens on the
+  delegated addresses too, because a lookup that `dns.intercept`
+  redirects arrives at the bridge address the kernel picks, the newest.
+- **A tagged internet port.** A wired uplink with a VLAN ID runs on a
+  sub-interface of the port (`v<id>-<port>`), made over netlink before
+  the uplink starts and removed after it has stopped. Its key, its
+  place in the order and its metric stay the port's. A PPPoE session's
+  interface is `ppp-<port>`. Both names are shortened to a hash for a
+  port whose name leaves no room in 15 bytes, and `config.MadeIf`
+  recognises them, so that neither is ever listed or stored as a port.
+- **PPPoE.** One pppd per wired uplink that signs in, with the kernel's
+  PPPoE (`plugin pppoe.so`), over the port or its VLAN. Its options,
+  with the user name and password, are in a file under the run
+  directory that only root can read; the command line names the file
+  and nothing else. pppd keeps the session up itself (`persist`, ten
+  seconds between attempts, a session without an echo for half a
+  minute given up), adds the default route with the uplink's metric as
+  dhcpcd would, and runs the hook helper as `ip-up` and `ip-down`, which
+  is how the provider's DNS servers arrive. The uplink's interface is
+  the session's: addresses, routes, the firewall and the probe go by
+  it, and it only exists while there is a session, so the status has
+  the reason there is none from what pppd prints (`wan.pppPhase`): the
+  provider refused the sign-in, or nothing answered. For IPv6, pppd
+  gives the interface its link-local address and dhcpcd is started on
+  it (IPv6 only) for as long as it is there. A session leaves 1492
+  bytes for a packet: TCP segment sizes are cut to the route's on the
+  way out, as for every uplink, and by number on the way in for any
+  uplink whose MTU is below Ethernet's. The routing table that names
+  the uplink in use names a session by its interface, since it has no
+  gateway.
 - **MPQUIC.** A VPN profile of this type runs the `mpquic` program as it
   is released (`mpquic local`), attached to a network interface: its
   TUN mode, in which it proxies whatever the system routes there. Each
@@ -103,7 +160,8 @@ every subsystem against it and against what the network is doing.
   advertisements, DHCPv6) unless a family is set by hand, per wired port
   or per saved Wi-Fi network. A fixed address and its default route are
   put in place by porterd itself and re-checked every two seconds;
-  dhcpcd then handles only the other family, or does not run.
+  dhcpcd then handles only the other family, or does not run. On a
+  wired port that signs in with PPPoE, IPv4 is pppd's.
 - **Upstream band.** wpa_supplicant and radio firmware choose an access
   point mostly by signal strength, which favours 2.4 GHz. porterd decides
   the band itself from the scan results (5 GHz when it is at least fair,
@@ -274,7 +332,10 @@ cd daemon && go test ./...
 ```
 
 The end-to-end tests run the real daemon in network namespaces. They
-need root and `ip`, `nft`, `dnsmasq`, `dhcpcd` and `wg`:
+need root and `ip`, `nft`, `dnsmasq`, `dhcpcd` and `wg`; for PPPoE also
+`pppd` and `pppoe-server`, and a kernel with VLANs, PPPoE and IPv6 for
+the tests of those (which skip themselves, saying why, where it has
+none):
 
 ```bash
 cd daemon && sudo go test -tags e2e -count=1 -v ./e2e/
@@ -301,11 +362,19 @@ CI runs the end-to-end tests this way.
   network (a paired phone from the main network, a phone that is not
   paired, the internet side, an isolated network, and the setting that
   switches it off); a second network (its own addresses, isolation, a
-  route and a rule of its own, and its removal); and a second uplink
+  route and a rule of its own, and its removal); a second uplink
   standing in for a phone (the order of uplinks, and falling back when
-  the first stops reaching the internet). There is no Bluetooth in the
-  namespaces, so the phone these tests connect as is written into the
-  pairing list before the daemon starts.
+  the first stops reaching the internet); and the ways a home connection
+  arrives (`home_test.go`): the internet under a VLAN tag; PPPoE against
+  a real `pppoe-server` (nobody answering, a wrong password, a session,
+  the server restarting under it); and a prefix delegated by a DHCPv6
+  server written out in the test (`dhcp6_test.go`), with a device going
+  out from its own address, nothing coming in, a second network with a
+  /64 of its own, and the prefix being withdrawn. These three explain
+  themselves at length when they fail, for whoever has only the log of
+  a run elsewhere. There is no Bluetooth in the namespaces, so the phone
+  these tests connect as is written into the pairing list before the
+  daemon starts.
 - `TestWifi` uses simulated radios (`mac80211_hwsim`): hostapd and
   wpa_supplicant for real, scanning, wrong and right passwords, a
   wireless client through the router, a second Wi-Fi network on a
@@ -444,5 +513,8 @@ draft or pre-release. The router and the app both show the version.
   rules resets connection tracking, which also clears the active list.
 - Downloaded data (block lists, the country database) is checked for
   plausibility before it replaces the copy in use.
-- Clients hold only ULA IPv6 addresses, so for dual-stack destinations
-  most systems prefer IPv4.
+- Without a delegated prefix clients hold only ULA IPv6 addresses, so
+  for dual-stack destinations most systems prefer IPv4.
+- A delegated prefix is announced to devices with the lifetimes of the
+  router's own address leases (`lan.lease_minutes`), not with those of
+  the delegation, and taken back when the delegation ends.

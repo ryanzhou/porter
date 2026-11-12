@@ -305,10 +305,17 @@ private struct SourceRow: View {
         }
     }
 
+    /// The source has an address to show.
+    private var addressed: Bool {
+        guard linked, let address = uplink?.ipv4 else { return false }
+        return !address.isEmpty
+    }
+
     /// The line under the name: the address, or what is missing.
     private var detail: String {
         if linked {
             if let address = uplink?.ipv4, !address.isEmpty { return address }
+            if let signIn = signInLabel(uplink?.pppoe) { return signIn }
             return "Waiting for an address"
         }
         switch source.kind {
@@ -335,7 +342,14 @@ private struct SourceRow: View {
     /// Nothing plugged in is not a fault: grey, and no second label.
     private var color: Color {
         guard linked, let uplink else { return Color.gray }
+        if signInFailed(uplink.pppoe) { return Color.red }
         return internetColor(uplink.internet)
+    }
+
+    /// A sign-in the provider refuses is not on its way to working.
+    private func stateLabel(_ uplink: UplinkStatus) -> String {
+        if signInFailed(uplink.pppoe) { return internetLabel("down") }
+        return internetLabel(uplink.internet)
     }
 
     var body: some View {
@@ -346,7 +360,7 @@ private struct SourceRow: View {
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     Text(detail)
-                        .font(linked ? Font.caption.monospaced() : Font.caption)
+                        .font(addressed ? Font.caption.monospaced() : Font.caption)
                         .foregroundStyle(.secondary)
                     if uplink?.hasV6 == true {
                         Badge(text: "IPv6", color: Color.accentColor)
@@ -359,7 +373,7 @@ private struct SourceRow: View {
             Spacer(minLength: 8)
             if linked, let uplink {
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(internetLabel(uplink.internet))
+                    Text(stateLabel(uplink))
                         .font(.subheadline)
                         .foregroundStyle(color)
                     if station?.state == "connected", let signal = station?.signal {
@@ -371,23 +385,206 @@ private struct SourceRow: View {
     }
 }
 
-/// A wired uplink: how it gets its addresses.
+/// What can be set for a wired source, as one value to compare.
+private struct WiredSetup: Equatable {
+    var ip = IPSetup()
+    var vlan: Int = 0
+    var pppoe = PPPoESetup()
+}
+
+/// A wired source: how it gets its addresses (from the network, typed in,
+/// or by signing in to the provider with PPPoE) and the VLAN ID the
+/// provider uses, if it uses one.
 private struct WiredSourcePage: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
     let port: String
 
-    private var setup: IPSetup {
+    /// "auto", "static" or "pppoe": how IPv4 is set up.
+    @State private var connection: String = "auto"
+    @State private var draft = IPSetup()
+    @State private var dns4: String = ""
+    @State private var dns6: String = ""
+    @State private var username: String = ""
+    @State private var password: String = ""
+    @State private var vlan: String = ""
+    @State private var loaded = false
+    @State private var saving = false
+
+    private var stored: WiredSetup {
         let ports: [EthernetPort] = model.config?.ethernet ?? []
-        return ports.first(where: { $0.name == port })?.ip ?? IPSetup()
+        guard let found = ports.first(where: { $0.name == port }) else { return WiredSetup() }
+        return WiredSetup(ip: found.ip ?? IPSetup(), vlan: found.vlan ?? 0, pppoe: found.pppoe ?? PPPoESetup())
+    }
+
+    private var uplink: UplinkStatus? {
+        let sources: [UplinkStatus] = model.status?.wan ?? []
+        return sources.first(where: { $0.key == RouterConfig.uplinkEthernet(port) })
+    }
+
+    private var signingIn: Bool { connection == "pppoe" }
+
+    private func servers(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0 == "," || $0 == " " || $0.isNewline }).map { String($0) }
+    }
+
+    /// The VLAN ID as typed: 0 for none, nil for something that is not
+    /// one.
+    private var vlanID: Int? {
+        let text: String = vlan.trimmingCharacters(in: .whitespaces)
+        if text.isEmpty { return 0 }
+        guard let id = Int(text), id >= 1, id <= 4094 else { return nil }
+        return id
+    }
+
+    /// What Save would write.
+    private var result: WiredSetup {
+        var out = WiredSetup()
+        out.vlan = vlanID ?? 0
+        if signingIn {
+            // The addresses come with the sign-in, for IPv6 as well.
+            out.pppoe = PPPoESetup(enabled: true, username: username.trimmingCharacters(in: .whitespaces), password: password)
+            return out
+        }
+        out.ip = draft
+        out.ip.v4.mode = connection
+        out.ip.v4.dns = servers(dns4)
+        out.ip.v6.dns = servers(dns6)
+        return out
+    }
+
+    private func complete(_ family: IPFamilySetup) -> Bool {
+        !family.isStatic || (!family.address.isEmpty && !family.gateway.isEmpty)
+    }
+
+    /// What is wrong with the sign-in as typed, once something is.
+    private var signInProblem: String? {
+        if username.utf8.count > 128 { return "A PPPoE user name can be 128 characters long at most." }
+        if password.utf8.count > 128 { return "A PPPoE password can be 128 characters long at most." }
+        return nil
+    }
+
+    private var canSave: Bool {
+        guard loaded, !saving, vlanID != nil else { return false }
+        let next: WiredSetup = result
+        if next == stored { return false }
+        if signingIn {
+            return !next.pppoe.username.isEmpty && !next.pppoe.password.isEmpty && signInProblem == nil
+        }
+        return complete(next.ip.v4) && complete(next.ip.v6)
+    }
+
+    /// What the provider made of the sign-in that is stored, shown where
+    /// it is put right.
+    private var signInNote: String? {
+        guard stored.pppoe.enabled, uplink?.carrier == true else { return nil }
+        switch uplink?.pppoe ?? "" {
+        case "wrong_login": return "Your provider did not accept this user name and password."
+        case "no_answer": return "Your provider does not answer. Check the cable to the modem, and the VLAN ID if your provider uses one."
+        default: return nil
+        }
     }
 
     var body: some View {
-        IPSetupPage(title: "Ethernet", initial: setup) { next in
-            let name = port
-            return await model.update { cfg in
-                if let index = cfg.ethernet.firstIndex(where: { $0.name == name }) {
-                    cfg.ethernet[index].ip = next
+        Form {
+            Section {
+                Picker("IPv4", selection: $connection) {
+                    Text("Automatic").tag("auto")
+                    Text("Manual").tag("static")
+                    Text("PPPoE").tag("pppoe")
                 }
+                .pickerStyle(.segmented)
+                .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+                if connection == "static" {
+                    AddressField(label: "Address", text: $draft.v4.address, example: "192.168.1.50/24")
+                    AddressField(label: "Gateway", text: $draft.v4.gateway, example: "192.168.1.1")
+                    AddressField(label: "DNS", text: $dns4, example: "1.1.1.1")
+                }
+                if signingIn {
+                    TextField("PPPoE user name", text: $username)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Password", text: $password)
+                }
+            } header: {
+                Text("IPv4")
+            } footer: {
+                if let problem = signInProblem, signingIn {
+                    Text(problem)
+                        .foregroundStyle(.red)
+                } else if let note = signInNote, signingIn {
+                    Text(note)
+                        .foregroundStyle(.red)
+                }
+            }
+            if !signingIn {
+                IPFamilySection(name: "IPv6", family: $draft.v6, dns: $dns6, address: "2001:db8::50/64", gateway: "fe80::1", server: "2606:4700:4700::1111")
+            }
+            Section {
+                LabeledContent("VLAN ID") {
+                    TextField("VLAN ID", text: $vlan, prompt: Text("None"))
+                        .multilineTextAlignment(.trailing)
+                        .keyboardType(.numberPad)
+                }
+            } footer: {
+                if vlanID == nil {
+                    Text("A VLAN ID is a number from 1 to 4094.")
+                        .foregroundStyle(.red)
+                } else {
+                    Text("Fill this in only if your internet provider's instructions give a VLAN ID.")
+                }
+            }
+            if let prefix = uplink?.prefix, !prefix.isEmpty {
+                Section {
+                    LabeledContent("IPv6 prefix", value: prefix)
+                } footer: {
+                    Text("Your provider has given the router these IPv6 addresses for the devices on your networks.")
+                }
+            }
+        }
+        .navigationTitle("Ethernet")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") { commit() }
+                    .disabled(!canSave)
+            }
+        }
+        .onAppear { load() }
+    }
+
+    private func load() {
+        guard !loaded else { return }
+        loaded = true
+        let initial: WiredSetup = stored
+        draft = initial.ip
+        dns4 = initial.ip.v4.dns.joined(separator: ", ")
+        dns6 = initial.ip.v6.dns.joined(separator: ", ")
+        username = initial.pppoe.username
+        password = initial.pppoe.password
+        vlan = initial.vlan == 0 ? "" : String(initial.vlan)
+        if initial.pppoe.enabled {
+            connection = "pppoe"
+        } else {
+            connection = initial.ip.v4.isStatic ? "static" : "auto"
+        }
+    }
+
+    private func commit() {
+        let next: WiredSetup = result
+        let name: String = port
+        saving = true
+        Task {
+            let ok = await model.update { cfg in
+                if let index = cfg.ethernet.firstIndex(where: { $0.name == name }) {
+                    cfg.ethernet[index].ip = next.ip
+                    cfg.ethernet[index].vlan = next.vlan
+                    cfg.ethernet[index].pppoe = next.pppoe
+                }
+            }
+            saving = false
+            if ok {
+                dismiss()
             }
         }
     }

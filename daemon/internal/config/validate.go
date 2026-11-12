@@ -21,6 +21,9 @@ var (
 	reLabel   = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$`)
 	// Names that belong to Wi-Fi interfaces, never to wired ports.
 	reNotWired = regexp.MustCompile(`^(wl|ap(-|[0-9x]))`)
+	// Names of the interfaces the router makes on top of a wired port: a
+	// VLAN's ("v35-eth0") and a PPPoE session's ("ppp-eth0").
+	reMade = regexp.MustCompile(`^(v[0-9]{1,4}-|ppp)`)
 )
 
 // Normalize canonicalises user input (case, whitespace) so that validation
@@ -93,19 +96,27 @@ func (c *Config) Normalize() {
 		m.Up, m.Down = strings.ToLower(strings.TrimSpace(m.Up)), strings.ToLower(strings.TrimSpace(m.Down))
 	}
 	// Earlier versions could mistake a Wi-Fi interface for a wired port
-	// in the instant it was created, and remember it as one.
+	// in the instant it was created, and remember it as one. An interface
+	// the router makes on top of a port is not a port either.
 	ports := c.Ethernet[:0]
 	for _, e := range c.Ethernet {
-		if !reNotWired.MatchString(e.Name) {
+		if !reNotWired.MatchString(e.Name) && !MadeIf(e.Name) {
 			ports = append(ports, e)
 		}
 	}
 	c.Ethernet = ports
 	c.normalizeNetworks()
 	for i := range c.Ethernet {
-		c.Ethernet[i].IP.normalize()
-		if c.Ethernet[i].Network == "" || c.Ethernet[i].Role != EthLAN {
-			c.Ethernet[i].Network = MainNetwork
+		e := &c.Ethernet[i]
+		e.IP.normalize()
+		if e.Network == "" || e.Role != EthLAN {
+			e.Network = MainNetwork
+		}
+		// Not trimmed further than this: a provider's password may begin
+		// or end with a space, a user name does not.
+		e.PPPoE.Username = strings.TrimSpace(e.PPPoE.Username)
+		if !e.PPPoE.Enabled {
+			e.PPPoE = PPPoE{}
 		}
 	}
 	c.normalizeOrder()
@@ -431,9 +442,42 @@ func (c *Config) validateRadios() error {
 		if err := e.IP.validate(e.Name, len(c.DNS.Upstreams) > 0); err != nil {
 			return err
 		}
+		if e.VLAN < 0 || e.VLAN > 4094 {
+			return fmt.Errorf("A VLAN ID is a number from 1 to 4094.")
+		}
+		if err := e.validatePPPoE(); err != nil {
+			return err
+		}
 		if c.Network(e.Network) == nil {
 			return fmt.Errorf("%s: belongs to a network that does not exist", e.Name)
 		}
+	}
+	return nil
+}
+
+// validatePPPoE checks a port's sign-in. The user name and password end
+// up in pppd's options file, which quotes them: anything a person can
+// type is taken, control characters are not.
+func (e EthPort) validatePPPoE() error {
+	p := e.PPPoE
+	if !p.Enabled {
+		return nil
+	}
+	if p.Username == "" || p.Password == "" {
+		return fmt.Errorf("PPPoE needs the user name and the password your provider gave you.")
+	}
+	if len(p.Username) > 128 || !printable(p.Username) {
+		return fmt.Errorf("A PPPoE user name can be 128 characters long at most.")
+	}
+	if len(p.Password) > 128 || !printable(p.Password) {
+		return fmt.Errorf("A PPPoE password can be 128 characters long at most.")
+	}
+	// The addresses come with the sign-in.
+	if e.IP.V4.Static() {
+		return fmt.Errorf("%s: with PPPoE the IPv4 address comes from the provider, so it cannot be fixed as well", e.Name)
+	}
+	if e.IP.V6.Static() {
+		return fmt.Errorf("%s: with PPPoE the IPv6 address comes from the provider, so it cannot be fixed as well", e.Name)
 	}
 	return nil
 }

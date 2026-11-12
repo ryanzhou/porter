@@ -4,7 +4,9 @@
 package lan
 
 import (
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -31,7 +33,10 @@ type Net struct {
 	Bridge string
 	Addr   netip.Prefix // router address with prefix length
 	ULA    netip.Prefix // router IPv6 address with /64; zero = no IPv6
-	Ports  []string     // wired members
+	// Global is the router's address in the network's share of a prefix
+	// the uplink in use has delegated (see Carve); zero = none.
+	Global netip.Prefix
+	Ports  []string // wired members
 }
 
 // Desired is the LAN state to establish.
@@ -102,12 +107,20 @@ func (m *Manager) Apply(d Desired) (addrChanged bool, err error) {
 		addrs := []netip.Prefix{n.Addr}
 		if n.ULA.IsValid() && fw.HaveIPv6() {
 			addrs = append(addrs, n.ULA)
+			// Next to the private address, and as lasting as it is:
+			// dnsmasq announces the prefix of every address it finds on
+			// the bridge that has no end, and when one is taken away
+			// again goes on announcing its prefix as one not to be used
+			// any more, for as long as devices may still hold it.
+			if n.Global.IsValid() {
+				addrs = append(addrs, n.Global)
+			}
 		}
 		changed, err := netx.SyncAddrs(n.Bridge, addrs)
 		if err != nil {
 			return addrChanged, err
 		}
-		addrChanged = addrChanged || changed
+		addrChanged = addrChanged || renumbered(changed)
 		bridge := n.Bridge
 		keep := func(name string) bool {
 			b, ok := APBridge(name)
@@ -160,6 +173,79 @@ func (m *Manager) Apply(d Desired) (addrChanged bool, err error) {
 		m.lastConf = conf
 	}
 	return addrChanged, nil
+}
+
+// renumbered reports whether a change to a bridge's addresses is one that
+// devices have to ask again for: a new range of private addresses. A
+// delegated prefix coming or going is not, router advertisements tell
+// them about that.
+func renumbered(changed []netip.Prefix) bool {
+	for _, p := range changed {
+		if p.Addr().Is4() || p.Addr().IsPrivate() {
+			return true
+		}
+	}
+	return false
+}
+
+// Carve gives each of the networks (named by id, the main one first) a
+// /64 of a prefix an uplink has delegated, and returns the router's
+// address in each (::1). A network's share depends on its id and on the
+// prefix alone, so it stays the same when other networks come and go; two
+// networks whose ids lead to the same share are told apart in the order
+// given, the later one taking the next that is free. A prefix with fewer
+// /64s than there are networks leaves the last of them without. A prefix
+// longer than /64 cannot be shared out at all: devices make their own
+// addresses within a /64.
+func Carve(delegated netip.Prefix, networks []string) map[string]netip.Prefix {
+	out := map[string]netip.Prefix{}
+	if !delegated.IsValid() || !delegated.Addr().Is6() || delegated.Addr().Is4In6() || delegated.Bits() > 64 {
+		return out
+	}
+	// More than 65536 shares to choose from are never needed.
+	bits := min(64-delegated.Bits(), 16)
+	count := uint64(1) << bits
+	base := delegated.Masked().Addr().As16()
+	taken := map[uint64]bool{}
+	give := func(id string, share uint64) {
+		a := base
+		binary.BigEndian.PutUint64(a[:8], binary.BigEndian.Uint64(a[:8])|share)
+		a[15] = 1
+		out[id], taken[share] = netip.PrefixFrom(netip.AddrFrom16(a), 64), true
+	}
+	own := func(id string) uint64 {
+		h := fnv.New64a()
+		h.Write([]byte(id))
+		return h.Sum64() % count
+	}
+	// Where there are not enough for all, the first networks have them.
+	var fit []string
+	seen := map[string]bool{}
+	for _, id := range networks {
+		if !seen[id] && uint64(len(fit)) < count {
+			fit = append(fit, id)
+		}
+		seen[id] = true
+	}
+	// Each network that finds its own share free takes it; only then do
+	// the others look for one, so that none of them takes the share a
+	// network further down the list would have had to itself.
+	var waiting []string
+	for _, id := range fit {
+		if share := own(id); !taken[share] {
+			give(id, share)
+		} else {
+			waiting = append(waiting, id)
+		}
+	}
+	for _, id := range waiting {
+		share := own(id)
+		for taken[share] {
+			share = (share + 1) % count
+		}
+		give(id, share)
+	}
+	return out
 }
 
 func (m *Manager) Stop() {

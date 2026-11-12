@@ -55,6 +55,13 @@ func VPNIfName(id string) string { return "wg-" + id }
 // Plan is everything the ruleset depends on.
 type Plan struct {
 	WANIfs []string
+	// Delegated holds, by uplink interface, the IPv6 prefix that uplink's
+	// network has delegated to the router. What leaves by that uplink
+	// from an address in it keeps its address.
+	Delegated map[string]netip.Prefix
+	// WANMTU holds the MTU of the uplinks on which a packet has less room
+	// than on Ethernet (a PPPoE session, mostly), by interface.
+	WANMTU map[string]int
 	// LANs are the router's own networks, the main one first.
 	LANs []PlanLAN
 	VPNs []PlanVPN
@@ -80,6 +87,9 @@ type Plan struct {
 type PlanLAN struct {
 	If         string
 	Net4, Net6 netip.Prefix // Net6 is the zero value without IPv6
+	// Global is the network's /64 of the prefix delegated by the uplink
+	// in use; the zero value when it has none.
+	Global netip.Prefix
 	// Isolated networks cannot open connections to the others.
 	Isolated bool
 	// Mark is the network's own route, 0 for none.
@@ -149,7 +159,12 @@ func MarkFor(c *config.Config, action string) uint32 {
 
 // Runtime is the non-config input to a plan.
 type Runtime struct {
-	WANIfs     []string
+	WANIfs []string
+	// Delegated and WANMTU are as in Plan; Global holds each network's
+	// /64 of a delegated prefix, by network id.
+	Delegated  map[string]netip.Prefix
+	WANMTU     map[string]int
+	Global     map[string]netip.Prefix
 	PortalDevs []string
 	Learned    map[string][]Elem
 	Geo        func(country string) (v4, v6 []string)
@@ -160,6 +175,8 @@ type Runtime struct {
 func BuildPlan(c *config.Config, rt Runtime) *Plan {
 	p := &Plan{
 		WANIfs:      append([]string(nil), rt.WANIfs...),
+		Delegated:   rt.Delegated,
+		WANMTU:      rt.WANMTU,
 		SSH:         c.System.SSH.Enabled,
 		Control:     !c.System.BluetoothOnly,
 		Intercept:   c.DNS.Intercept,
@@ -177,6 +194,7 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 		_, l.Net4 = n.Prefix()
 		if c.LAN.IPv6 {
 			_, l.Net6 = n.ULA()
+			l.Global = rt.Global[n.ID].Masked()
 		}
 		if n.Route != "" {
 			l.Mark = MarkFor(c, n.Route)

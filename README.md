@@ -18,6 +18,9 @@ and can send some or all of your traffic through your VPN.
 - **Your own network anywhere.** The internet comes from a wired port,
   the venue's Wi-Fi or a phone on a USB cable, in the order you rank
   them; if the first stops working the router moves on to the next.
+- **At home too.** On a fibre or DSL line it signs in to your provider
+  with PPPoE, takes the internet under the VLAN ID the provider uses,
+  and passes on the IPv6 addresses the provider gives out.
 - **More than one network.** A second Wi-Fi name for guests or for work,
   on addresses of its own, kept apart from your devices if you like.
 - **Controlled from your phone, directly.** The app talks to the router
@@ -129,6 +132,24 @@ fixed address instead, set it by hand: for a wired port by tapping
 **Ethernet** in the list, for a Wi-Fi network by tapping it under
 **Saved Wi-Fi networks**. IPv4 and IPv6 are set separately, each with address, gateway
 and DNS servers.
+
+### On your provider's line at home
+
+Plugged into a fibre or DSL modem, the wired port may need what your
+provider's welcome letter lists. Tap **Ethernet** in the list of
+internet sources:
+
+- **PPPoE.** Under IPv4 choose **PPPoE** and enter the PPPoE user name
+  and password. The source shows **Signing in to your provider** until
+  it is online, and signs in again by itself whenever the provider ends
+  the connection.
+- **VLAN ID.** If the letter gives one (7, 10 and 35 are common), enter
+  it. Leave it empty otherwise.
+- **IPv6** needs nothing. Where the provider gives the router IPv6
+  addresses for your devices (a "prefix"), each of your networks gets a
+  share of them and the page shows the prefix. Your devices then have
+  IPv6 addresses of their own on the internet; the router still lets
+  nothing in to them that they did not ask for.
 
 Where a network is on both bands the router joins it on 5 GHz, unless
 that signal is poor; the band shows next to the network. With one radio
@@ -300,6 +321,16 @@ Personal Hotspot (or USB tethering) is on, and on an iPhone that you
 tapped **Trust** when it asked; unplugging and plugging it in again makes
 it ask again. Some cables only charge.
 
+**Ethernet says "Wrong user name or password".** Your provider turned
+the PPPoE sign-in down. Tap **Ethernet** and type both again exactly as
+the provider gave them; a user name often has an `@` part that belongs
+to it.
+
+**Ethernet says "No answer from the provider".** Nothing at the other
+end of the cable answered the sign-in. Check that the cable goes to the
+modem's port for a router, that the modem itself is online, and whether
+your provider wants a VLAN ID.
+
 **Online, but a device has no internet.** Check it is not paused, and
 whether it is routed through a VPN that is down (kill switch).
 
@@ -370,9 +401,16 @@ settings and pairings. Re-flashing the card does the same.
   using its own encrypted DNS bypasses it.
 - **Country rules** use a public database that is approximate. Global
   services such as public DNS resolvers appear under a single country.
-- **IPv6** is provided by address translation. Your devices get private
-  IPv6 addresses, so for sites that have both, most devices will prefer
-  IPv4; IPv6-only sites work.
+- **IPv6.** Where the internet source gives the router IPv6 addresses
+  for your devices (home lines usually do), devices get addresses from
+  them and use IPv6 as they would behind any home router. Nothing can
+  connect in to them from outside. If there are fewer of those addresses
+  than you have networks, your main network has them first. Everywhere
+  else (a hotel's Wi-Fi, a phone) devices get private IPv6 addresses and
+  the router translates, so for sites that have both, most devices will
+  prefer IPv4; IPv6-only sites work. Translation is also used for what
+  leaves through a VPN, or through another internet source than the one
+  the addresses came from.
 - **USB Wi-Fi adapters** that draw a lot of power may need a 5 A power
   supply, or `usb_max_current_enable=1` in `config.txt` on the card.
 - **A phone on USB charges from the Pi** while it shares its data. With

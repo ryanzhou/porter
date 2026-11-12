@@ -1,8 +1,9 @@
 // porterd is the travel router daemon.
 //
 // The same binary doubles as the hook helper that dhcpcd and dnsmasq call
-// on lease events: invoked under the names porter-dhcp-hook or
-// porter-lease-hook it forwards the event to the running daemon.
+// on lease events, and pppd when a session's addresses come and go:
+// invoked under the names porter-dhcp-hook, porter-lease-hook or
+// porter-ppp-<event> it forwards the event to the running daemon.
 package main
 
 import (
@@ -58,15 +59,24 @@ func releaseURL() string {
 const (
 	dhcpHook  = "porter-dhcp-hook"
 	leaseHook = "porter-lease-hook"
+	// pppd is given one script per event and tells a script nothing
+	// about which event it is run for, so the name has to.
+	pppHook = "porter-ppp-"
 )
 
+// pppEvents are pppd's events that the daemon wants to hear about.
+var pppEvents = []string{"ip-up", "ip-down", "ipv6-up", "ipv6-down"}
+
 func main() {
-	switch filepath.Base(os.Args[0]) {
-	case dhcpHook:
-		hook("dhcpcd")
+	switch name := filepath.Base(os.Args[0]); {
+	case name == dhcpHook:
+		hook("dhcpcd", nil)
 		return
-	case leaseHook:
-		hook("lease")
+	case name == leaseHook:
+		hook("lease", os.Args[1:])
+		return
+	case strings.HasPrefix(name, pppHook):
+		hook("ppp", append([]string{strings.TrimPrefix(name, pppHook)}, os.Args[1:]...))
 		return
 	}
 
@@ -102,7 +112,13 @@ func main() {
 		os.Exit(1)
 	}
 	hooks := map[string]string{}
-	for _, name := range []string{dhcpHook, leaseHook} {
+	pppHooks := map[string]string{}
+	names := []string{dhcpHook, leaseHook}
+	for _, event := range pppEvents {
+		names = append(names, pppHook+event)
+		pppHooks[event] = filepath.Join(*runDir, pppHook+event)
+	}
+	for _, name := range names {
 		link := filepath.Join(*runDir, name)
 		os.Remove(link)
 		if err := os.Symlink(self, link); err != nil {
@@ -124,7 +140,7 @@ func main() {
 	}
 	c, err := core.New(core.Options{
 		DataDir: *dataDir, RunDir: *runDir,
-		DHCPHook: hooks[dhcpHook], LeaseHook: hooks[leaseHook],
+		DHCPHook: hooks[dhcpHook], LeaseHook: hooks[leaseHook], PPPHooks: pppHooks,
 		WGUserspace: *wgImpl, GeoIPPath: *geoPath, Version: version, BuildTime: time.Unix(bt, 0),
 		Update: updater, UpdateURL: releaseURL(), UpdateSettle: 45 * time.Second,
 		MPQUIC: mpquicPrograms(*dataDir), PhoneRecords: phoneRecords(*dataDir),
@@ -158,12 +174,18 @@ func phoneRecords(dataDir string) string {
 	return ""
 }
 
-func hook(kind string) {
-	msg := core.HookMessage{Kind: kind, Args: os.Args[1:], Env: map[string]string{}}
-	if kind == "dhcpcd" {
-		for _, kv := range os.Environ() {
-			k, v, _ := strings.Cut(kv, "=")
+func hook(kind string, args []string) {
+	msg := core.HookMessage{Kind: kind, Args: args, Env: map[string]string{}}
+	for _, kv := range os.Environ() {
+		k, v, _ := strings.Cut(kv, "=")
+		switch kind {
+		case "dhcpcd":
 			if k == "interface" || k == "reason" || strings.HasPrefix(k, "new_") || strings.HasPrefix(k, "nd") {
+				msg.Env[k] = v
+			}
+		case "ppp":
+			// The name servers the provider gave with the session.
+			if k == "DNS1" || k == "DNS2" {
 				msg.Env[k] = v
 			}
 		}
@@ -171,7 +193,7 @@ func hook(kind string) {
 	// The daemon says where it listens through the environment of the
 	// program that calls the hook. The hook's own location is the
 	// fallback, and only works for a caller that starts it by its full
-	// path: dhcpcd does, dnsmasq uses the bare name.
+	// path: dhcpcd and pppd do, dnsmasq uses the bare name.
 	sock := os.Getenv(core.HookSocketEnv)
 	if sock == "" {
 		sock = core.HookSocket(filepath.Dir(os.Args[0]))

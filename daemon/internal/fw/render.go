@@ -26,6 +26,14 @@ func Fingerprint(p *Plan) string { return render(p, false) }
 func ClassKey(p *Plan) string {
 	q := *p
 	q.WANIfs, q.SSH, q.Control, q.Intercept, q.Learned = nil, false, false, false, nil
+	// Nor does a delegated prefix arriving or changing: the connections
+	// there are go on as they were set up, and nothing was under way to
+	// addresses that did not exist.
+	q.Delegated, q.WANMTU = nil, nil
+	q.LANs = append([]PlanLAN(nil), p.LANs...)
+	for i := range q.LANs {
+		q.LANs[i].Global = netip.Prefix{}
+	}
 	return render(&q, false)
 }
 
@@ -50,6 +58,9 @@ func render(p *Plan, full bool) string {
 		nets4 = append(nets4, l.Net4)
 		if l.Net6.IsValid() {
 			nets6 = append(nets6, l.Net6)
+		}
+		if l.Global.IsValid() {
+			nets6 = append(nets6, l.Global)
 		}
 	}
 	several := len(p.LANs) > 1
@@ -154,7 +165,7 @@ func render(p *Plan, full bool) string {
 	}
 	if len(p.DeviceMarks) > 0 {
 		var kv []string
-		for _, mac := range sortedKeys(p.DeviceMarks) {
+		for _, mac := range sortedNames(p.DeviceMarks) {
 			kv = append(kv, fmt.Sprintf("%s : 0x%x", mac, p.DeviceMarks[mac]))
 		}
 		w("\t\tmeta mark set ether saddr map { %s } ct mark set meta mark accept", strings.Join(kv, ", "))
@@ -209,6 +220,13 @@ func render(p *Plan, full bool) string {
 	w("\t}")
 	w("\tchain srcnat {")
 	w("\t\ttype nat hook postrouting priority srcnat; policy accept;")
+	// An address out of a prefix an uplink's network has delegated is
+	// known to that network and goes out by that uplink as it is. By any
+	// other way out it is as foreign as a private one: one provider does
+	// not carry another's addresses, nor does a tunnel.
+	for _, ifname := range sortedNames(p.Delegated) {
+		w("\t\toifname %q ip6 saddr %s accept", ifname, p.Delegated[ifname].Masked())
+	}
 	// NAT44 and NAT66 alike: the LAN's private and ULA addresses never
 	// leave the router.
 	w("\t\toifname @wan_ifs masquerade")
@@ -251,7 +269,17 @@ func render(p *Plan, full bool) string {
 		w("\t\tiifname %q meta nfproto ipv4 tcp flags syn / syn,rst tcp option maxseg size > %d tcp option maxseg size set %d", v.If, v.MTU-40, v.MTU-40)
 		w("\t\tiifname %q meta nfproto ipv6 tcp flags syn / syn,rst tcp option maxseg size > %d tcp option maxseg size set %d", v.If, v.MTU-60, v.MTU-60)
 	}
+	// A connection's two ends each say how large a segment they take,
+	// and neither knows about the narrowest stretch in between. Outwards
+	// that is corrected from the route; a segment size coming in by an
+	// uplink that carries less than Ethernet does (PPPoE takes 8 bytes of
+	// every packet) has to be cut down by number.
 	w("\t\toifname @wan_ifs tcp flags syn / syn,rst tcp option maxseg size set rt mtu")
+	for _, ifname := range sortedNames(p.WANMTU) {
+		mtu := p.WANMTU[ifname]
+		w("\t\tiifname %q meta nfproto ipv4 tcp flags syn / syn,rst tcp option maxseg size > %d tcp option maxseg size set %d", ifname, mtu-40, mtu-40)
+		w("\t\tiifname %q meta nfproto ipv6 tcp flags syn / syn,rst tcp option maxseg size > %d tcp option maxseg size set %d", ifname, mtu-60, mtu-60)
+	}
 	w("\t\tiifname @lan_ifs update @acct_up { ether saddr }")
 	w("\t\toifname @lan_ifs meta nfproto ipv4 update @acct_down4 { ip daddr }")
 	w("\t\toifname @lan_ifs meta nfproto ipv6 update @acct_down6 { ip6 daddr }")
@@ -259,6 +287,12 @@ func render(p *Plan, full bool) string {
 		w("\t\tiifname @lan_ifs oifname @lan_ifs jump lan_lan")
 	}
 	w("\t\tiifname @lan_ifs jump lan_out")
+	// Nothing else is forwarded but what belongs to a connection made
+	// from inside: with a delegated prefix devices have addresses the
+	// whole internet can send to, and what arrives for them unasked ends
+	// here, at the chain's policy. The ICMPv6 that IPv6 cannot do without
+	// on the way (packet too big, unreachable, time exceeded) is about a
+	// connection that exists and so counts as related to it.
 	w("\t\tct state established,related accept")
 	w("\t}")
 
@@ -400,7 +434,7 @@ func sorted(s []string) []string {
 	return out
 }
 
-func sortedKeys(m map[string]uint32) []string {
+func sortedNames[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

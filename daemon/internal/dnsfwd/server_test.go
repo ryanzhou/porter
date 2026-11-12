@@ -125,7 +125,7 @@ func TestForwarderPaths(t *testing.T) {
 		Hosts:        map[string][]netip.Addr{"porter.lan": {netip.MustParseAddr("10.83.0.1")}},
 		Reverse:      map[netip.Addr]string{netip.MustParseAddr("10.83.0.1"): "porter.lan"},
 		Blocked:      NewSuffixSet([]string{"blocked.example"}),
-		Rules:        RulesFrom(c),
+		Rules:        RulesFrom(c, nil),
 		DeviceRoute:  map[string]string{"02:00:00:00:00:02": "vpn:home", "02:00:00:00:00:03": "block"},
 		Default:      config.ActDirect,
 		PortalDevs:   map[string]bool{"02:00:00:00:00:09": true},
@@ -247,6 +247,36 @@ func TestForwarderPaths(t *testing.T) {
 	p2.Paused = map[string]bool{"02:00:00:00:00:09": true}
 	if pt := p2.decide("02:00:00:00:00:09", netip.Addr{}, "x.example"); pt.kind != "refuse" {
 		t.Errorf("paused sign-in device: %+v", pt)
+	}
+
+	// A network's devices are known by the addresses they have out of a
+	// delegated prefix as well as by their private ones: its route, and a
+	// rule for it, apply to a lookup from either.
+	g := config.Default()
+	g.Networks = append(g.Networks, config.Network{ID: "guest", Name: "Guest", Address: "10.84.0.1/24", ULAPrefix: "fd00:0:0:84::/64", Route: config.ActBlock})
+	g.Policy.Rules = []config.Rule{{ID: "n1", Enabled: true, Src: config.Src{Networks: []string{"lan"}}, Dst: config.Dst{Domains: []string{"only.example"}}, Action: config.ActBlock}}
+	global := map[string]netip.Prefix{"lan": netip.MustParsePrefix("2001:db8:1000:3::1/64"), "guest": netip.MustParsePrefix("2001:db8:1000:a::1/64")}
+	for _, tc := range []struct {
+		global     map[string]netip.Prefix
+		from, name string
+		want       string
+	}{
+		// The guest network's route is "block", which refuses lookups.
+		{global, "10.84.0.77", "x.example", "refuse"},
+		{global, "fd00:0:0:84::77", "x.example", "refuse"},
+		{global, "2001:db8:1000:a::77", "x.example", "refuse"},
+		{global, "2001:db8:1000:a::77", "www.only.example", "refuse"},
+		// The rule is for the main network.
+		{global, "2001:db8:1000:3::77", "x.example", "direct"},
+		{global, "2001:db8:1000:3::77", "www.only.example", "block"},
+		// Not told about the prefixes, the forwarder cannot place them.
+		{nil, "2001:db8:1000:a::77", "x.example", "direct"},
+		{nil, "2001:db8:1000:3::77", "www.only.example", "direct"},
+	} {
+		p3 := &Policy{Rules: RulesFrom(g, tc.global), NetRoute: NetRoutesFrom(g, tc.global), Default: config.ActDirect}
+		if pt := p3.decide("", netip.MustParseAddr(tc.from), tc.name); pt.kind != tc.want {
+			t.Errorf("%s asked from %s (delegated prefixes known: %v): %s, want %s", tc.name, tc.from, tc.global != nil, pt.kind, tc.want)
+		}
 	}
 
 	// Query log has recorded paths.

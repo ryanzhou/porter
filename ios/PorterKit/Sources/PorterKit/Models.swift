@@ -73,9 +73,29 @@ public struct EthernetPort: Codable, Equatable, Identifiable {
     /// How the port gets its addresses as an uplink; nil from a router
     /// too old to say, which means automatic.
     public var ip: IPSetup?
+    /// The VLAN ID the provider delivers the internet under, 1 to 4094,
+    /// while the port is an uplink; 0 or nil for none.
+    public var vlan: Int?
+    /// The provider's sign-in, in place of automatic or manual IPv4
+    /// addresses; nil reads as not signing in.
+    public var pppoe: PPPoESetup?
     /// The network a local port belongs to.
     public var network: String
     public var id: String { name }
+}
+
+/// A provider's PPPoE sign-in for a wired uplink. The router keeps the
+/// user name and password only while it is enabled.
+public struct PPPoESetup: Codable, Equatable {
+    public var enabled: Bool
+    public var username: String
+    public var password: String
+
+    public init(enabled: Bool = false, username: String = "", password: String = "") {
+        self.enabled = enabled
+        self.username = username
+        self.password = password
+    }
 }
 
 /// One address family of an uplink's address setup.
@@ -530,7 +550,13 @@ public struct UplinkStatus: Codable, Equatable, Identifiable {
     public var gateway: String?
     public var ipv6: [String]?
     public var hasV6: Bool
+    /// The IPv6 prefix the network has delegated to the router for its
+    /// own networks, like 2001:db8:1000::/56; nil when it has none.
+    public var prefix: String?
     public var dns: [String]?
+    /// For a wired uplink that signs in to its provider (PPPoE), how
+    /// that stands: "signing_in", "wrong_login", "no_answer" or "up".
+    public var pppoe: String?
     public var portalUrl: String?
     public var captiveApi: String?
     public var mac: String?
@@ -538,7 +564,7 @@ public struct UplinkStatus: Codable, Equatable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case iface = "if"
-        case kind, key, label, metric, rank, carrier, internet, ipv4, gateway, ipv6, hasV6, dns, portalUrl, captiveApi, mac
+        case kind, key, label, metric, rank, carrier, internet, ipv4, gateway, ipv6, hasV6, prefix, dns, pppoe, portalUrl, captiveApi, mac
     }
 }
 
@@ -582,6 +608,10 @@ public struct LANStatus: Codable, Equatable {
     public var clients: Int
     /// Devices online in each network, by network id.
     public var networks: [String: Int]
+    /// The /64 each network has of a prefix delegated to the router, by
+    /// network id. A network that is not in it has its private prefix
+    /// only; nil from a router too old to ask for one.
+    public var prefixes: [String: String]?
 }
 
 public struct VPNStatus: Codable, Equatable, Identifiable {
