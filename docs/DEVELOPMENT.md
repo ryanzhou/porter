@@ -8,7 +8,7 @@ the project's GitHub releases, and only when asked for from the app.
 
 | Part | Where | What |
 |------|-------|------|
-| Router daemon | [`daemon/`](../daemon) | `porterd` (Go): radios, uplinks, LAN, firewall, policy routing, DNS, VPN, control over BLE and over its own networks |
+| Router daemon | [`daemon/`](../daemon) | `porterd` (Go): radios, uplinks, LAN, firewall, policy routing, DNS, VPN, what comes in from outside, control over BLE and over its own networks |
 | OS image | [`image/`](../image) | Build script and root file system overlay for the SD card image |
 | iOS app | [`ios/`](../ios) | SwiftUI app and `PorterKit`, the Swift protocol implementation |
 | Protocol | [`PROTOCOL.md`](PROTOCOL.md) | The control protocol both sides implement |
@@ -23,7 +23,7 @@ the project's GitHub releases, and only when asked for from the app.
                                                     ├─ dnsmasq          (LAN DHCP and router advertisements)
                                                     ├─ nftables         (firewall, NAT44/NAT66, classification)
                                                     ├─ policy routing   (one table per VPN profile)
-                                                    ├─ WireGuard        (kernel)
+                                                    ├─ WireGuard        (kernel: profiles, and the router's own server)
                                                     ├─ DNS forwarder    (built in)
                                                     └─ mDNS relay       (built in)
 ```
@@ -250,6 +250,80 @@ every subsystem against it and against what the network is doing.
   listener's own checks do not go through the control loop, which can
   be busy for seconds while a radio restarts: whether a link works must
   not depend on whether the router has time.
+- **Coming in from outside.** By default the input and forward chains
+  let nothing in from an uplink but answers. Three things under
+  `inbound` in the configuration change that, each as narrowly as it
+  can.
+  *The WireGuard server* (`vpn.Server`, interface `wgsrv`) is the other
+  end of what a VPN profile is: devices of the owner's connect to it.
+  Its range is treated as one more of the router's networks, one that
+  is not isolated: the interface is in `lan_ifs` and its prefixes in
+  `lan_nets4/6`, so what comes out of it is classified like a device's
+  at home (rules for everyone and rules by address apply, then
+  `policy.default`; rules by device or by network cannot, a peer being
+  on no bridge and having no hardware address), asks the forwarder like
+  one (which listens on the router's address in the range, the DNS
+  server every peer is told), and reaches the other networks through
+  `lan_lan`, an isolated one included. The app's port is opened to it,
+  and the router's address in the range is among `control.addrs`; SSH
+  is not. Its own UDP port is accepted from uplinks, and from inside
+  for a phone that comes home with the connection up. The server's own
+  packets carry no mark, so like everything the router sends for itself
+  they follow the main table and the uplink override and can never be
+  sent into a profile's tunnel, whose table only marked packets reach;
+  that is why it sets no fwmark. A peer that is switched off is not
+  configured into the interface at all. The server's key is made in
+  `config` (`Normalize`, stdlib X25519) and stored like a profile's; a
+  peer's key pair is made in `server.peer_add`, the public half stored,
+  the private half put into the configuration text that is the call's
+  answer and kept nowhere. The range is chosen from `ServerSubnets`,
+  apart from the list networks are given theirs from, and never moves
+  (the peers' configurations carry its addresses): a network that has
+  to renumber avoids it.
+  *A forwarded port* is, over IPv4, a `dnat` rule in `dstnat` for what
+  arrives on an uplink for the router itself, and a second for what
+  arrives from inside for any address of the router's except its own in
+  the networks: the public address used at home ("hairpin"). Such a
+  connection is masqueraded on its way back in, or the device would
+  answer its neighbour directly, and passes `lan_lan` whatever the
+  networks are to each other, the port being open to the whole internet
+  anyway. (A device cannot reach itself this way: the kernel does not
+  route a packet whose two addresses are the same.) What a device
+  answers to a connection from outside comes in from a bridge like
+  anything it sends, but must not be classified: prerouting returns on
+  `ct direction reply`, and the forward chain lets it out by an uplink.
+  It leaves by the uplink in use, like the router's own packets; a
+  connection that came in by another uplink does not get its answers.
+  A forward names its device by hardware address and is sent to the
+  device's fixed address, which `config` insists on; `core.pinForwards`
+  gives a device without one the address it has, when a forward for it
+  is written. Over IPv6 nothing is translated: the forward chain accepts
+  the device's port at the addresses the device table has seen it with
+  inside a network's /64 of a delegated prefix (`Runtime.Addrs6`), which
+  follow the device and the prefix by themselves. Those addresses are
+  left out of `ClassKey`; the forwards are in it, so that taking one
+  away flushes connection tracking and ends what came in by it.
+  *Dynamic DNS* (`internal/ddns`) tells one of four kinds of provider
+  the router's public address when it or the settings change, once a
+  day otherwise, and after a failure with pauses that double from a
+  minute to an hour; a provider that refuses outright (a wrong password)
+  is not asked again for a day, or until something is changed. Its
+  requests are the router's own and so leave by the uplink in use.
+  Errors are put in words for the status and never carry the URL, which
+  for most providers has the secret in it.
+  *Whether any of it can work* is the question `inbound.reach` answers
+  (`ddns.Classify`). While anything is switched on, the router asks
+  `inbound.check_url` (by default a page of Cloudflare's, whom the speed
+  test and the fallback resolver talk to already) over IPv4 which
+  address its requests come from:
+  when the uplink or its address changes, and every ten minutes. The
+  same address as the uplink's own means reachable; another means
+  another router in front (own address private) or the provider's
+  translation. Without an answer the address is judged by its range:
+  private, 100.64.0.0/10, or public. What a peer's configuration names
+  as its endpoint follows from that: the dynamic DNS name, else the
+  public IPv4 address, else a public IPv6 address, else nothing, and
+  then no device is made.
 - **Firewall replacement** is atomic, and the ruleset is left in place
   when the daemon stops, so a restarting daemon never leaves the router
   open.
@@ -336,7 +410,8 @@ doing anything. Two cases need care:
   `migrations` there. Without that step the new version would reject
   the stored settings and start in the factory state. A field that is
   only new needs no step (`Normalize` fills in its default), but the
-  number is raised for it all the same, as it was for format 3: the app
+  number is raised for it all the same, as it was for format 3 (not
+  again within format 3, which no release has had yet): the app
   writes the whole document back, an app that does not know the field
   would drop it, and the number is how that app finds out that it must
   not write.
@@ -381,7 +456,9 @@ cd daemon && go test ./...
 ```
 
 The end-to-end tests run the real daemon in network namespaces. They
-need root and `ip`, `nft`, `dnsmasq`, `dhcpcd` and `wg`; for PPPoE also
+need root and `ip`, `nft`, `dnsmasq`, `dhcpcd` and `wg` (with the
+kernel's WireGuard, or a userspace one named by `PORTER_WG_USERSPACE`);
+for PPPoE also
 `pppd` and `pppoe-server`, and a kernel with VLANs, PPPoE and IPv6 for
 the tests of those (which skip themselves, saying why, where it has
 none; the relay for multicast DNS is tested over IPv4 on any kernel):
@@ -413,7 +490,15 @@ CI runs the end-to-end tests this way.
   switches it off); a second network (its own addresses, isolation, a
   route and a rule of its own, and its removal); a second uplink
   standing in for a phone (the order of uplinks, and falling back when
-  the first stops reaching the internet); and the ways a home connection
+  the first stops reaching the internet); coming in from outside
+  (`inbound_test.go`: a namespace beyond the upstream network brings up
+  WireGuard from the configuration `server.peer_add` gave it and
+  reaches a device at home, the router's DNS, the internet through the
+  router and the app's port, under a rule by address, until it is
+  switched off; and a forwarded port, from the upstream network and
+  from inside, to and from a network that is kept apart, restricted to
+  some addresses, switched off, and over IPv6 at a device's delegated
+  address); and the ways a home connection
   arrives (`home_test.go`): the internet under a VLAN tag; PPPoE against
   a real `pppoe-server` (nobody answering, a wrong password, a session,
   the server restarting under it); and a prefix delegated by a DHCPv6
@@ -474,7 +559,7 @@ project file.
 sample router and never touches Bluetooth. `-demoScreen <name>` opens one
 screen directly: a tab name (`overview`, `internet`, `devices`, `vpn`,
 `settings`) or `traffic`, `flows`, `speedtest`, `device`, `adblock`,
-`networks`, `software`, `setup`, `connect`, `share`. The *iOS* workflow
+`networks`, `outside`, `software`, `setup`, `connect`, `share`. The *iOS* workflow
 uses this to publish screenshots as an artifact.
 
 **Two ways of changing things.** Most controls apply at once: the app

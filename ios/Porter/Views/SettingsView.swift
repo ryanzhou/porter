@@ -39,6 +39,7 @@ private struct RouterSettingsSection: View {
             SettingsLink(symbol: "wifi", title: "Wi-Fi & networks", value: model.config?.wifi.first?.ssid ?? "") { NetworkSetupPage() }
             SettingsLink(symbol: "hand.raised.fill", title: "Ad blocking", value: onOff(model.config?.dns.adblock.enabled)) { AdblockPage() }
             SettingsLink(symbol: "server.rack", title: "DNS") { DNSPage() }
+            SettingsLink(symbol: "house.fill", title: "From outside", value: inboundSummary(model.config)) { InboundPage() }
         }
         Section {
             SettingsLink(symbol: "wifi.router.fill", title: "Router name", value: model.config?.system.name ?? "") { RouterNamePage() }

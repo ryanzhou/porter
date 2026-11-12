@@ -264,6 +264,111 @@ under Settings are asked through the tunnel, or public ones (1.1.1.1,
 While a VPN is disconnected, lookups go where the traffic goes: nowhere with
 the kill switch on, directly without it.
 
+## Coming in from outside
+
+Nothing on the internet can reach the router or your devices unless you
+say so. **Settings → From outside** is where you say so, in three ways.
+(The **VPN** tab is the other direction: there the router connects *out*
+to a VPN.)
+
+### Reaching home while you are away
+
+Turn on **Enabled** under **Reach home**, then **Add a device** for each
+phone or computer of yours that should get in. Give it a name and choose
+what it sends through home:
+
+- **Everything:** while connected, all the device does online goes
+  through the router and follows the same routes and rules as at home,
+  ad blocking included. This is the one for hotel and café Wi-Fi.
+- **Only your networks:** the device reaches what is at home (a NAS, a
+  printer, a camera) and uses its own connection for everything else.
+
+The app then shows the device's configuration as a QR code. On the
+device, open the [WireGuard app](https://www.wireguard.com/install/),
+tap the plus and choose **Create from QR code**; for a computer, use
+**Copy** or **Share** and import the file. That screen is the only time
+the configuration is shown: the router does not keep the device's key.
+If it is lost, remove the device and add it again.
+
+Once connected, the device is on your networks as it is at home: it
+reaches your other devices (those on a network you keep apart as well),
+finds them by name, and the Porter app controls the router from wherever
+you are. Each device in the list shows whether it is connected, from
+where, and how much it has moved. Switching a device off cuts it off at
+once and keeps its place; removing it is for good.
+
+Rules by device or by network do not apply to devices that come in this
+way, since they are on none of your networks; **Everything else** and
+rules for everyone do. To treat them differently, make a rule for the
+address range shown on a device's page (it starts like 10.89.0).
+
+### Forwarding a port
+
+To let the internet reach one thing at home (a game server, a camera):
+**Forward a port**, give it a name, choose TCP, UDP or both, the port or
+range of ports people connect to, and the device it goes to. **Port on
+the device** is for when the device listens on another port than the one
+you give out; a range keeps its numbers. **Only from** closes the port
+to everyone but the addresses you list.
+
+- The device keeps a fixed address for as long as a port is forwarded to
+  it. If it had none, the address it has now becomes its fixed one.
+- The same address and port work from inside your networks too, so one
+  bookmark does for home and away. (One exception: a device does not
+  reach *itself* this way.)
+- With an IPv6 connection from your provider, the port is also opened at
+  the device's own IPv6 address, where nothing is translated: there it
+  is the port the device listens on.
+- A forwarded port is open to the whole internet. Forward what you mean
+  to publish, keep the software behind it up to date, and prefer
+  **Reach home** for anything only you use.
+
+### A name instead of an address
+
+Most home connections get a new address now and then. **Dynamic DNS**
+keeps a name of yours pointing at the current one; devices you add
+under **Reach home** are then given the name to connect to, and keep
+working when the address changes. Choose your provider:
+
+- **DuckDNS:** the name (`example.duckdns.org`) and the token from your
+  DuckDNS page.
+- **Cloudflare:** the full name of the record (`home.example.com`) and
+  an API token that may edit the DNS records of that domain.
+- **Another provider:** most others take updates the way DynDNS does.
+  Enter the name, the update server your provider's instructions give,
+  and your user name and password there.
+- **An address to fetch:** for anything else, a web address the router
+  fetches with `{ip}` replaced by its IPv4 address and `{ip6}` by its
+  IPv6 address.
+
+The page shows when the name was last updated and with which address,
+or what the provider answered if it refused. **Include IPv6** adds the
+router's IPv6 address to the name.
+
+### "Not reachable from outside"
+
+The top of **From outside** says where the router is reached, or why it
+is not. The usual reasons:
+
+- **It is behind another router.** The box from your provider has the
+  public address and Porter is one of its devices, as it also is on a
+  hotel's or a friend's network. On your own line, either set that box
+  to *bridge mode* (it then hands the public address to Porter), or have
+  it forward the ports to Porter: UDP 51820 for **Reach home**, plus
+  whatever you forward. The page names the address to forward to. On
+  somebody else's network there is nothing to be done.
+- **The provider shares one address among customers** (carrier-grade
+  NAT, usual on mobile connections and some fibre). Nothing arrives over
+  IPv4 whatever you set up. Many providers hand out a public address of
+  your own when asked. If your connection has IPv6, the router can still
+  be reached that way: set up dynamic DNS with **Include IPv6** on, and
+  make sure the place you connect from has IPv6 too.
+- **The router is not online.**
+
+While any of this is switched on, the router asks a Cloudflare page now
+and then which address the internet sees it at; that is how it tells
+these cases apart.
+
 ## Everyday things
 
 - **Devices.** See what is connected, rename it, **pause** its internet,
@@ -408,6 +513,14 @@ porterctl call config.set "{\"config\": $(cat /tmp/c.json)}"
 
 Delete the `porter-debug` file when you are done.
 
+**A device you added cannot connect from outside.** Look at the top of
+Settings → From outside first: if it says the router is behind another
+router, or that your provider shares one address, see ["Not reachable
+from outside"](#not-reachable-from-outside). If the address changed
+since the device was added and there is no dynamic DNS name, remove the
+device and add it again, or better, set up a name first. A device added
+before you changed the port has to be added again as well.
+
 **Starting over.** Settings → Reset erases all
 settings and pairings. Re-flashing the card does the same.
 
@@ -427,7 +540,11 @@ settings and pairings. Re-flashing the card does the same.
 - **What the router contacts by itself:** a time server; one small page
   on `captive.apple.com` to detect sign-in pages (the same check an
   iPhone makes); your chosen ad block lists, daily, when ad blocking is
-  on; and a country database from db-ip.com, monthly. A speed test
+  on; a country database from db-ip.com, monthly; and, only while
+  something under Settings → From outside is switched on, a page at
+  cloudflare.com that tells it its public address (every ten minutes)
+  and your dynamic DNS provider (when the address changes, and once a
+  day). A speed test
   contacts its test server only when you run one, and the router asks
   github.com for a newer version only when you open Settings → Software. Nothing reports to
   the authors of this project; there is nowhere for it to report to.
@@ -439,6 +556,10 @@ settings and pairings. Re-flashing the card does the same.
   There are no passwords to log in to the router itself; SSH is off
   unless you enable it in Settings, and then only from your own network
   with your key.
+  From the internet nothing is let in but what you set up under
+  Settings → From outside: the port your own devices reach home
+  through, which answers nobody whose key the router does not know, and
+  the ports you forward.
 - **Ad blocking** works by refusing to look up ad domains. It cannot
   remove ads served from the same place as the content, and a device
   using its own encrypted DNS bypasses it.

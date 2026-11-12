@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
 )
 
@@ -30,6 +31,13 @@ func ClassKey(p *Plan) string {
 	// there are go on as they were set up, and nothing was under way to
 	// addresses that did not exist.
 	q.Delegated, q.WANMTU = nil, nil
+	// Nor the IPv6 addresses a forwarded port is open to, which come and
+	// go with the device. A forward itself does decide: one that is taken
+	// away has to end the connections that came in by it.
+	q.Forwards = append([]PlanForward(nil), p.Forwards...)
+	for i := range q.Forwards {
+		q.Forwards[i].To6 = nil
+	}
 	q.LANs = append([]PlanLAN(nil), p.LANs...)
 	for i := range q.LANs {
 		q.LANs[i].Global = netip.Prefix{}
@@ -63,7 +71,25 @@ func render(p *Plan, full bool) string {
 			nets6 = append(nets6, l.Global)
 		}
 	}
-	several := len(p.LANs) > 1
+	// The app may come in wherever SSH may, and through the WireGuard
+	// server: only paired phones get anywhere with it.
+	control := open
+	if s := p.Server; s != nil {
+		// The server's range is one more of the router's networks to
+		// everything below: its devices are classified, asked about DNS
+		// and let through to the other networks like those at home.
+		lanIfs = append(lanIfs, s.If)
+		control = append(append([]string(nil), open...), s.If)
+		nets4 = append(nets4, s.Net4)
+		if s.Net6.IsValid() {
+			nets6 = append(nets6, s.Net6)
+		}
+	}
+	forwards := len(p.Forwards) > 0
+	// several: there is traffic between the router's own networks to
+	// decide about. A forwarded port makes for some even with one network:
+	// a device at home that uses the public address is sent back inside.
+	several := len(p.LANs) > 1 || p.Server != nil || forwards
 	w("\tset lan_ifs { type ifname; %s}", elems(quoteAll(sorted(lanIfs))))
 	if several {
 		w("\tset lan_nets4 { type ipv4_addr; flags interval; %s}", elems(prefixes(nets4)))
@@ -129,6 +155,12 @@ func render(p *Plan, full bool) string {
 		// hook decides about that.
 		w("\t\tip daddr @lan_nets4 return")
 		w("\t\tip6 daddr @lan_nets6 return")
+	}
+	if forwards {
+		// What a device answers to a connection that came in from outside
+		// is not a connection of its own to classify: it goes back out
+		// the way the router itself would send it, by the uplink in use.
+		w("\t\tct direction reply return")
 	}
 	w("\t\tct mark != 0 meta mark set ct mark return")
 	w("\t\tjump classify")
@@ -217,6 +249,29 @@ func render(p *Plan, full bool) string {
 		// whichever server the client asked.
 		w("\t\tiifname @lan_ifs meta l4proto { tcp, udp } th dport 53 redirect to :53")
 	}
+	// Forwarded ports: what arrives for the router itself on one of them
+	// is sent on to the device. From an uplink, and from inside as well,
+	// where a device has used the router's public address or name; not
+	// where it meant the router's address in its own network.
+	var own4 []string
+	for _, l := range p.LANs {
+		own4 = append(own4, l.Addr4.String())
+	}
+	if p.Server != nil {
+		own4 = append(own4, p.Server.Addr4.String())
+	}
+	for _, f := range p.Forwards {
+		to := "dnat ip to " + f.To4.String()
+		if f.Inside != f.Outside {
+			to += ":" + ports(f.Inside)
+		}
+		if !f.Restricted {
+			w("\t\tiifname @wan_ifs meta nfproto ipv4 fib daddr type local %s%s", l4ports(f.Proto, f.Outside), to)
+		} else if len(f.From4) > 0 {
+			w("\t\tiifname @wan_ifs fib daddr type local ip saddr { %s } %s%s", strings.Join(prefixes(f.From4), ", "), l4ports(f.Proto, f.Outside), to)
+		}
+		w("\t\tiifname @lan_ifs fib daddr type local ip daddr != { %s } %s%s", strings.Join(sorted(own4), ", "), l4ports(f.Proto, f.Outside), to)
+	}
 	w("\t}")
 	w("\tchain srcnat {")
 	w("\t\ttype nat hook postrouting priority srcnat; policy accept;")
@@ -226,6 +281,12 @@ func render(p *Plan, full bool) string {
 	// not carry another's addresses, nor does a tunnel.
 	for _, ifname := range sortedNames(p.Delegated) {
 		w("\t\toifname %q ip6 saddr %s accept", ifname, p.Delegated[ifname].Masked())
+	}
+	if forwards {
+		// A connection sent back inside by a forwarded port has to return
+		// through the router, or the device that made it would be
+		// answered from an address it never spoke to.
+		w("\t\tct status dnat ip saddr @lan_nets4 ip daddr @lan_nets4 masquerade")
 	}
 	// NAT44 and NAT66 alike: the LAN's private and ULA addresses never
 	// leave the router.
@@ -249,11 +310,12 @@ func render(p *Plan, full bool) string {
 		// Not from an isolated network: that is where guests are.
 		w("\t\tiifname { %s } tcp dport 22 accept", strings.Join(quoteAll(sorted(open)), ", "))
 	}
-	if p.Control && len(open) > 0 {
+	if p.Control && len(control) > 0 {
 		// The app, from a phone on one of the router's networks. Like
 		// SSH, not from an isolated one, and never from an uplink: no
-		// rule lets anything in from there but replies and DHCP.
-		w("\t\tiifname { %s } tcp dport %d accept", strings.Join(quoteAll(sorted(open)), ", "), proto.ControlPort)
+		// rule lets anything in from there but replies, DHCP and the
+		// WireGuard server's own port.
+		w("\t\tiifname { %s } tcp dport %d accept", strings.Join(quoteAll(sorted(control)), ", "), proto.ControlPort)
 	}
 	if len(p.MDNS) > 0 {
 		// Multicast DNS, to be repeated on the other networks it is
@@ -264,6 +326,13 @@ func render(p *Plan, full bool) string {
 		w("\t\tiifname { %s } ip6 daddr ff02::fb udp dport 5353 accept", mdns)
 	}
 	w("\t\tiifname @wan_ifs udp dport { 68, 546 } accept")
+	if s := p.Server; s != nil {
+		// The WireGuard server, which answers nobody whose key it does
+		// not know. From inside as well: a phone that comes home keeps
+		// the connection it has to the router's public address.
+		w("\t\tiifname @wan_ifs udp dport %d accept", s.Port)
+		w("\t\tiifname @lan_ifs udp dport %d accept", s.Port)
+	}
 	w("\t}")
 
 	w("\tchain forward {")
@@ -276,6 +345,11 @@ func render(p *Plan, full bool) string {
 		w("\t\toifname %q tcp flags syn / syn,rst tcp option maxseg size set rt mtu", v.If)
 		w("\t\tiifname %q meta nfproto ipv4 tcp flags syn / syn,rst tcp option maxseg size > %d tcp option maxseg size set %d", v.If, v.MTU-40, v.MTU-40)
 		w("\t\tiifname %q meta nfproto ipv6 tcp flags syn / syn,rst tcp option maxseg size > %d tcp option maxseg size set %d", v.If, v.MTU-60, v.MTU-60)
+	}
+	if s := p.Server; s != nil {
+		w("\t\toifname %q tcp flags syn / syn,rst tcp option maxseg size set rt mtu", s.If)
+		w("\t\tiifname %q meta nfproto ipv4 tcp flags syn / syn,rst tcp option maxseg size > %d tcp option maxseg size set %d", s.If, ServerMTU-40, ServerMTU-40)
+		w("\t\tiifname %q meta nfproto ipv6 tcp flags syn / syn,rst tcp option maxseg size > %d tcp option maxseg size set %d", s.If, ServerMTU-60, ServerMTU-60)
 	}
 	// A connection's two ends each say how large a segment they take,
 	// and neither knows about the narrowest stretch in between. Outwards
@@ -294,13 +368,22 @@ func render(p *Plan, full bool) string {
 	if several {
 		w("\t\tiifname @lan_ifs oifname @lan_ifs jump lan_lan")
 	}
+	if forwards {
+		// A device's answers to what a forwarded port let in. They were
+		// not classified (see prerouting) and leave by an uplink only.
+		w("\t\tiifname @lan_ifs ct direction reply oifname @wan_ifs accept")
+	}
 	w("\t\tiifname @lan_ifs jump lan_out")
+	if forwards {
+		w("\t\tiifname @wan_ifs jump forwarded")
+	}
 	// Nothing else is forwarded but what belongs to a connection made
-	// from inside: with a delegated prefix devices have addresses the
-	// whole internet can send to, and what arrives for them unasked ends
-	// here, at the chain's policy. The ICMPv6 that IPv6 cannot do without
-	// on the way (packet too big, unreachable, time exceeded) is about a
-	// connection that exists and so counts as related to it.
+	// from inside, or to one a forwarded port let in: with a delegated
+	// prefix devices have addresses the whole internet can send to, and
+	// what arrives for them unasked ends here, at the chain's policy. The
+	// ICMPv6 that IPv6 cannot do without on the way (packet too big,
+	// unreachable, time exceeded) is about a connection that exists and
+	// so counts as related to it.
 	w("\t\tct state established,related accept")
 	w("\t}")
 
@@ -334,10 +417,40 @@ func render(p *Plan, full bool) string {
 		w("\tchain lan_lan {")
 		w("\t\tether saddr @paused jump refuse")
 		w("\t\tct state established,related accept")
+		if forwards {
+			// What a forwarded port sent back inside: open to the whole
+			// internet, and so to a network that is kept apart as well.
+			w("\t\tct status dnat accept")
+		}
 		if len(isolated) > 0 {
 			w("\t\tiifname { %s } jump refuse", strings.Join(quoteAll(sorted(isolated)), ", "))
 		}
 		w("\t\taccept")
+		w("\t}")
+	}
+
+	if forwards {
+		// What an uplink brings for a forwarded port. Over IPv4 that is
+		// what the rules in dstnat translated, and nothing else there is
+		// translated on its way in. Over IPv6 the device is addressed
+		// itself, at the addresses it has out of a delegated prefix, on
+		// the port it listens on.
+		w("\tchain forwarded {")
+		w("\t\tct status dnat accept")
+		for _, f := range p.Forwards {
+			if len(f.To6) == 0 || (f.Restricted && len(f.From6) == 0) {
+				continue
+			}
+			from := ""
+			if f.Restricted {
+				from = "ip6 saddr { " + strings.Join(prefixes(f.From6), ", ") + " } "
+			}
+			to := make([]string, len(f.To6))
+			for i, a := range f.To6 {
+				to[i] = a.String()
+			}
+			w("\t\tip6 daddr { %s } %s%saccept", strings.Join(to, ", "), from, l4ports(f.Proto, f.Inside))
+		}
 		w("\t}")
 	}
 
@@ -395,6 +508,22 @@ func l4match(r PlanRule) string {
 		s += "th dport { " + strings.Join(ps, ", ") + " } "
 	}
 	return s
+}
+
+// ports writes a port or a range of ports.
+func ports(r config.PortRange) string {
+	if r.Lo == r.Hi {
+		return fmt.Sprint(r.Lo)
+	}
+	return fmt.Sprintf("%d-%d", r.Lo, r.Hi)
+}
+
+// l4ports matches the destination ports of a forwarded port.
+func l4ports(proto string, r config.PortRange) string {
+	if proto == config.ProtoBoth {
+		return "meta l4proto { tcp, udp } th dport " + ports(r) + " "
+	}
+	return proto + " dport " + ports(r) + " "
 }
 
 func elems(items []string) string {

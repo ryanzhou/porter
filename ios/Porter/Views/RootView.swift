@@ -111,6 +111,8 @@ struct DemoScreen: View {
             NavigationStack { SoftwarePage() }
         case "networks":
             NavigationStack { NetworkSetupPage() }
+        case "outside":
+            NavigationStack { InboundPage() }
         case "setup":
             NavigationStack { SetupView() }
         case "connect":

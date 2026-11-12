@@ -106,6 +106,7 @@ func (c *Config) Normalize() {
 	}
 	c.Ethernet = ports
 	c.normalizeNetworks()
+	c.normalizeInbound()
 	for i := range c.Ethernet {
 		e := &c.Ethernet[i]
 		e.IP.normalize()
@@ -151,21 +152,7 @@ var Subnets = []string{
 
 // FreeSubnet returns the first of Subnets that overlaps none of the
 // prefixes in use.
-func FreeSubnet(taken []netip.Prefix) (netip.Prefix, bool) {
-	for _, s := range Subnets {
-		p := netip.MustParsePrefix(s)
-		free := true
-		for _, t := range taken {
-			if t.Masked().Overlaps(p.Masked()) {
-				free = false
-			}
-		}
-		if free {
-			return p, true
-		}
-	}
-	return netip.Prefix{}, false
-}
+func FreeSubnet(taken []netip.Prefix) (netip.Prefix, bool) { return freeOf(Subnets, taken) }
 
 // normalizeNetworks makes sure the two things that always exist do, and
 // fills in what a new Wi-Fi network or network was created without: an id,
@@ -186,6 +173,10 @@ func (c *Config) normalizeNetworks() {
 		if p, err := netip.ParsePrefix(strings.TrimSpace(n.Address)); err == nil {
 			taken = append(taken, p)
 		}
+	}
+	// Nor is a new network put where the WireGuard server's devices are.
+	if p, err := netip.ParsePrefix(strings.TrimSpace(c.Inbound.Server.Address)); err == nil {
+		taken = append(taken, p)
 	}
 	for i := range c.Networks {
 		n := &c.Networks[i]
@@ -359,6 +350,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateSpeedTest(); err != nil {
+		return err
+	}
+	if err := c.validateInbound(); err != nil {
 		return err
 	}
 	return c.validatePolicy()
@@ -1280,6 +1274,224 @@ func (c *Config) validatePolicy() error {
 			if _, err := ParsePorts(p); err != nil {
 				return fmt.Errorf("rule %q: %w", r.Name, err)
 			}
+		}
+	}
+	return nil
+}
+
+// routerUDP are the UDP ports the router itself answers on, and for what.
+var routerUDP = map[int]string{
+	53: "DNS", 67: "handing out addresses", 68: "getting its own address", 546: "getting its own address",
+	547: "handing out addresses", 5353: "finding devices",
+}
+
+// called is how a device is named in a message: by the name it was given,
+// else by its hardware address.
+func (c *Config) called(mac string) string {
+	if d := c.Device(mac); d != nil && d.Name != "" {
+		return d.Name
+	}
+	return mac
+}
+
+func (c *Config) validateInbound() error {
+	in := c.Inbound
+	if err := c.validateServer(); err != nil {
+		return err
+	}
+	if len(in.Forwards) > MaxForwards {
+		return fmt.Errorf("The router has room for %d forwarded ports.", MaxForwards)
+	}
+	ids := map[string]bool{}
+	for i, f := range in.Forwards {
+		if !reID.MatchString(f.ID) {
+			return fmt.Errorf("invalid port forward id %q", f.ID)
+		}
+		if ids[f.ID] {
+			return fmt.Errorf("duplicate port forward id %q", f.ID)
+		}
+		ids[f.ID] = true
+		if f.Name == "" || len(f.Name) > 40 || !printable(f.Name) {
+			return fmt.Errorf("A forwarded port's name needs 1 to 40 characters.")
+		}
+		switch f.Proto {
+		case ProtoTCP, ProtoUDP, ProtoBoth:
+		default:
+			return fmt.Errorf("“%s”: the protocol is TCP, UDP or both.", f.Name)
+		}
+		r, err := ParsePorts(f.Ports)
+		if err != nil {
+			return fmt.Errorf("“%s”: the port is a number from 1 to 65535, or a range like 5000-5010.", f.Name)
+		}
+		if f.To < 0 || f.To > 65535 {
+			return fmt.Errorf("“%s”: the port on the device is a number from 1 to 65535.", f.Name)
+		}
+		if f.To != 0 && r.Lo != r.Hi {
+			return fmt.Errorf("“%s”: a range of ports keeps its numbers on the device. Leave the port on the device empty, or forward the ports one by one.", f.Name)
+		}
+		if !validMAC(f.Device) {
+			return fmt.Errorf("“%s”: choose the device the port goes to.", f.Name)
+		}
+		// IPv4 connections are sent to an address, and the address has to
+		// stay the device's.
+		if d := c.Device(f.Device); d == nil || d.IP == "" {
+			return fmt.Errorf("“%s” goes to a device without a fixed address (%s). Connect the device to one of your networks, or give it a fixed address under Devices, and it can have ports forwarded to it.", f.Name, c.called(f.Device))
+		}
+		if len(f.From) > 16 {
+			return fmt.Errorf("“%s”: at most 16 address ranges it is open to.", f.Name)
+		}
+		for _, s := range f.From {
+			if p, err := netip.ParsePrefix(s); err != nil || p.Addr().Is4In6() || p.Addr().Zone() != "" {
+				return fmt.Errorf("“%s”: “%s” is not an address or an address range like 203.0.113.0/24.", f.Name, s)
+			}
+		}
+		if f.Carries(ProtoUDP) {
+			for port, what := range map[int]string{68: "IPv4", 546: "IPv6"} {
+				if int(r.Lo) <= port && port <= int(r.Hi) {
+					return fmt.Errorf("“%s”: the router needs UDP port %d itself, to get its %s address from your provider, so it cannot be forwarded.", f.Name, port, what)
+				}
+			}
+			if p := in.Server.Port; in.Server.Enabled && f.Enabled && int(r.Lo) <= p && p <= int(r.Hi) {
+				return fmt.Errorf("“%s”: UDP port %d is the one your devices reach home through, so it cannot be forwarded as well. Use another port for one of the two.", f.Name, p)
+			}
+		}
+		for _, o := range in.Forwards[:i] {
+			or := o.Range()
+			if f.Enabled && o.Enabled && (f.Carries(ProtoTCP) && o.Carries(ProtoTCP) || f.Carries(ProtoUDP) && o.Carries(ProtoUDP)) && r.Lo <= or.Hi && or.Lo <= r.Hi {
+				return fmt.Errorf("“%s” and “%s” forward the same port. A port can go to one device only.", o.Name, f.Name)
+			}
+		}
+	}
+	if err := in.DDNS.validate(); err != nil {
+		return err
+	}
+	u, err := url.Parse(in.CheckURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || len(in.CheckURL) > 512 || !printable(in.CheckURL) {
+		return fmt.Errorf("The address that tells the router its public address has to start with http:// or https://.")
+	}
+	return nil
+}
+
+func (c *Config) validateServer() error {
+	s := c.Inbound.Server
+	if s.Port < 1 || s.Port > 65535 {
+		return fmt.Errorf("The port for reaching home is a number from 1 to 65535.")
+	}
+	if what, used := routerUDP[s.Port]; used {
+		return fmt.Errorf("The router uses UDP port %d itself, for %s. Choose another port for reaching home; %d is the usual one.", s.Port, what, DefaultServerPort)
+	}
+	if !validWGKey(s.PrivateKey) {
+		return fmt.Errorf("the WireGuard server's key is not valid")
+	}
+	p, err := netip.ParsePrefix(s.Address)
+	if err != nil || !p.Addr().Is4() || !p.Addr().IsPrivate() || p.Bits() < 16 || p.Bits() > 28 || p.Addr() == p.Masked().Addr() || p.Addr() == broadcast(p) {
+		return fmt.Errorf("The address range for reaching home has to be a private one with the router's address in it, like 10.89.0.1/24.")
+	}
+	u, err := netip.ParsePrefix(s.ULAPrefix)
+	if err != nil || !u.Addr().Is6() || u.Bits() != 64 || !netip.MustParsePrefix("fc00::/7").Contains(u.Addr()) {
+		return fmt.Errorf("The IPv6 prefix for reaching home must be a /64 inside fc00::/7.")
+	}
+	for _, n := range c.Networks {
+		if np, err := netip.ParsePrefix(n.Address); err == nil && np.Masked().Overlaps(p.Masked()) {
+			return fmt.Errorf("%s: %s overlaps the addresses your devices have while they reach home from outside (%s).", n.Name, np.Masked(), p.Masked())
+		}
+		if nu, err := netip.ParsePrefix(n.ULAPrefix); err == nil && nu.Masked().Overlaps(u.Masked()) {
+			return fmt.Errorf("%s: its IPv6 prefix is also the one for reaching home", n.Name)
+		}
+	}
+	if len(s.Peers) > MaxServerPeers {
+		return fmt.Errorf("The router has room for %d devices that reach home.", MaxServerPeers)
+	}
+	own := s.PublicKey()
+	ids, keys, addrs := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, peer := range s.Peers {
+		if !reID.MatchString(peer.ID) {
+			return fmt.Errorf("invalid device id %q", peer.ID)
+		}
+		if ids[peer.ID] {
+			return fmt.Errorf("duplicate device id %q", peer.ID)
+		}
+		ids[peer.ID] = true
+		if peer.Name == "" || len(peer.Name) > 40 || !printable(peer.Name) {
+			return fmt.Errorf("A device's name needs 1 to 40 characters.")
+		}
+		if !validWGKey(peer.PublicKey) || peer.PublicKey == own {
+			return fmt.Errorf("“%s”: that is not a WireGuard public key of the device.", peer.Name)
+		}
+		if keys[peer.PublicKey] {
+			return fmt.Errorf("“%s” has the same key as another device.", peer.Name)
+		}
+		keys[peer.PublicKey] = true
+		a, err := netip.ParseAddr(peer.Address)
+		if err != nil || !a.Is4() || !p.Masked().Contains(a) || a == p.Addr() || a == p.Masked().Addr() || a == broadcast(p) {
+			return fmt.Errorf("“%s”: its address has to be one inside %s other than the router's.", peer.Name, p.Masked())
+		}
+		if addrs[a.String()] || peer.Address != a.String() {
+			return fmt.Errorf("“%s” has the same address as another device, or one that is not written the usual way.", peer.Name)
+		}
+		addrs[a.String()] = true
+	}
+	return nil
+}
+
+func (d DDNS) validate() error {
+	for _, v := range []string{d.Server, d.Username, d.Password, d.URL} {
+		if len(v) > 1024 || !printable(v) {
+			return fmt.Errorf("What was entered for dynamic DNS is too long, or has characters in it that cannot be typed.")
+		}
+	}
+	switch d.Provider {
+	case DDNSDyndns2, DDNSDuckDNS, DDNSCloudflare, DDNSCustom:
+	case "":
+		if d.Enabled {
+			return fmt.Errorf("Choose a provider for dynamic DNS.")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown dynamic DNS provider %q", d.Provider)
+	}
+	if d.Hostname != "" && !validDomain(d.Hostname) {
+		return fmt.Errorf("“%s” is not a name like home.example.com.", d.Hostname)
+	}
+	if !d.Enabled {
+		return nil
+	}
+	if d.Hostname == "" || !strings.Contains(d.Hostname, ".") {
+		return fmt.Errorf("Dynamic DNS needs the name it keeps up to date, like home.example.com.")
+	}
+	switch d.Provider {
+	case DDNSDyndns2:
+		host := d.Server
+		if h, port, err := net.SplitHostPort(d.Server); err == nil {
+			host = h
+			if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("The dynamic DNS server's port is a number from 1 to 65535.")
+			}
+		}
+		if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err != nil && !validDomain(strings.ToLower(host)) {
+			return fmt.Errorf("Dynamic DNS needs your provider's update server, like members.dyndns.org.")
+		}
+		if d.Username == "" || d.Password == "" || len(d.Username) > 128 || len(d.Password) > 256 {
+			return fmt.Errorf("Dynamic DNS needs the user name and password of your account with the provider.")
+		}
+	case DDNSDuckDNS:
+		if !strings.HasSuffix(d.Hostname, duckDomain) || strings.Contains(d.DuckName(), ".") {
+			return fmt.Errorf("A DuckDNS name looks like example.duckdns.org.")
+		}
+		if d.Password == "" || len(d.Password) > 256 || strings.ContainsAny(d.Password, " &?#") {
+			return fmt.Errorf("DuckDNS needs the token shown on your DuckDNS page.")
+		}
+	case DDNSCloudflare:
+		if d.Password == "" || len(d.Password) > 256 || strings.ContainsAny(d.Password, " \"") {
+			return fmt.Errorf("Cloudflare needs an API token that may edit the DNS records of your domain.")
+		}
+	case DDNSCustom:
+		u, err := url.Parse(d.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+			return fmt.Errorf("The address to fetch for dynamic DNS has to start with http:// or https://.")
+		}
+		if !strings.Contains(d.URL, "{ip}") && !strings.Contains(d.URL, "{ip6}") {
+			return fmt.Errorf("The address to fetch for dynamic DNS needs {ip} where the router's address goes, or {ip6} for its IPv6 address.")
 		}
 	}
 	return nil

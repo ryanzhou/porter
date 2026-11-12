@@ -25,6 +25,115 @@ public struct RouterConfig: Codable, Equatable {
     public var policy: PolicyConfig
     public var devices: [DeviceSettings]
     public var speedtest: SpeedTestConfig
+    /// What may reach the router and its networks from outside; nil from
+    /// a router too old to let anything in.
+    public var inbound: InboundConfig?
+}
+
+/// What may come in from the internet: the owner's devices through the
+/// router's WireGuard server, forwarded ports, and the name both are
+/// found by.
+public struct InboundConfig: Codable, Equatable {
+    public var server: HomeServerConfig
+    public var forwards: [PortForward]
+    public var ddns: DynamicDNSConfig
+    /// The address that tells the router its public address.
+    public var checkUrl: String
+}
+
+/// The router's own WireGuard server: the way home for the owner's
+/// devices while they are somewhere else.
+public struct HomeServerConfig: Codable, Equatable {
+    public var enabled: Bool
+    /// The UDP port it listens on.
+    public var port: Int
+    /// The server's key and address ranges. The router makes them and
+    /// they stay: every device's configuration depends on them.
+    public var privateKey: String
+    public var address: String
+    public var ulaPrefix: String
+    public var peers: [HomeDevice]
+}
+
+/// A device that may connect to the router's WireGuard server. Its
+/// private key is in the configuration it was given once, and nowhere
+/// else.
+public struct HomeDevice: Codable, Equatable, Identifiable {
+    public var id: String
+    public var name: String
+    public var publicKey: String
+    /// Its address in the server's range.
+    public var address: String
+    public var enabled: Bool
+    /// Its configuration sends everything through the router, not only
+    /// what is for the networks at home.
+    public var full: Bool
+
+    public init(id: String, name: String, publicKey: String, address: String, enabled: Bool = true, full: Bool = true) {
+        self.id = id
+        self.name = name
+        self.publicKey = publicKey
+        self.address = address
+        self.enabled = enabled
+        self.full = full
+    }
+}
+
+/// A port let through from the internet to one device.
+public struct PortForward: Codable, Equatable, Identifiable {
+    public var id: String
+    public var name: String
+    public var enabled: Bool
+    /// "tcp", "udp" or "both".
+    public var proto: String
+    /// The port on the outside, or a range: "8080", "5000-5010".
+    public var ports: String
+    /// The hardware address of the device it goes to.
+    public var device: String
+    /// The port on the device, for a single port; 0 for the same.
+    public var to: Int
+    /// When not empty, the only address ranges it is open to.
+    public var from: [String]
+
+    public init(id: String, name: String = "", enabled: Bool = true, proto: String = "tcp", ports: String = "", device: String = "", to: Int = 0, from: [String] = []) {
+        self.id = id
+        self.name = name
+        self.enabled = enabled
+        self.proto = proto
+        self.ports = ports
+        self.device = device
+        self.to = to
+        self.from = from
+    }
+}
+
+/// A name kept pointing at the router's public address.
+public struct DynamicDNSConfig: Codable, Equatable {
+    public var enabled: Bool
+    /// "dyndns2", "duckdns", "cloudflare" or "custom"; empty until one
+    /// is chosen.
+    public var provider: String
+    public var hostname: String
+    /// The dyndns2 provider's update server.
+    public var server: String
+    public var username: String
+    /// The dyndns2 password, or the DuckDNS or Cloudflare token.
+    public var password: String
+    /// For "custom": fetched with {ip} and {ip6} replaced.
+    public var url: String
+    /// The router's IPv6 address is published next to the IPv4 one.
+    public var ipv6: Bool
+
+    public init(enabled: Bool = false, provider: String = "", hostname: String = "", server: String = "", username: String = "", password: String = "", url: String = "", ipv6: Bool = false) {
+        self.enabled = enabled
+        self.provider = provider
+        self.hostname = hostname
+        self.server = server
+        self.username = username
+        self.password = password
+        self.url = url
+        self.ipv6 = ipv6
+    }
 }
 
 public struct SpeedTestConfig: Codable, Equatable {
@@ -500,6 +609,86 @@ public struct RouterStatus: Codable, Equatable {
     public var vpns: [VPNStatus]
     public var geoip: GeoIPStatus
     public var adblock: AdblockStatus
+    /// Whether and where the router can be reached from outside; nil
+    /// from a router too old to let anything in.
+    public var inbound: InboundStatus?
+}
+
+/// Whether and where the router can be reached from the internet, and
+/// how what is set up to come in stands.
+public struct InboundStatus: Codable, Equatable {
+    /// Over IPv4: "direct" (the router has a public address of its own),
+    /// "nat" (it is behind another router), "cgnat" (the provider shares
+    /// one public address among customers) or "offline".
+    public var reach: String
+    /// The address the internet source in use has.
+    public var address: String?
+    /// The address the internet sees the router at, when that is known.
+    public var publicAddress: String?
+    /// The router's own public IPv6 address, if it has one.
+    public var publicAddress6: String?
+    /// What a device outside is told to connect to: the dynamic DNS
+    /// name, else a public address. Nil when there is neither.
+    public var host: String?
+    public var server: HomeServerStatus
+    public var forwards: [PortForwardStatus]
+    public var ddns: DynamicDNSStatus
+
+    enum CodingKeys: String, CodingKey {
+        case publicAddress = "public"
+        case publicAddress6 = "public6"
+        case reach, address, host, server, forwards, ddns
+    }
+}
+
+public struct HomeServerStatus: Codable, Equatable {
+    /// "off", "up" or "error".
+    public var state: String
+    public var error: String?
+    public var publicKey: String
+    public var peers: [HomeDeviceStatus]
+}
+
+/// How one device's connection to the router's WireGuard server stands.
+public struct HomeDeviceStatus: Codable, Equatable, Identifiable {
+    public var id: String
+    public var connected: Bool
+    /// The address it last connected from.
+    public var endpoint: String?
+    /// When it and the router last exchanged keys (unix time).
+    public var handshake: Int64?
+    /// Bytes received from the device, and sent to it.
+    public var rx: Int64
+    public var tx: Int64
+}
+
+/// Where a forwarded port leads at the moment.
+public struct PortForwardStatus: Codable, Equatable, Identifiable {
+    public var id: String
+    public var to: String?
+    /// The device's own IPv6 addresses the port is open at.
+    public var to6: [String]
+}
+
+public struct DynamicDNSStatus: Codable, Equatable {
+    /// "off", "waiting", "ok" or "error".
+    public var state: String
+    /// When the provider last took an update (unix time), and the
+    /// addresses it was told.
+    public var updated: Int64?
+    public var address: String?
+    public var address6: String?
+    public var error: String?
+}
+
+/// A device made for the router's WireGuard server: its configuration,
+/// with a private key that exists in this answer only.
+public struct HomeDeviceAdded: Codable, Equatable, Identifiable {
+    public var id: String
+    /// The configuration, as the WireGuard apps import it.
+    public var conf: String
+    /// What it tells the device to connect to.
+    public var host: String
 }
 
 /// Where the router listens for the app on its own networks.
@@ -922,6 +1111,10 @@ private struct ConfigParams: Encodable {
     var id: String?
 }
 private struct RevisionResult: Decodable { let rev: UInt64 }
+private struct HomeDeviceParams: Encodable {
+    let name: String
+    let full: Bool
+}
 
 public extension RouterAPI {
     func hello() async throws -> HelloInfo { try await call("hello") }
@@ -1011,6 +1204,16 @@ public extension RouterAPI {
 
     func parseWireGuard(conf: String) async throws -> WireGuardConfig { try await call("vpn.parse", ["conf": conf]) }
     func generateKey() async throws -> KeyPair { try await call("vpn.genkey") }
+
+    /// Makes a device that may connect to the router's WireGuard server.
+    /// The answer carries the device's configuration with its private
+    /// key, which the router does not keep: it cannot be asked for again.
+    func addHomeDevice(name: String, full: Bool) async throws -> HomeDeviceAdded {
+        try await call("server.peer_add", HomeDeviceParams(name: name, full: full))
+    }
+    /// Has the router look at its public address again and tell the
+    /// dynamic DNS provider now.
+    func refreshInbound() async throws { try await run("inbound.refresh") }
 
     func setPortalDevice(mac: String) async throws { try await run("portal.set_device", ["mac": mac]) }
     func kickPortalDevice() async throws { try await run("portal.kick") }

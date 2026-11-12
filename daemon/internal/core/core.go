@@ -25,6 +25,7 @@ import (
 
 	"github.com/ryanzhou/porter/daemon/internal/adblock"
 	"github.com/ryanzhou/porter/daemon/internal/config"
+	"github.com/ryanzhou/porter/daemon/internal/ddns"
 	"github.com/ryanzhou/porter/daemon/internal/devices"
 	"github.com/ryanzhou/porter/daemon/internal/dnsfwd"
 	"github.com/ryanzhou/porter/daemon/internal/flows"
@@ -106,6 +107,15 @@ type Core struct {
 	mpq  *mpquic.Manager
 	mdns *mdns.Relay
 	devs *devices.Table
+	// srv is the router's own WireGuard server and ddns keeps its name
+	// up to date. reach is what the address check last learned (see
+	// runAddressCheck, which reachNow makes ask again at once), and
+	// forwards the forwarded ports as the firewall last had them.
+	srv      *vpn.Server
+	ddns     *ddns.Manager
+	reach    addressCheck
+	reachNow chan struct{}
+	forwards []fw.PlanForward
 
 	geo *geoip.DB
 	ads *adblock.Manager
@@ -286,6 +296,9 @@ func New(opt Options) (*Core, error) {
 	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, PPPHooks: opt.PPPHooks, HookEnv: hookEnv, OnChange: c.Kick}
 	c.mpq = &mpquic.Manager{Log: c.log, RunDir: opt.RunDir, Binaries: opt.MPQUIC, OnChange: c.Kick}
 	c.mdns = &mdns.Relay{Log: c.log}
+	c.srv = &vpn.Server{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace}
+	c.ddns = &ddns.Manager{Log: c.log, OnChange: c.Kick}
+	c.reachNow = make(chan struct{}, 1)
 	c.vpn = &vpn.Manager{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace, Resolve: c.resolveDirect}
 	c.vpn.Carrying = func(id string) (bool, string) {
 		if paths, running := c.mpq.Health(id); !running || paths == 0 {
@@ -391,6 +404,8 @@ func (c *Core) Run(ctx context.Context) error {
 	go c.ads.Run(ctx, c.online)
 	go c.runGeoUpdates(ctx)
 	go c.settleUpdate(ctx)
+	go c.ddns.Run(ctx)
+	go c.runAddressCheck(ctx)
 	system.Notify("READY=1")
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
@@ -436,6 +451,7 @@ func (c *Core) shutdown() {
 	}
 	c.wan.Stop()
 	c.vpn.Stop()
+	c.srv.Stop()
 	c.mpq.Stop()
 	c.mdns.Stop()
 	c.lan.Stop()
@@ -525,6 +541,7 @@ func (c *Core) updateLED() {
 // some of them have been made.
 func (c *Core) setConfig(next *config.Config) error {
 	next.Normalize()
+	c.pinForwards(next)
 	if err := next.Validate(); err != nil {
 		return err
 	}
@@ -540,6 +557,12 @@ func (c *Core) setConfig(next *config.Config) error {
 	}
 	c.cfg = next
 	c.Kick()
+	// What is set up to come in may have changed, and with it whether
+	// the router's public address is worth asking for.
+	select {
+	case c.reachNow <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
@@ -964,7 +987,9 @@ func (c *Core) reconcile() {
 		}
 		for i := range cfg.Networks {
 			n := &cfg.Networks[i]
-			avoid := append([]netip.Prefix(nil), upstream...)
+			// Not onto the WireGuard server's range either, which cannot
+			// move: the devices' configurations have its addresses.
+			avoid := append([]netip.Prefix{netip.MustParsePrefix(cfg.Inbound.Server.Address)}, upstream...)
 			cur := netip.MustParsePrefix(n.Address)
 			collides := false
 			for _, u := range upstream {
@@ -1106,6 +1131,7 @@ func (c *Core) reconcile() {
 	running.VPNs = mpquic.Effective(cfg.VPNs)
 	c.vpn.Apply(running.VPNs)
 	c.mpq.Apply(cfg.VPNs)
+	c.applyInbound(cfg, active)
 
 	// Firewall and routing.
 	var wanIfs []string
@@ -1125,9 +1151,10 @@ func (c *Core) reconcile() {
 		}
 	}
 	plan := fw.BuildPlan(&running, fw.Runtime{
-		WANIfs: wanIfs, Delegated: delegated, WANMTU: wanMTU, Global: global,
+		WANIfs: wanIfs, Delegated: delegated, WANMTU: wanMTU, Global: global, Addrs6: forwardAddrs6(cfg, devList),
 		PortalDevs: portalDevs, Geo: c.geo.Ranges, GeoVersion: c.geo.Version(),
 	})
+	c.forwards = plan.Forwards
 	flush := false
 	if key := fw.Fingerprint(plan); key != c.planKey {
 		if err := c.fwm.Apply(plan); err != nil {
@@ -1255,6 +1282,12 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 				listen = append(listen, net.JoinHostPort(g.Addr().String(), "53"))
 			}
 		}
+	}
+	// And on its address in the WireGuard server's range, which is the
+	// one the devices that connect from outside are told.
+	serverAddrs, _ := c.serverAddrs(cfg)
+	for _, a := range serverAddrs {
+		listen = append(listen, net.JoinHostPort(a.String(), "53"))
 	}
 	for _, n := range []string{"porter", "porter." + cfg.LAN.Domain} {
 		pol.Hosts[n] = own

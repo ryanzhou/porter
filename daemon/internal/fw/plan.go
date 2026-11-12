@@ -52,6 +52,13 @@ func TableVPN(index int) int   { return TableVPNBase + index }
 // VPNIfName is the WireGuard interface for a VPN profile.
 func VPNIfName(id string) string { return "wg-" + id }
 
+// ServerIf is the interface of the router's own WireGuard server. No
+// profile's interface can have the name: those have a hyphen in theirs.
+const ServerIf = "wgsrv"
+
+// ServerMTU is what fits in a WireGuard packet on an Ethernet-sized path.
+const ServerMTU = 1420
+
 // Plan is everything the ruleset depends on.
 type Plan struct {
 	WANIfs []string
@@ -78,6 +85,10 @@ type Plan struct {
 	// DeviceMarks holds per-device route overrides.
 	DeviceMarks map[string]uint32
 	DefaultMark uint32
+	// Server is the router's own WireGuard server; nil while it is off.
+	Server *PlanServer
+	// Forwards are the ports let through from the internet to devices.
+	Forwards []PlanForward
 	// Learned holds addresses resolved for domain rules, per set name.
 	Learned map[string][]Elem
 	// Geo returns a country's address ranges in nftables notation, and
@@ -88,7 +99,9 @@ type Plan struct {
 
 // PlanLAN is one of the router's networks as the ruleset sees it.
 type PlanLAN struct {
-	If         string
+	If string
+	// Addr4 is the router's own address in Net4.
+	Addr4      netip.Addr
 	Net4, Net6 netip.Prefix // Net6 is the zero value without IPv6
 	// Global is the network's /64 of the prefix delegated by the uplink
 	// in use; the zero value when it has none.
@@ -97,6 +110,32 @@ type PlanLAN struct {
 	Isolated bool
 	// Mark is the network's own route, 0 for none.
 	Mark uint32
+}
+
+// PlanServer is the WireGuard server as the ruleset sees it: one more of
+// the router's networks, not kept apart, whose devices are somewhere else.
+type PlanServer struct {
+	If         string
+	Port       int
+	Addr4      netip.Addr   // the router's own address in Net4
+	Net4, Net6 netip.Prefix // Net6 is the zero value without IPv6
+}
+
+// PlanForward is one forwarded port.
+type PlanForward struct {
+	ID string
+	// Proto is "tcp", "udp" or "both".
+	Proto           string
+	Outside, Inside config.PortRange
+	// To4 is the device's address, where IPv4 connections are sent. To6
+	// are the device's own IPv6 addresses out of a delegated prefix, to
+	// which the port is opened as it is: there is nothing to translate.
+	To4 netip.Addr
+	To6 []netip.Addr
+	// Restricted: only From4 and From6 may connect, and a family that
+	// has none of its own in them not at all.
+	Restricted   bool
+	From4, From6 []netip.Prefix
 }
 
 type PlanVPN struct {
@@ -165,9 +204,13 @@ type Runtime struct {
 	WANIfs []string
 	// Delegated and WANMTU are as in Plan; Global holds each network's
 	// /64 of a delegated prefix, by network id.
-	Delegated  map[string]netip.Prefix
-	WANMTU     map[string]int
-	Global     map[string]netip.Prefix
+	Delegated map[string]netip.Prefix
+	WANMTU    map[string]int
+	Global    map[string]netip.Prefix
+	// Addrs6 are the IPv6 addresses devices have been seen with, by
+	// hardware address. A forwarded port is opened to those of them that
+	// are in a network's /64 of a delegated prefix.
+	Addrs6     map[string][]netip.Addr
 	PortalDevs []string
 	Learned    map[string][]Elem
 	Geo        func(country string) (v4, v6 []string)
@@ -198,7 +241,7 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 	sort.Strings(p.MDNS)
 	for _, n := range c.Networks {
 		l := PlanLAN{If: Bridge(n.ID), Isolated: n.Isolated}
-		_, l.Net4 = n.Prefix()
+		l.Addr4, l.Net4 = n.Prefix()
 		if c.LAN.IPv6 {
 			_, l.Net6 = n.ULA()
 			l.Global = rt.Global[n.ID].Masked()
@@ -218,6 +261,44 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 		p.VPNs = append(p.VPNs, PlanVPN{
 			ID: v.ID, If: VPNIfName(v.ID), Mark: MarkVPN(i), KillSwitch: v.KillSwitch, MTU: mtu, Active: v.Enabled,
 		})
+	}
+	if s := c.Inbound.Server; s.Enabled {
+		ps := &PlanServer{If: ServerIf, Port: s.Port}
+		ps.Addr4, ps.Net4 = s.Prefix()
+		if c.LAN.IPv6 {
+			_, ps.Net6 = s.ULA()
+		}
+		p.Server = ps
+	}
+	for _, f := range c.Inbound.Forwards {
+		d := c.Device(f.Device)
+		// A paused device is cut off from the outside as well.
+		if !f.Enabled || d == nil || d.Paused {
+			continue
+		}
+		to, err := netip.ParseAddr(d.IP)
+		if err != nil {
+			continue
+		}
+		pf := PlanForward{ID: f.ID, Proto: f.Proto, Outside: f.Range(), Inside: f.Inside(), To4: to, Restricted: len(f.From) > 0}
+		for _, s := range f.From {
+			if pfx, err := netip.ParsePrefix(s); err != nil {
+				continue
+			} else if pfx.Addr().Is4() {
+				pf.From4 = append(pf.From4, pfx.Masked())
+			} else {
+				pf.From6 = append(pf.From6, pfx.Masked())
+			}
+		}
+		for _, a := range rt.Addrs6[f.Device] {
+			for _, l := range p.LANs {
+				if l.Global.IsValid() && l.Global.Contains(a) {
+					pf.To6 = append(pf.To6, a)
+				}
+			}
+		}
+		sort.Slice(pf.To6, func(i, j int) bool { return pf.To6[i].Less(pf.To6[j]) })
+		p.Forwards = append(p.Forwards, pf)
 	}
 	for _, d := range c.Devices {
 		if d.Paused {

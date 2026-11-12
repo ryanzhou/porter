@@ -39,6 +39,8 @@ type Config struct {
 	Policy    Policy    `json:"policy"`
 	Devices   []Device  `json:"devices"`
 	SpeedTest SpeedTest `json:"speedtest"`
+	// Inbound is what may reach the router and its networks from outside.
+	Inbound Inbound `json:"inbound"`
 }
 
 // SpeedTest names the server a speed test exchanges data with. It is
@@ -532,6 +534,10 @@ func Default() *Config {
 		DNS:       DNS{Intercept: true, Adblock: Adblock{Lists: []string{DefaultBlockList}}},
 		Policy:    Policy{Default: ActDirect},
 		SpeedTest: DefaultSpeedTest(),
+		Inbound: Inbound{
+			Server:   WGServer{Port: DefaultServerPort, PrivateKey: newWGKey(), Address: ServerSubnets[0], ULAPrefix: randomULA()},
+			CheckURL: DefaultCheckURL,
+		},
 	}
 }
 
@@ -742,8 +748,8 @@ func (s *Store) Load() (*Config, error) {
 // here. Without it a router that updates itself would lose its settings.
 //
 // Format 3 only added fields (system.bluetooth_only, a wired port's vlan,
-// pppoe and tagged, a network's vlan and discovery), so format 2 has no
-// entry. The number was raised all the same: an app that knows format 2
+// pppoe and tagged, a network's vlan and discovery, inbound), so format 2
+// has no entry. The number was raised all the same: an app that knows format 2
 // would write the document back without them, and has to be told that it
 // cannot.
 var migrations = map[int]func(doc map[string]any) error{

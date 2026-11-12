@@ -10,7 +10,9 @@
 // PORTER_WG_USERSPACE; without either the VPN checks are skipped. The
 // subtests for a home connection (home_test.go) also need pppd and
 // pppoe-server, and a kernel with VLANs, PPPoE and IPv6; the one for
-// several networks on a cable (trunk_test.go) a kernel with VLANs.
+// several networks on a cable (trunk_test.go) a kernel with VLANs; the
+// one for reaching home from outside (inbound_test.go) WireGuard, as the
+// VPN checks do.
 //
 //	go test -tags e2e -count=1 ./e2e/
 package e2e
@@ -48,6 +50,9 @@ const (
 	nsRtr = "pt-rtr"
 	nsC1  = "pt-c1"
 	nsC2  = "pt-c2"
+	// A device that is somewhere else: behind the upstream network, on
+	// the far side of the internet from the router (inbound_test.go).
+	nsAway = "pt-away"
 
 	ispIP    = "100.64.0.1"
 	siteA    = "198.51.100.10" // ordinary site, also the probe target
@@ -294,7 +299,7 @@ func TestRouter(t *testing.T) {
 			}
 		}
 		try("pkill -f 'dhcpcd.*pt-c[12]if'; pkill -f %s", run)
-		for _, ns := range []string{nsISP, nsRtr, nsC1, nsC2} {
+		for _, ns := range []string{nsISP, nsRtr, nsC1, nsC2, nsAway} {
 			try("ip netns pids %s 2>/dev/null | xargs -r kill -9", ns)
 			try("ip netns del %s", ns)
 		}
@@ -1308,6 +1313,9 @@ func TestRouter(t *testing.T) {
 		})
 	})
 
+	home := &rig{dir: dir, run: run, c: c, v6: v6, mac1: mac1, mac2: mac2, start: start,
+		phone: phone, haveVPN: haveVPN, kernelWG: kernelWG, wgUser: wgUser}
+
 	// A second network: its own addresses, kept apart from the main one,
 	// with a route and rules of its own.
 	t.Run("Networks", func(t *testing.T) {
@@ -1397,6 +1405,9 @@ func TestRouter(t *testing.T) {
 		} else {
 			cl.Close()
 		}
+		// A forwarded port is open to the whole internet, whichever of the
+		// networks its device is on and whoever uses it from inside.
+		forwardsAcrossNetworks(t, home, ip1)
 		editConfig(func(cfg *config.Config) { cfg.Network("guest").Isolated = false })
 		eventually(t, "guest network, no longer isolated, reaching the main one", 15*time.Second, func() bool {
 			got, err := httpGet(nsC2, "http://"+ip1+":8088/")
@@ -1474,6 +1485,12 @@ func TestRouter(t *testing.T) {
 		})
 	})
 
+	// Coming in from outside: the owner's devices through the router's
+	// WireGuard server, and anybody through a forwarded port
+	// (inbound_test.go).
+	t.Run("ReachHome", func(t *testing.T) { reachHome(t, home) })
+	t.Run("PortForwards", func(t *testing.T) { portForwards(t, home) })
+
 	// A phone sharing its connection over USB: an uplink like any other,
 	// ranked last unless told otherwise, and the one the router falls back
 	// on when the uplink ahead of it stops reaching the internet.
@@ -1549,7 +1566,6 @@ func TestRouter(t *testing.T) {
 
 	// How a home connection arrives: under a VLAN tag, through a PPPoE
 	// sign-in, and with a prefix for the router's own networks.
-	home := &rig{dir: dir, run: run, c: c, v6: v6, mac1: mac1, mac2: mac2, start: start}
 	t.Run("TaggedPort", func(t *testing.T) { taggedPort(t, home) })
 	t.Run("PPPoE", func(t *testing.T) { pppoe(t, home) })
 	t.Run("PrefixDelegation", func(t *testing.T) { prefixDelegation(t, home) })

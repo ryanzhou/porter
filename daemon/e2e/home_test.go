@@ -21,6 +21,7 @@ import (
 
 	"github.com/ryanzhou/porter/daemon/internal/client"
 	"github.com/ryanzhou/porter/daemon/internal/config"
+	"github.com/ryanzhou/porter/daemon/internal/proto"
 )
 
 // The ways a home connection arrives, as subtests of TestRouter: the
@@ -40,6 +41,13 @@ type rig struct {
 	v6         bool
 	mac1, mac2 string
 	start      func(name, logTo string, argv ...string) *exec.Cmd
+	// phone is the identity of the phone that is paired with the router.
+	// haveVPN: there is a WireGuard to test with, the kernel's (kernelWG)
+	// or else the userspace one at wgUser.
+	phone    proto.Identity
+	haveVPN  bool
+	kernelWG bool
+	wgUser   string
 	// joined are the hardware addresses of the devices a subtest has
 	// added to the two that are always there.
 	joined []string
@@ -708,6 +716,9 @@ func prefixDelegation(t *testing.T, r *rig) {
 			t.Errorf("port %d of the router is open to the internet at its delegated address", port)
 		}
 	}
+	// Unless a port is forwarded to the device: over IPv6 that opens the
+	// port at the device's own address, with nothing translated.
+	forwardOverIPv6(t, r, dev1, 8088)
 	// From another device on the network the same listener answers: it
 	// is the direction that is refused, not the address.
 	eventually(t, "the second device with an address from the delegated prefix", 60*time.Second, func() bool {

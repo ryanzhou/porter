@@ -41,7 +41,8 @@ public final class TCPTransport: PacketTransport, @unchecked Sendable {
         tcp.keepaliveCount = 3
         let parameters = NWParameters(tls: nil, tcp: tcp)
         // The router's own networks are never reached through the mobile
-        // network.
+        // network. (Through a WireGuard tunnel home they are, wherever
+        // the phone is: the tunnel is an interface of its own.)
         parameters.prohibitedInterfaceTypes = [.cellular]
         connection = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: parameters)
     }

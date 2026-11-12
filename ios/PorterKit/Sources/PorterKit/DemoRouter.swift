@@ -41,7 +41,7 @@ public enum DemoRouter {
             case "hello":
                 return Data(#"{"name":"Porter","id":"3fa9c210","version":"v1.0.0","paired":true,"claimed":true,"pairing":false,"ready":true,"control":\#(DemoRouter.control(config))}"#.utf8)
             case "status.get":
-                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: DemoRouter.control(config)).utf8)
+                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: DemoRouter.control(config), inbound: DemoRouter.inbound(config, now: now)).utf8)
             case "devices.list":
                 return Data(DemoRouter.devices(now: now).utf8)
             case "config.check":
@@ -112,6 +112,25 @@ public enum DemoRouter {
                 // Always the same sample, whatever was pasted: the VPN
                 // profiles in the configuration may all have been deleted.
                 return Data(DemoRouter.wireGuardJSON.utf8)
+            case "server.peer_add":
+                // A device is added for real, with sample keys: nothing
+                // will ever connect with them.
+                struct Params: Decodable {
+                    let name: String
+                    let full: Bool
+                }
+                let wanted = try RouterConnection.makeDecoder().decode(Params.self, from: params)
+                guard var inbound = config.inbound else {
+                    throw RouterError(code: "invalid", msg: "Switch on reaching home first.")
+                }
+                let host = 2 + inbound.server.peers.count
+                let id = "d\(host)"
+                inbound.server.peers.append(HomeDevice(id: id, name: wanted.name, publicKey: "c2FtcGxlLXB1YmxpYy1rZXktZm9yLWRlbW8tbW9kZTA=", address: "10.89.0.\(host)", enabled: true, full: wanted.full))
+                config.inbound = inbound
+                config.rev += 1
+                let allowed = wanted.full ? "0.0.0.0/0, ::/0" : "10.89.0.0/24, 10.83.0.0/24, 10.84.0.0/24, 10.85.0.0/24"
+                let conf = "[Interface]\nPrivateKey = c2FtcGxlLXByaXZhdGUta2V5LWZvci1kZW1vLW1vZGU=\nAddress = 10.89.0.\(host)/32\nDNS = 10.89.0.1\n\n[Peer]\nPublicKey = \(DemoRouter.serverKey)\nEndpoint = \(DemoRouter.homeName):51820\nAllowedIPs = \(allowed)\nPersistentKeepalive = 25\n"
+                return try RouterConnection.makeEncoder().encode(HomeDeviceAdded(id: id, conf: conf, host: DemoRouter.homeName))
             case "system.set_time":
                 return Data(#"{"adjusted":false}"#.utf8)
             default:
@@ -170,11 +189,45 @@ public enum DemoRouter {
          "dst":{"domains":[],"cidrs":[],"countries":["JP"],"proto":"","ports":[]},"action":"vpn:home"},
         {"id":"smtp","name":"No outgoing mail","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[]},
          "dst":{"domains":[],"cidrs":[],"countries":[],"proto":"tcp","ports":["25"]},"action":"block"}]},
-     "devices":[{"mac":"3c:22:fb:18:7a:c4","name":"Work laptop","route":"vpn:home","paused":false,"no_adblock":true},
+     "devices":[{"mac":"3c:22:fb:18:7a:c4","name":"Work laptop","route":"vpn:home","paused":false,"ip":"10.83.0.57","no_adblock":true},
                 {"mac":"98:b6:e9:52:1c:d0","name":"Games console","route":"","paused":true,"no_adblock":false},
                 {"mac":"a6:3c:11:5e:90:21","name":"","route":"","paused":false,"no_adblock":false}],
-     "speedtest":{"download_url":"https://speed.cloudflare.com/__down?bytes=50000000","upload_url":"https://speed.cloudflare.com/__up"}}
+     "speedtest":{"download_url":"https://speed.cloudflare.com/__down?bytes=50000000","upload_url":"https://speed.cloudflare.com/__up"},
+     "inbound":{"server":{"enabled":true,"port":51820,"private_key":"c2FtcGxlLXNlcnZlci1rZXktZm9yLWRlbW8tbW9kZTA=","address":"10.89.0.1/24","ula_prefix":"fd4c:91a7:20be:89::/64",
+                          "peers":[{"id":"d2","name":"iPhone","public_key":"aVBob25lLXB1YmxpYy1rZXktZm9yLWRlbW8tbW9kZTA=","address":"10.89.0.2","enabled":true,"full":true},
+                                   {"id":"d3","name":"Work laptop","public_key":"bGFwdG9wLXB1YmxpYy1rZXktZm9yLWRlbW8tbW9kZTA=","address":"10.89.0.3","enabled":true,"full":false}]},
+                "forwards":[{"id":"ssh","name":"Remote login","enabled":true,"proto":"tcp","ports":"2222","device":"3c:22:fb:18:7a:c4","to":22,"from":[]}],
+                "ddns":{"enabled":true,"provider":"duckdns","hostname":"\(homeName)","server":"","username":"","password":"not-a-real-token","url":"","ipv6":false},
+                "check_url":"https://cloudflare.com/cdn-cgi/trace"}}
     """
+
+    /// The name the sample router keeps pointing at itself, and its
+    /// WireGuard server's public key.
+    static let homeName = "porter-demo.duckdns.org"
+    static let serverKey = "c2VydmVyLXB1YmxpYy1rZXktZm9yLWRlbW8tbW9kZTA="
+
+    /// What the sample router says about coming in from outside. It is
+    /// on the road, joined to a hotel's network: behind another router.
+    static func inbound(_ config: RouterConfig, now: Int64) -> String {
+        guard let inbound = config.inbound else {
+            return #"{"reach":"offline","server":{"state":"off","public_key":"","peers":[]},"forwards":[],"ddns":{"state":"off"}}"#
+        }
+        let peers = inbound.server.peers.enumerated().map { index, peer -> String in
+            if index == 0, peer.enabled, inbound.server.enabled {
+                return "{\"id\":\"\(peer.id)\",\"connected\":true,\"endpoint\":\"198.51.100.61:49152\",\"handshake\":\(now - 38),\"rx\":48234496,\"tx\":391118848}"
+            }
+            return "{\"id\":\"\(peer.id)\",\"connected\":false,\"rx\":0,\"tx\":0}"
+        }.joined(separator: ",")
+        let forwards = inbound.forwards.filter(\.enabled).map { "{\"id\":\"\($0.id)\",\"to\":\"10.83.0.57\",\"to6\":[]}" }.joined(separator: ",")
+        let named = inbound.ddns.enabled && !inbound.ddns.hostname.isEmpty
+        let host = named ? inbound.ddns.hostname : "203.0.113.150"
+        let ddns = named ? "{\"state\":\"ok\",\"updated\":\(now - 7_200),\"address\":\"203.0.113.150\"}" : "{\"state\":\"off\"}"
+        return """
+        {"reach":"nat","address":"172.20.14.87","public":"203.0.113.150","host":"\(host)",
+         "server":{"state":"\(inbound.server.enabled ? "up" : "off")","public_key":"\(serverKey)","peers":[\(peers)]},
+         "forwards":[\(forwards)],"ddns":\(ddns)}
+        """
+    }
 
     /// What reading a pasted WireGuard configuration gives.
     static let wireGuardJSON = """
@@ -187,10 +240,15 @@ public enum DemoRouter {
     /// apart), unless it is set to Bluetooth only.
     static func control(_ config: RouterConfig) -> String {
         if config.system.bluetoothOnly == true { return #"{"port":0,"addrs":[]}"# }
+        if config.inbound?.server.enabled == true {
+            // And in its WireGuard server's range, for a phone that is
+            // connected to that from somewhere else.
+            return #"{"port":7678,"addrs":["10.83.0.1","fd4c:91a7:20be:1::1","10.89.0.1","fd4c:91a7:20be:89::1"]}"#
+        }
         return #"{"port":7678,"addrs":["10.83.0.1","fd4c:91a7:20be:1::1"]}"#
     }
 
-    static func status(now: Int64, rev: UInt64, name: String, control: String) -> String {
+    static func status(now: Int64, rev: UInt64, name: String, control: String, inbound: String) -> String {
         let safeName = name.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "\"", with: "'")
         return """
         {"name":"\(safeName)","id":"3fa9c210","version":"v1.0.0","time":\(now),"uptime":93784,"temp":51.3,"ready":true,"rev":\(rev),"pairing":false,
@@ -210,6 +268,7 @@ public enum DemoRouter {
          "control":\(control),
          "vpns":[{"id":"home","name":"Home","if":"wg-home","state":"up","endpoint":"203.0.113.24:51820","handshake":\(now - 47),"rx":1843200512,"tx":211812352},
                  {"id":"us","name":"Streaming (US)","state":"off","rx":0,"tx":0}],
+         "inbound":\(inbound),
          "geoip":{"available":true,"date":"2026-11"},
          "adblock":{"enabled":true,"domains":78215,"blocked":1284,
                     "lists":[{"url":"https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts","domains":78215,"updated":\(now - 21_600)}]}}
@@ -219,7 +278,7 @@ public enum DemoRouter {
     static func devices(now: Int64) -> String {
         """
         [{"mac":"\(phone)","hostname":"iPhone","ipv4":"10.83.0.52","ipv6":["fd4c:91a7:20be:1:1c3a:77ff:fe20:9b01"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_400),"link":"wlan0","network":"lan","signal":-47,"up":412300288,"down":3865470566,"name":"","route":"","paused":false,"no_adblock":false},
-         {"mac":"\(laptop)","hostname":"MacBook-Pro","ipv4":"10.83.0.57","ipv6":["fd4c:91a7:20be:1:8d2:41ff:fe7a:c4e2"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_100),"link":"wlan0","network":"lan","signal":-53,"up":1288490188,"down":9126805504,"name":"Work laptop","route":"vpn:home","paused":false,"no_adblock":true},
+         {"mac":"\(laptop)","hostname":"MacBook-Pro","ipv4":"10.83.0.57","ipv6":["fd4c:91a7:20be:1:8d2:41ff:fe7a:c4e2"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_100),"link":"wlan0","network":"lan","signal":-53,"up":1288490188,"down":9126805504,"name":"Work laptop","route":"vpn:home","paused":false,"ip":"10.83.0.57","no_adblock":true},
          {"mac":"\(tablet)","hostname":"iPad","ipv4":"10.83.0.61","first_seen":\(now - 12 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 2_700),"link":"wlan0","network":"lan","signal":-61,"up":96468992,"down":2254857830,"name":"","route":"","paused":false,"no_adblock":false},
          {"mac":"\(reader)","hostname":"kindle","ipv4":"10.83.0.66","first_seen":\(now - 9 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 900),"link":"wlan0","network":"lan","signal":-70,"up":1258291,"down":48234496,"name":"","route":"","paused":false,"no_adblock":false},
          {"mac":"\(printer)","hostname":"Printer","ipv4":"10.85.0.60","first_seen":\(now - 20 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 86_000),"link":"wired","network":"things","up":3145728,"down":20971520,"name":"","route":"","paused":false,"no_adblock":false},

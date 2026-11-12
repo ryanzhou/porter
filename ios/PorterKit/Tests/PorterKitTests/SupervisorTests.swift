@@ -831,7 +831,10 @@ final class SupervisorTests: XCTestCase {
         let up = await eventually { recorder.states == [.connected(.network)] }
         XCTAssertTrue(up)
         let hello = try await supervisor.hello()
-        XCTAssertEqual(hello.control, ControlEndpoints(port: 7678, addrs: ["10.83.0.1", "fd4c:91a7:20be:1::1"]))
+        // Its addresses in the main network and, since its WireGuard
+        // server is on, in that server's range: the ones a phone that is
+        // away reaches it at.
+        XCTAssertEqual(hello.control, ControlEndpoints(port: 7678, addrs: ["10.83.0.1", "fd4c:91a7:20be:1::1", "10.89.0.1", "fd4c:91a7:20be:89::1"]))
         try await supervisor.ping()
         let known = try await supervisor.config()
         XCTAssertEqual(known.system.bluetoothOnly, false)

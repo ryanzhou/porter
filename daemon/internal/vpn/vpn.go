@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"os"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -244,21 +243,14 @@ func (m *Manager) ensureLink(id, name string) error {
 		la.Name = name
 		return netlink.LinkAdd(&netlink.GenericLink{LinkAttrs: la, LinkType: "wireguard"})
 	}
-	cmd := exec.Command(m.UserspaceImpl, "-f", name)
-	cmd.Env = append(os.Environ(), "WG_PROCESS_FOREGROUND=1")
-	if err := cmd.Start(); err != nil {
+	cmd, err := userspaceLink(m.UserspaceImpl, name)
+	if err != nil {
 		return err
 	}
 	m.mu.Lock()
 	m.procs[id] = cmd
 	m.mu.Unlock()
-	for i := 0; i < 50; i++ {
-		if netx.Exists(name) {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("userspace WireGuard did not create %s", name)
+	return nil
 }
 
 func key(s string) (wgtypes.Key, error) {

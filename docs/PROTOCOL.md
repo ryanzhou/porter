@@ -73,10 +73,12 @@ else. The local control socket (`porterctl`) is framed the same way.
 Who may connect:
 
 - The firewall accepts the port from the router's own networks that are
-  not isolated, and from nowhere else: not from an uplink, a tunnel or an
-  isolated network. The listener checks the same again for each
-  connection (to one of the router's addresses in such a network, from an
-  address inside one), because it exists before the first ruleset does.
+  not isolated and from the devices connected to its WireGuard server
+  (`inbound.server`), and from nowhere else: not from an uplink, a
+  profile's tunnel or an isolated network. The listener checks the same
+  again for each connection (to one of the router's addresses in such a
+  network, from an address inside one), because it exists before the
+  first ruleset does.
 - Only paired phones get a session. The handshake is what shows the
   router whose connection it is, so it runs to the end; a key that is not
   in the pairing list is then disconnected without a single call
@@ -90,7 +92,11 @@ Who may connect:
 
 The router tells the app where to connect in `hello` and in the status
 (`control`). The addresses follow the networks: when one is renumbered
-the status changes, and with it what the app remembers.
+the status changes, and with it what the app remembers. While the
+WireGuard server runs, the router's address in the server's range is
+among them: it is the one a phone reaches from anywhere once it has
+connected to the server, and the app, which tries every address it
+remembers, needs to know nothing more to work from outside.
 
 How the app chooses between the two links, and moves from one to the
 other, is described in [DEVELOPMENT.md](DEVELOPMENT.md#two-links-one-connection).
@@ -196,8 +202,9 @@ changes hands or a network on it changes its VLAN ID).
 
 The document's format is `version` 3. (Format 3 added
 `system.bluetooth_only`; `vlan`, `pppoe` and `tagged` for wired ports;
-and `vlan` and `discovery` for networks, to format 2 and changed nothing
-else; a router that stored format 2 carries it over as it is.) Its
+`vlan` and `discovery` for networks; and `inbound`, to format 2 and
+changed nothing else; a router that stored format 2 carries it over as
+it is, with nothing let in.) Its
 parts, briefly:
 
 ```
@@ -233,6 +240,39 @@ ethernet[]  {name role ip vlan pppoe network tagged[]}
 wan         {networks[] wifi_mac eth_mac order[] probe}
             order: uplink keys, best first: "eth:<port>", "wifi", "phone"
 policy      {default rules[{id name enabled src{devices cidrs networks} dst action}]}
+inbound     {server forwards[] ddns check_url}   what may come in from the internet
+  server    {enabled port private_key address ula_prefix peers[]}
+            the router's own WireGuard server. port: UDP, 51820 unless
+            changed. private_key, address (the router's, with prefix, like
+            10.89.0.1/24) and ula_prefix are made by the router when left
+            empty and then stay: the devices' configurations depend on
+            them. The range may overlap none of the networks.
+  peers[]   {id name public_key address enabled full}
+            a device that may connect: address is its IPv4 address in the
+            server's range (its IPv6 address is the same host number in
+            ula_prefix); full records that its configuration sends
+            everything through the router. Made by `server.peer_add`;
+            renamed, switched off and removed by writing the document.
+  forwards[] {id name enabled proto ports device to from[]}
+            proto "tcp" | "udp" | "both"; ports: the port on the outside,
+            or a range ("5000-5010"); device: the hardware address of the
+            device it goes to, which has to have a fixed address
+            (devices[].ip): the router gives it the one it has at the
+            moment when a forward is written for a device without;
+            to: the port on the device, for a single port, 0 for the
+            same; from: when not empty, the only address ranges (IPv4
+            or IPv6) it is open to. No two enabled forwards share a port
+            of a protocol, and none takes UDP 68, 546 or the server's.
+  ddns      {enabled provider hostname server username password url ipv6}
+            provider "dyndns2" (server: the update server, host or
+            host:port; username, password) | "duckdns" (password: the
+            token; hostname ends in .duckdns.org, which the router adds
+            to a bare name) | "cloudflare" (password: an API token;
+            hostname: the record) | "custom" (url, fetched with {ip} and
+            {ip6} replaced). ipv6: publish the IPv6 address as well.
+  check_url answers with the address a request comes from (the address
+            alone, or a line "ip=<address>"); asked while anything above
+            is enabled, to learn the router's public IPv4 address
 ```
 
 Status (`daemon/internal/core/api.go`):
@@ -271,6 +311,27 @@ vpns[]     {id name type if state error endpoint handshake rx tx paths? of?}
            type "wireguard" | "mpquic"; paths of an MPQUIC tunnel working, of how many
 geoip      {available date}   country database for country rules and flows
 adblock    {enabled domains blocked lists[{url domains updated error}]}
+inbound    {reach address public public6 host server forwards[] ddns}
+           reach: over IPv4, "direct" (the uplink in use has a public
+           address of its own) | "nat" (behind another router) | "cgnat"
+           (behind the provider's address translation) | "offline".
+           address: the uplink's own IPv4 address; public: the address
+           the internet sees, once check_url has answered, or address
+           where that is taken to be public; public6: a public IPv6
+           address of the router's.
+           host: what a device outside is told to connect to: the
+           dynamic DNS name if one is kept, else public (not with
+           "cgnat"), else public6; absent when there is none.
+           server {state error public_key peers[{id connected endpoint handshake rx tx}]}
+           state "off" | "up" | "error"; a peer is connected while its
+           last handshake is younger than three minutes; endpoint: where
+           it last connected from; rx, tx: bytes from and to it.
+           forwards[] {id to to6[]}: where an enabled forward leads: the
+           device's IPv4 address, and its IPv6 addresses out of a
+           delegated prefix, to which the port is open untranslated.
+           ddns {state updated address address6 error}
+           state "off" | "waiting" (no address to publish, or not
+           updated yet) | "ok" | "error"; error is for people.
 ```
 
 ### Radios and upstream Wi-Fi
@@ -334,6 +395,30 @@ Profiles are part of the configuration. Helpers:
 | `vpn.parse` | `{conf}` | WireGuard section of a profile, from a `.conf` file |
 | `vpn.genkey` | – | `{private_key,public_key}` |
 | `vpn.pubkey` | `{private_key}` | `{public_key}` |
+
+### From outside
+
+The WireGuard server, forwarded ports and dynamic DNS are part of the
+configuration (`inbound`). Helpers:
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `server.peer_add` | `{name,full}` | `{id,conf,host}` – adds a device to `inbound.server.peers` and returns its WireGuard configuration |
+| `inbound.refresh` | – | `{}` – ask for the public address again and update the dynamic DNS name now |
+
+`server.peer_add` makes a key pair for the device, gives it the lowest
+free address in the server's range, stores the public key, and answers
+with the configuration as the WireGuard apps import it: the private
+key, the device's addresses, the router as DNS server, the server's
+public key, `host` and the port as endpoint, and as AllowedIPs either
+`0.0.0.0/0, ::/0` (`full`) or the server's range and those of the
+router's networks. The private key is in this answer and nowhere else.
+The call is refused (`invalid`) while the server is switched off, and
+while the status has no `inbound.host`: the configuration would lead
+nowhere.
+
+`device.set` without `ip`, and `device.forget`, are refused for a device
+that has a port forwarded to it.
 
 ### Captive portals
 

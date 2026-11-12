@@ -111,6 +111,44 @@ final class DemoTests: XCTestCase {
         XCTAssertNil(speed.error)
         XCTAssertEqual(history.count, 3)
 
+        // Coming in from outside: a WireGuard server with two devices of
+        // which one is connected, a forwarded port, a name kept up to
+        // date. All of it survives being read and written back.
+        let fresh = try await router.config()
+        let inbound = try XCTUnwrap(fresh.inbound)
+        let reach = try XCTUnwrap(status.inbound)
+        XCTAssertTrue(inbound.server.enabled)
+        XCTAssertEqual(inbound.server.peers.map(\.id), reach.server.peers.map(\.id))
+        XCTAssertEqual(reach.server.peers.filter(\.connected).count, 1)
+        XCTAssertEqual(reach.reach, "nat")
+        XCTAssertEqual(reach.publicAddress, "203.0.113.150")
+        XCTAssertNil(reach.publicAddress6)
+        XCTAssertEqual(reach.host, inbound.ddns.hostname)
+        XCTAssertEqual(reach.ddns.state, "ok")
+        XCTAssertEqual(inbound.forwards.map(\.id), reach.forwards.map(\.id))
+        let target = try XCTUnwrap(inbound.forwards.first)
+        XCTAssertTrue(devices.contains { $0.mac == target.device && $0.ip == reach.forwards.first?.to })
+        XCTAssertTrue(status.control?.addrs.contains("10.89.0.1") ?? false)
+        let rewritten = try JSONSerialization.jsonObject(with: RouterConnection.makeEncoder().encode(fresh)) as? [String: Any]
+        let original = try JSONSerialization.jsonObject(with: Data(DemoRouter.configJSON.utf8)) as? [String: Any]
+        XCTAssertEqual(rewritten?["inbound"] as? NSDictionary, original?["inbound"] as? NSDictionary, "the app would change what comes in by writing the configuration back")
+        // Adding a device gives its configuration, once, and the device
+        // is then one of the router's.
+        let added = try await router.addHomeDevice(name: "Tablet", full: false)
+        XCTAssertTrue(added.conf.contains("[Interface]") && added.conf.contains("PrivateKey = ") && added.conf.contains("Endpoint = \(added.host):51820"))
+        XCTAssertFalse(added.conf.contains("0.0.0.0/0"))
+        let after = try await router.config()
+        XCTAssertEqual(after.inbound?.server.peers.last?.id, added.id)
+        XCTAssertEqual(after.inbound?.server.peers.last?.name, "Tablet")
+        let seen = try await router.status()
+        XCTAssertEqual(seen.inbound?.server.peers.count, 3)
+        try await router.refreshInbound()
+        // A router that has none of this yet is read all the same.
+        var older = try XCTUnwrap(original)
+        older["inbound"] = nil
+        let decoded = try RouterConnection.makeDecoder().decode(RouterConfig.self, from: JSONSerialization.data(withJSONObject: older))
+        XCTAssertNil(decoded.inbound)
+
         // Calls with nothing to return succeed.
         try await router.setTime()
         try await router.openPairing()

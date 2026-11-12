@@ -191,6 +191,32 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(untaggable.error, "Main has no VLAN ID, so the port \(config.ethernet[0].name) cannot carry it tagged. Give the network a VLAN ID first.")
         config.ethernet[0].tagged = ["guest"]
 
+        // What comes in from outside. A router answers with its WireGuard
+        // server complete (key, ranges, port) and switched off, and holds
+        // devices for it, forwarded ports and a name to keep up to date.
+        let inbound = try XCTUnwrap(config.inbound)
+        XCTAssertFalse(inbound.server.enabled)
+        XCTAssertEqual(inbound.server.port, 51820)
+        XCTAssertEqual(inbound.server.address, "10.89.0.1/24")
+        XCTAssertFalse(inbound.server.privateKey.isEmpty || inbound.server.ulaPrefix.isEmpty || inbound.checkUrl.isEmpty)
+        XCTAssertEqual(inbound.forwards, [])
+        XCTAssertEqual(inbound.ddns, DynamicDNSConfig())
+        XCTAssertEqual(status.inbound?.server.state, "off")
+        XCTAssertEqual(status.inbound?.forwards, [])
+        XCTAssertEqual(status.inbound?.ddns.state, "off")
+        config.inbound?.server.enabled = true
+        config.inbound?.server.peers = [HomeDevice(id: "p1", name: "Phone", publicKey: key.publicKey, address: "10.89.0.2", enabled: true, full: true)]
+        config.devices.append(DeviceSettings(mac: "02:AA:00:00:00:03", name: "NAS", ip: "10.83.0.10"))
+        config.inbound?.forwards = [PortForward(id: "web", name: "Web", ports: "8443", device: "02:AA:00:00:00:03", to: 443, from: ["203.0.113.7"])]
+        config.inbound?.ddns = DynamicDNSConfig(provider: "duckdns", hostname: "Porter-Interop", password: "token")
+        // The port devices reach home through cannot be forwarded as well.
+        var clash = config
+        clash.inbound?.forwards[0].proto = "both"
+        clash.inbound?.forwards[0].ports = "51820"
+        clash.inbound?.forwards[0].to = 0
+        let taken = try await router.checkConfig(clash)
+        XCTAssertTrue(taken.error?.contains("reach home through") ?? false, taken.error ?? "accepted")
+
         // The write names itself; sent again, as it is when its answer
         // was lost, it is answered again and made once.
         XCTAssertEqual(config.system.bluetoothOnly, false)
@@ -228,6 +254,20 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(stored.vpns.first?.wireguard, wg)
         XCTAssertEqual(stored.wan.wifiMac.mode, .random)
         XCTAssertNotNil(stored.wan.wifiMac.address) // the router picked one
+
+        XCTAssertEqual(stored.inbound?.server.enabled, true)
+        XCTAssertEqual(stored.inbound?.server.peers, config.inbound?.server.peers)
+        XCTAssertEqual(stored.inbound?.forwards.first?.device, "02:aa:00:00:00:03") // normalised by the router
+        XCTAssertEqual(stored.inbound?.forwards.first?.from, ["203.0.113.7/32"])
+        XCTAssertEqual(stored.inbound?.forwards.first?.to, 443)
+        XCTAssertEqual(stored.inbound?.ddns.hostname, "porter-interop.duckdns.org")
+        let after = try await router.status()
+        let reach = try XCTUnwrap(after.inbound)
+        XCTAssertEqual(reach.server.peers.map(\.id), ["p1"])
+        XCTAssertFalse(reach.server.publicKey.isEmpty)
+        XCTAssertEqual(reach.forwards.first?.to, "10.83.0.10")
+        XCTAssertEqual(reach.forwards.first?.to6, [])
+        try await router.refreshInbound()
 
         // A stale write is refused, an invalid one explained.
         do {

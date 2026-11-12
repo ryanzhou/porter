@@ -58,7 +58,9 @@ private struct VPNProfilesSection: View {
             }
         } footer: {
             if profiles.isEmpty {
-                Text("Add a VPN from your provider or your own server. The rules below then decide which traffic goes through it.")
+                Text("Add a VPN from your provider or your own server. The rules below then decide which traffic goes through it. To reach your own networks while you are away, see From outside in Settings.")
+            } else {
+                Text("These are VPNs the router connects out to. To reach your own networks while you are away, see From outside in Settings.")
             }
         }
     }

@@ -251,6 +251,12 @@ func (c *Core) applyControl(cfg *config.Config) {
 			nets.addrs, nets.nets = append(nets.addrs, a), append(nets.nets, p)
 		}
 	}
+	// And from a device that has connected to the WireGuard server, at
+	// the router's address in the server's range: the one address of the
+	// router's that every such device has a route to, and so the one the
+	// app can use from anywhere.
+	addrs, ranges := c.serverAddrs(cfg)
+	nets.addrs, nets.nets = append(nets.addrs, addrs...), append(nets.nets, ranges...)
 	c.ctlNets.Store(nets)
 	switch {
 	case cfg.System.BluetoothOnly && c.ctl != nil:
@@ -301,7 +307,8 @@ type ControlStatus struct {
 	// Port is 0 while nothing listens there.
 	Port int `json:"port"`
 	// Addrs are the router's addresses in its networks that are not
-	// isolated: IPv4, and the ULA where IPv6 is on.
+	// isolated, and in the WireGuard server's range while that runs:
+	// IPv4, and the ULA where IPv6 is on.
 	Addrs []string `json:"addrs"`
 }
 
@@ -410,6 +417,7 @@ type Status struct {
 	VPNs    []VPNStatus    `json:"vpns"`
 	GeoIP   GeoIPStatus    `json:"geoip"`
 	Adblock adblock.Status `json:"adblock"`
+	Inbound InboundStatus  `json:"inbound"`
 }
 
 // GeoIPStatus says whether country rules and country display can work.
@@ -478,6 +486,7 @@ func (c *Core) status() Status {
 		st.GeoIP = GeoIPStatus{Available: true, Date: c.geo.Date}
 	}
 	st.Adblock = c.ads.Status()
+	st.Inbound = c.inboundStatus(cfg, wan.Active(states))
 	if a := wan.Active(states); a != nil {
 		st.Internet, st.Active = a.Internet, a.If
 		if a.Internet == wan.StCaptive {
@@ -540,6 +549,11 @@ func (c *Core) publishStatus() {
 	stable.VPNs = append([]VPNStatus(nil), st.VPNs...)
 	for i := range stable.VPNs {
 		stable.VPNs[i].Rx, stable.VPNs[i].Tx, stable.VPNs[i].Handshake = 0, 0, 0
+	}
+	stable.Inbound.Server.Peers = append([]PeerStatus(nil), st.Inbound.Server.Peers...)
+	for i := range stable.Inbound.Server.Peers {
+		p := &stable.Inbound.Server.Peers[i]
+		p.Rx, p.Tx, p.Handshake = 0, 0, 0
 	}
 	stable.STAs = append([]wifi.STAStatus(nil), st.STAs...)
 	for i := range stable.STAs {
@@ -907,6 +921,9 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		}
 		p.MAC = strings.ToLower(p.MAC)
 		return nil, c.edit(func(cfg *config.Config) error {
+			if name := forwardedTo(cfg, p.MAC); name != "" && p.IP == "" {
+				return fmt.Errorf("This device has a port forwarded to it (“%s”) and keeps its fixed address for as long as it has. Remove the forward first.", name)
+			}
 			empty := p.Name == "" && p.Route == "" && !p.Paused && p.IP == "" && !p.NoAdblock
 			for i := range cfg.Devices {
 				if cfg.Devices[i].MAC == p.MAC {
@@ -932,8 +949,10 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 			return nil, perr
 		}
 		mac := strings.ToLower(p.MAC)
-		c.devs.Forget(mac)
-		return nil, c.edit(func(cfg *config.Config) error {
+		perr = c.edit(func(cfg *config.Config) error {
+			if name := forwardedTo(cfg, mac); name != "" {
+				return fmt.Errorf("This device has a port forwarded to it (“%s”). Remove the forward before forgetting the device.", name)
+			}
 			for i := range cfg.Devices {
 				if cfg.Devices[i].MAC == mac {
 					cfg.Devices = append(cfg.Devices[:i], cfg.Devices[i+1:]...)
@@ -942,6 +961,10 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 			}
 			return nil
 		})
+		if perr == nil {
+			c.devs.Forget(mac)
+		}
+		return nil, perr
 
 	case "device.queries":
 		p, perr := decode[struct {
@@ -1086,6 +1109,33 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 			return nil, invalid(err)
 		}
 		return map[string]string{"public_key": pub}, nil
+
+	case "server.peer_add":
+		// Makes a device that may connect to the router's WireGuard
+		// server, and that device's configuration with a key of its own.
+		p, perr := decode[struct {
+			Name string `json:"name"`
+			Full bool   `json:"full"`
+		}](req)
+		if perr != nil {
+			return nil, perr
+		}
+		var out *PeerAdded
+		c.do(func() { out, perr = c.addPeer(p.Name, p.Full) })
+		if perr != nil {
+			return nil, perr
+		}
+		return out, nil
+
+	case "inbound.refresh":
+		// Looks at the router's public address again and tells the
+		// dynamic DNS provider now, due or not.
+		select {
+		case c.reachNow <- struct{}{}:
+		default:
+		}
+		c.ddns.Refresh()
+		return nil, nil
 
 	case "portal.set_device":
 		p, perr := decode[struct {
@@ -1263,6 +1313,7 @@ func (c *Core) check(next *config.Config) CheckResult {
 	out := CheckResult{Notes: []string{}, Effects: []string{}}
 	next = next.Clone()
 	next.Normalize()
+	c.pinForwards(next)
 	if next.Rev != c.cfg.Rev {
 		out.Error = "The settings changed on the router in the meantime. Reload and make the change again."
 		return out
