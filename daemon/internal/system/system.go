@@ -60,7 +60,7 @@ func TimeFromPhone(t time.Time) (adjusted bool, err error) {
 		diff = -diff
 	}
 	limit := 2 * time.Second
-	if ntpSynced() {
+	if NTPSynced() {
 		limit = 5 * time.Minute
 	}
 	if diff < limit {
@@ -69,7 +69,9 @@ func TimeFromPhone(t time.Time) (adjusted bool, err error) {
 	return true, SetClock(t)
 }
 
-func ntpSynced() bool {
+// NTPSynced reports whether the clock has been set from a time server
+// since the router started.
+func NTPSynced() bool {
 	_, err := os.Stat("/run/systemd/timesync/synchronized")
 	return err == nil
 }

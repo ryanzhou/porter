@@ -78,11 +78,14 @@ type Plan struct {
 	Intercept bool
 	// MDNS are the bridges of the networks between which multicast DNS is
 	// relayed (see internal/mdns): the router listens to it there.
-	MDNS       []string
-	Paused     []string // MACs
+	MDNS []string
+	// Paused are the devices that are cut off, by hardware address: those
+	// paused themselves, and those whose group is offline.
+	Paused     []string
 	PortalDevs []string // MACs allowed to bypass policy while captive
 	Rules      []PlanRule
-	// DeviceMarks holds per-device route overrides.
+	// DeviceMarks holds the route of each device that has one: its own,
+	// or else its group's.
 	DeviceMarks map[string]uint32
 	DefaultMark uint32
 	// Server is the router's own WireGuard server; nil while it is off.
@@ -210,7 +213,11 @@ type Runtime struct {
 	// Addrs6 are the IPv6 addresses devices have been seen with, by
 	// hardware address. A forwarded port is opened to those of them that
 	// are in a network's /64 of a delegated prefix.
-	Addrs6     map[string][]netip.Addr
+	Addrs6 map[string][]netip.Addr
+	// Held are the devices that are cut off right now, by hardware
+	// address (see sched.Evaluate): next to the devices the configuration
+	// has paused, those whose group is offline at this hour.
+	Held       []string
 	PortalDevs []string
 	Learned    map[string][]Elem
 	Geo        func(country string) (v4, v6 []string)
@@ -270,10 +277,20 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 		}
 		p.Server = ps
 	}
+	held := map[string]bool{}
+	for _, mac := range rt.Held {
+		held[mac] = true
+	}
+	for _, d := range c.Devices {
+		if d.Paused {
+			held[d.MAC] = true
+		}
+	}
+	p.Paused = sortedNames(held)
 	for _, f := range c.Inbound.Forwards {
 		d := c.Device(f.Device)
-		// A paused device is cut off from the outside as well.
-		if !f.Enabled || d == nil || d.Paused {
+		// A device that is cut off is cut off from the outside as well.
+		if !f.Enabled || d == nil || held[d.MAC] {
 			continue
 		}
 		to, err := netip.ParseAddr(d.IP)
@@ -300,22 +317,17 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 		sort.Slice(pf.To6, func(i, j int) bool { return pf.To6[i].Less(pf.To6[j]) })
 		p.Forwards = append(p.Forwards, pf)
 	}
-	for _, d := range c.Devices {
-		if d.Paused {
-			p.Paused = append(p.Paused, d.MAC)
-		}
-		if d.Route != "" {
-			p.DeviceMarks[d.MAC] = MarkFor(c, d.Route)
-		}
+	for mac, route := range c.DeviceRoutes() {
+		p.DeviceMarks[mac] = MarkFor(c, route)
 	}
-	sort.Strings(p.Paused)
 	for _, r := range c.Policy.Rules {
 		if !r.Enabled {
 			continue
 		}
 		pr := PlanRule{
-			ID:        r.ID,
-			SrcMACs:   append([]string(nil), r.Src.Devices...),
+			ID: r.ID,
+			// The devices named one by one, and the members of the groups.
+			SrcMACs:   c.SrcDevices(r.Src),
 			Domains:   len(r.Dst.Domains) > 0,
 			Countries: append([]string(nil), r.Dst.Countries...),
 			Proto:     r.Dst.Proto,
@@ -345,6 +357,11 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 		for _, s := range r.Dst.Ports {
 			pt, _ := config.ParsePorts(s)
 			pr.Ports = append(pr.Ports, pt)
+		}
+		// A rule for a group that has no members is a rule for nobody. Left
+		// in, with no source to match, it would read as one for everybody.
+		if !r.Src.Any() && len(pr.SrcMACs) == 0 && len(pr.SrcIfs) == 0 && len(pr.Src4) == 0 && len(pr.Src6) == 0 {
+			continue
 		}
 		p.Rules = append(p.Rules, pr)
 	}

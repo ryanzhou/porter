@@ -147,6 +147,9 @@ type Manager struct {
 	// OnChange is called (from any goroutine) when an uplink's state
 	// changes in a way the rest of the router cares about.
 	OnChange func()
+	// OnTime is called (from any goroutine) with the time a probed site
+	// gave, each time a probe finds the internet reachable.
+	OnTime func(time.Time)
 
 	mu      sync.Mutex
 	uplinks map[string]*uplink
@@ -878,6 +881,9 @@ func (m *Manager) runProbe(u *uplink, p config.Probe, dns []string) {
 	u.probeAt = now.Add(next)
 	changed := prev != u.st.Internet || prevURL != u.st.PortalURL
 	m.mu.Unlock()
+	if !res.Date.IsZero() && m.OnTime != nil {
+		m.OnTime(res.Date)
+	}
 	if changed {
 		m.Log.Info("uplink reachability", "if", u.cfg.If, "state", res.State, "detail", res.Detail)
 		m.changed()

@@ -32,12 +32,14 @@ type Config struct {
 	WAN  WAN    `json:"wan"`
 	// LAN holds what all of the router's own networks have in common;
 	// Networks lists them. The first is the main one and always exists.
-	LAN       LAN       `json:"lan"`
-	Networks  []Network `json:"networks"`
-	DNS       DNS       `json:"dns"`
-	VPNs      []VPN     `json:"vpns"`
-	Policy    Policy    `json:"policy"`
-	Devices   []Device  `json:"devices"`
+	LAN      LAN       `json:"lan"`
+	Networks []Network `json:"networks"`
+	DNS      DNS       `json:"dns"`
+	VPNs     []VPN     `json:"vpns"`
+	Policy   Policy    `json:"policy"`
+	Devices  []Device  `json:"devices"`
+	// Groups are sets of devices that share settings and schedules.
+	Groups    []Group   `json:"groups"`
 	SpeedTest SpeedTest `json:"speedtest"`
 	// Inbound is what may reach the router and its networks from outside.
 	Inbound Inbound `json:"inbound"`
@@ -71,6 +73,10 @@ type System struct {
 	// BluetoothOnly switches off control over the router's own networks
 	// (see internal/netctl), leaving Bluetooth as the only way in.
 	BluetoothOnly bool `json:"bluetooth_only"`
+	// Timezone is the IANA name of the time zone the household lives in,
+	// such as "Europe/Berlin": schedules are kept in its time, daylight
+	// saving included. Empty until a phone has said where it is.
+	Timezone string `json:"timezone"`
 }
 
 type SSH struct {
@@ -526,12 +532,13 @@ type Rule struct {
 }
 
 // Src matches where traffic comes from. Empty matches every LAN client;
-// otherwise a packet matches if it comes from any listed device, prefix
-// or network (by id).
+// otherwise a packet matches if it comes from any listed device, prefix,
+// network (by id) or member of a listed group (by id).
 type Src struct {
 	Devices  []string `json:"devices"`
 	CIDRs    []string `json:"cidrs"`
 	Networks []string `json:"networks"`
+	Groups   []string `json:"groups"`
 }
 
 // Dst matches where traffic is going. Domains, CIDRs and Countries are
@@ -546,7 +553,9 @@ type Dst struct {
 	Ports     []string `json:"ports"`
 }
 
-func (s Src) Any() bool { return len(s.Devices) == 0 && len(s.CIDRs) == 0 && len(s.Networks) == 0 }
+func (s Src) Any() bool {
+	return len(s.Devices) == 0 && len(s.CIDRs) == 0 && len(s.Networks) == 0 && len(s.Groups) == 0
+}
 func (d Dst) Any() bool {
 	return len(d.Domains) == 0 && len(d.CIDRs) == 0 && len(d.Countries) == 0 && d.Proto == "" && len(d.Ports) == 0
 }
@@ -555,11 +564,15 @@ func (d Dst) Any() bool {
 type Device struct {
 	MAC  string `json:"mac"`
 	Name string `json:"name"`
-	// Route overrides Policy.Default (and its network's route) for this
-	// device: "", "direct", "vpn:<id>" or "block".
+	// Route overrides Policy.Default (and its group's and its network's
+	// route) for this device: "", "direct", "vpn:<id>" or "block".
 	Route string `json:"route"`
 	// Paused cuts the device off without forgetting its settings.
 	Paused bool `json:"paused"`
+	// AllowUntil lets the device online although a schedule or a timer
+	// has its group offline, until that moment (unix time); 0, or a
+	// moment that has passed, for not at all.
+	AllowUntil int64 `json:"allow_until"`
 	// IP reserves a fixed IPv4 address inside one of the networks.
 	IP string `json:"ip,omitempty"`
 	// NoAdblock exempts the device from ad blocking.
@@ -805,10 +818,11 @@ func (s *Store) Load() (*Config, error) {
 // When SchemaVersion is raised, the step from the previous version goes
 // here. Without it a router that updates itself would lose its settings.
 //
-// Format 3 only added fields (system.bluetooth_only, a wired port's vlan,
-// pppoe, tagged and shaping, a network's vlan and discovery, shaping for
-// a saved Wi-Fi network and for a phone, inbound), so format 2 has no
-// entry. The number was raised all the same: an app that knows format 2
+// Format 3 only added fields (system.bluetooth_only and system.timezone,
+// a wired port's vlan, pppoe, tagged and shaping, a network's vlan and
+// discovery, shaping for a saved Wi-Fi network and for a phone, inbound,
+// groups with a rule's src.groups and a device's allow_until), so format
+// 2 has no entry. The number was raised all the same: an app that knows format 2
 // would write the document back without them, and has to be told that it
 // cannot.
 var migrations = map[int]func(doc map[string]any) error{

@@ -22,6 +22,9 @@ type ProbeResult struct {
 	State     string
 	PortalURL string
 	Detail    string
+	// Date is the time the probed site gave with an answer that showed
+	// the internet to be reachable; zero otherwise.
+	Date time.Time
 }
 
 func bindDialer(ifname string, timeout time.Duration) *net.Dialer {
@@ -95,7 +98,8 @@ func Probe(ifname string, p config.Probe, dnsServers []string) ProbeResult {
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 64*1024))
 	if res.StatusCode == http.StatusOK && strings.Contains(string(body), p.Expect) {
-		return ProbeResult{State: StOnline}
+		date, _ := http.ParseTime(res.Header.Get("Date"))
+		return ProbeResult{State: StOnline, Date: date}
 	}
 	if res.StatusCode >= 500 {
 		// The probe's own server, or a proxy on the way, having a bad

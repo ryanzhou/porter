@@ -18,6 +18,11 @@ public enum DemoRouter {
         init() {
             // The sample configuration is known to decode (see DemoTests).
             config = try! RouterConnection.makeDecoder().decode(RouterConfig.self, from: Data(DemoRouter.configJSON.utf8))
+            // Whatever the time of day the app is opened at, one group
+            // has something to show: its devices were paused for a
+            // while, until the hour after next.
+            let now = Int64(Date().timeIntervalSince1970)
+            config.editGroup(DemoRouter.kidsGroup) { $0.forNow = GroupOverride.pause(until: (now / 3_600 + 2) * 3_600) }
         }
 
         func answer(_ method: String, _ params: Data) throws -> Data {
@@ -41,9 +46,19 @@ public enum DemoRouter {
             case "hello":
                 return Data(#"{"name":"Porter","id":"3fa9c210","version":"v1.0.0","paired":true,"claimed":true,"pairing":false,"ready":true,"control":\#(DemoRouter.control(config))}"#.utf8)
             case "status.get":
-                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: DemoRouter.control(config), inbound: DemoRouter.inbound(config, now: now), shaping: DemoRouter.shaping(config)).utf8)
+                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: DemoRouter.control(config), inbound: DemoRouter.inbound(config, now: now), shaping: DemoRouter.shaping(config), groups: try DemoRouter.groups(config, now: now)).utf8)
             case "devices.list":
-                return Data(DemoRouter.devices(now: now).utf8)
+                return try RouterConnection.makeEncoder().encode(try DemoRouter.devices(config, now: now))
+            case "device.set":
+                // Kept with the configuration, as a real router keeps a
+                // device's settings.
+                let wanted = try RouterConnection.makeDecoder().decode(DeviceSettings.self, from: params)
+                config.devices.removeAll { $0.mac == wanted.mac }
+                if wanted != DeviceSettings(mac: wanted.mac) {
+                    config.devices.append(wanted)
+                }
+                config.rev += 1
+                return Data("{}".utf8)
             case "config.check":
                 // The demo has the built-in radio carry the network, which
                 // broadcasts one Wi-Fi network at a time.
@@ -161,7 +176,7 @@ public enum DemoRouter {
 
     static let configJSON = """
     {"version":3,"rev":12,
-     "system":{"name":"Porter","country":"AU","ssh":{"enabled":false,"authorized_keys":[]},"bluetooth_only":false},
+     "system":{"name":"Porter","country":"AU","ssh":{"enabled":false,"authorized_keys":[]},"bluetooth_only":false,"timezone":"\(timeZone)"},
      "radios":[{"id":"builtin","role":"ap","band":"5","channel":0,"width":0},
                {"id":"usb:9c:ef:d5:12:34:56","role":"wan","band":"","channel":0,"width":0}],
      "ethernet":[{"name":"end0","role":"wan","network":"lan","tagged":[],"vlan":7,
@@ -194,15 +209,21 @@ public enum DemoRouter {
               "wireguard":{"private_key":"enl4d3Z1dHNycXBvbm1sa2ppaGdmZWRjYmE5ODc2NTQ=","addresses":["10.64.0.7/32"],"dns":["10.64.0.1"],"mtu":0,
                            "peers":[{"public_key":"dnV0c3JxcG9ubWxramloZ2ZlZGNiYTk4NzY1NDMyMTA=","endpoint":"us-east.vpn.example.com:51820","allowed_ips":["0.0.0.0/0"],"keepalive":25}]}}],
      "policy":{"default":"direct","rules":[
-        {"id":"bank","name":"Banking stays direct","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[]},
+        {"id":"bank","name":"Banking stays direct","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[],"groups":[]},
          "dst":{"domains":["mybank.example.com","payments.example.org"],"cidrs":[],"countries":[],"proto":"","ports":[]},"action":"direct"},
-        {"id":"jp","name":"Japan through Home","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[]},
+        {"id":"jp","name":"Japan through Home","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[],"groups":[]},
          "dst":{"domains":[],"cidrs":[],"countries":["JP"],"proto":"","ports":[]},"action":"vpn:home"},
-        {"id":"smtp","name":"No outgoing mail","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[]},
+        {"id":"smtp","name":"No outgoing mail","enabled":true,"src":{"devices":[],"cidrs":[],"networks":[],"groups":[]},
          "dst":{"domains":[],"cidrs":[],"countries":[],"proto":"tcp","ports":["25"]},"action":"block"}]},
      "devices":[{"mac":"3c:22:fb:18:7a:c4","name":"Work laptop","route":"vpn:home","paused":false,"ip":"10.83.0.57","no_adblock":true},
                 {"mac":"98:b6:e9:52:1c:d0","name":"Games console","route":"","paused":true,"no_adblock":false},
                 {"mac":"a6:3c:11:5e:90:21","name":"","route":"","paused":false,"no_adblock":false}],
+     "groups":[{"id":"\(kidsGroup)","name":"Kids","icon":"child","members":["\(tablet)","\(console)","\(reader)"],"route":"","paused":false,"no_adblock":false,
+                "schedules":[{"id":"bed","name":"Bedtime","enabled":true,"days":[0,1,2,3,4],"from":"21:00","to":"07:00"},
+                             {"id":"hw","name":"Homework","enabled":false,"days":[1,2,3,4,5],"from":"16:30","to":"18:00"}],
+                "override":{"mode":"","until":0}},
+               {"id":"work","name":"Work","icon":"work","members":["\(laptop)"],"route":"vpn:home","paused":false,"no_adblock":true,
+                "schedules":[],"override":{"mode":"","until":0}}],
      "speedtest":{"download_url":"https://speed.cloudflare.com/__down?bytes=50000000","upload_url":"https://speed.cloudflare.com/__up"},
      "inbound":{"server":{"enabled":true,"port":51820,"private_key":"c2FtcGxlLXNlcnZlci1rZXktZm9yLWRlbW8tbW9kZTA=","address":"10.89.0.1/24","ula_prefix":"fd4c:91a7:20be:89::/64",
                           "peers":[{"id":"d2","name":"iPhone","public_key":"aVBob25lLXB1YmxpYy1rZXktZm9yLWRlbW8tbW9kZTA=","address":"10.89.0.2","enabled":true,"full":true},
@@ -211,6 +232,91 @@ public enum DemoRouter {
                 "ddns":{"enabled":true,"provider":"duckdns","hostname":"\(homeName)","server":"","username":"","password":"not-a-real-token","url":"","ipv6":false},
                 "check_url":"https://cloudflare.com/cdn-cgi/trace"}}
     """
+
+    /// The sample household's time zone, and the group whose devices
+    /// have schedules.
+    static let timeZone = "Australia/Sydney"
+    static let kidsGroup = "kids"
+
+    /// How the sample router's groups stand at `now`, and which devices
+    /// that pauses: the fields `clock`, `groups` and `held` of the
+    /// status. Worked out from the configuration as a real router does,
+    /// less carefully: a schedule's end is not looked beyond for another
+    /// that follows it.
+    static func groups(_ config: RouterConfig, now: Int64) throws -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: config.system.timezone ?? "") ?? calendar.timeZone
+        let today: Date = calendar.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(now)))
+        // When a schedule that starts `ahead` days from today is in
+        // force: nil if it does not start on that day of the week.
+        func span(_ schedule: GroupSchedule, ahead: Int) -> (start: Int64, end: Int64)? {
+            guard let day = calendar.date(byAdding: .day, value: ahead, to: today),
+                  schedule.days.contains(calendar.component(.weekday, from: day) - 1),
+                  let from = GroupSchedule.parts(of: schedule.from), let to = GroupSchedule.parts(of: schedule.to),
+                  let start = calendar.date(bySettingHour: from.hour, minute: from.minute, second: 0, of: day),
+                  let last = calendar.date(byAdding: .day, value: schedule.endsNextDay ? 1 : 0, to: day),
+                  let end = calendar.date(bySettingHour: to.hour, minute: to.minute, second: 0, of: last) else { return nil }
+            return (Int64(start.timeIntervalSince1970), Int64(end.timeIntervalSince1970))
+        }
+        var states: [GroupStatus] = []
+        var held: [HeldDevice] = []
+        for group in config.groupList {
+            var state = GroupStatus(id: group.id, connected: group.members.filter { onlineDevices.contains($0) }.count, offline: false)
+            let timed: Bool = group.forNow.until > now
+            var inForce: (id: String, end: Int64)?
+            var next: (id: String, start: Int64)?
+            for schedule in group.schedules where schedule.enabled {
+                for ahead in -1...7 {
+                    guard let time = span(schedule, ahead: ahead) else { continue }
+                    if time.start <= now, time.end > now, time.end > (inForce?.end ?? 0) {
+                        inForce = (schedule.id, time.end)
+                    }
+                    if time.start > now, (next?.start ?? Int64.max) > time.start {
+                        next = (schedule.id, time.start)
+                    }
+                }
+            }
+            if group.paused {
+                state.offline = true
+                state.why = "paused"
+            } else if timed, group.forNow.mode == "pause" {
+                state.offline = true
+                state.why = "timer"
+                state.until = group.forNow.until
+            } else if let inForce, timed, group.forNow.mode == "allow" {
+                state.allowedUntil = group.forNow.until
+                if group.forNow.until < inForce.end {
+                    state.next = group.forNow.until
+                    state.nextSchedule = inForce.id
+                }
+            } else if let inForce {
+                state.offline = true
+                state.why = "schedule"
+                state.schedule = inForce.id
+                state.until = inForce.end
+            }
+            if !state.offline, state.next == nil, let next {
+                state.next = next.start
+                state.nextSchedule = next.id
+            }
+            states.append(state)
+            for mac in group.members where state.offline {
+                let allowed: Int64 = config.devices.first(where: { $0.mac == mac })?.allowUntil ?? 0
+                if allowed <= now || state.why == "paused" {
+                    held.append(HeldDevice(mac: mac, why: state.why ?? "", group: group.id, until: state.until))
+                }
+            }
+        }
+        for device in config.devices where device.paused {
+            held.removeAll { $0.mac == device.mac }
+            held.append(HeldDevice(mac: device.mac, why: "device"))
+        }
+        let encoder = RouterConnection.makeEncoder()
+        let zone: String = config.system.timezone ?? ""
+        return "\"clock\":" + String(decoding: try encoder.encode(ClockStatus(zone: zone, trusted: true)), as: UTF8.self)
+            + ",\"groups\":" + String(decoding: try encoder.encode(states), as: UTF8.self)
+            + ",\"held\":" + String(decoding: try encoder.encode(held), as: UTF8.self)
+    }
 
     /// The name the sample router keeps pointing at itself, and its
     /// WireGuard server's public key.
@@ -289,7 +395,7 @@ public enum DemoRouter {
         return "[" + out.joined(separator: ",") + "]"
     }
 
-    static func status(now: Int64, rev: UInt64, name: String, control: String, inbound: String, shaping: String) -> String {
+    static func status(now: Int64, rev: UInt64, name: String, control: String, inbound: String, shaping: String, groups: String) -> String {
         let safeName = name.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "\"", with: "'")
         return """
         {"name":"\(safeName)","id":"3fa9c210","version":"v1.0.0","time":\(now),"uptime":93784,"temp":51.3,"ready":true,"rev":\(rev),"pairing":false,
@@ -311,13 +417,37 @@ public enum DemoRouter {
                  {"id":"us","name":"Streaming (US)","state":"off","rx":0,"tx":0}],
          "inbound":\(inbound),
          "shaping":\(shaping),
+         \(groups),
          "geoip":{"available":true,"date":"2026-11"},
          "adblock":{"enabled":true,"domains":78215,"blocked":1284,
                     "lists":[{"url":"https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts","domains":78215,"updated":\(now - 21_600)}]}}
         """
     }
 
-    static func devices(now: Int64) -> String {
+    /// The devices that are on the sample router's networks.
+    static let onlineDevices: Set<String> = [phone, laptop, tablet, reader, printer]
+
+    /// The sample devices with what the configuration says of each: the
+    /// settings made for it and the group it is in.
+    static func devices(_ config: RouterConfig, now: Int64) throws -> [DeviceInfo] {
+        var list = try RouterConnection.makeDecoder().decode([DeviceInfo].self, from: Data(seen(now: now).utf8))
+        for index in list.indices {
+            let mac: String = list[index].mac
+            let settings: DeviceSettings = config.devices.first(where: { $0.mac == mac }) ?? DeviceSettings(mac: mac)
+            list[index].name = settings.name
+            list[index].route = settings.route
+            list[index].paused = settings.paused
+            list[index].ip = settings.ip
+            list[index].noAdblock = settings.noAdblock
+            list[index].allowUntil = settings.allowUntil
+            list[index].group = config.group(of: mac)?.id
+        }
+        return list
+    }
+
+    /// What the sample router has seen of each device. The settings in
+    /// it are filled in from the configuration (`devices`).
+    static func seen(now: Int64) -> String {
         """
         [{"mac":"\(phone)","hostname":"iPhone","ipv4":"10.83.0.52","ipv6":["fd4c:91a7:20be:1:1c3a:77ff:fe20:9b01"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_400),"link":"wlan0","network":"lan","signal":-47,"up":412300288,"down":3865470566,"name":"","route":"","paused":false,"no_adblock":false},
          {"mac":"\(laptop)","hostname":"MacBook-Pro","ipv4":"10.83.0.57","ipv6":["fd4c:91a7:20be:1:8d2:41ff:fe7a:c4e2"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_100),"link":"wlan0","network":"lan","signal":-53,"up":1288490188,"down":9126805504,"name":"Work laptop","route":"vpn:home","paused":false,"ip":"10.83.0.57","no_adblock":true},

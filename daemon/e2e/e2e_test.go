@@ -456,6 +456,10 @@ func TestRouter(t *testing.T) {
 	os.Setenv("PORTER_SPEEDTEST_DURATION", "1500ms")
 	os.Setenv("PORTER_GEOIP_URL", "http://"+siteA+"/geoip/dbip-country-lite-%s.csv.gz")
 	os.Setenv("PORTER_GEOIP_MIN", "1")
+	// The router keeps a clock of its own, which system.set_time moves:
+	// the test of schedules (groups_test.go) makes it bedtime, and the
+	// clock of the machine this runs on is nobody's to set.
+	os.Setenv("PORTER_VIRTUAL_CLOCK", "1")
 	// One phone is paired already, as if it had been over Bluetooth:
 	// there is no Bluetooth here to pair one over, and control over the
 	// network is for paired phones only.
@@ -1485,6 +1489,9 @@ func TestRouter(t *testing.T) {
 			return exec.Command("ip", "-n", nsRtr, "link", "show", "br-guest").Run() != nil
 		})
 	})
+
+	// A group of devices that is offline at bedtime (groups_test.go).
+	t.Run("Groups", func(t *testing.T) { groups(t, home) })
 
 	// Coming in from outside: the owner's devices through the router's
 	// WireGuard server, and anybody through a forwarded port

@@ -395,7 +395,8 @@ final class FakeRouter: @unchecked Sendable {
         var endpoints = "null"
         if let control, let data = try? JSONEncoder().encode(control) { endpoints = String(decoding: data, as: UTF8.self) }
         let now = Int64(Date().timeIntervalSince1970)
-        return DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: endpoints, inbound: DemoRouter.inbound(config, now: now), shaping: DemoRouter.shaping(config))
+        let groups: String = (try? DemoRouter.groups(config, now: now)) ?? #""groups":[],"held":[]"#
+        return DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: endpoints, inbound: DemoRouter.inbound(config, now: now), shaping: DemoRouter.shaping(config), groups: groups)
     }
 
     /// Called with the lock held.
@@ -443,7 +444,7 @@ final class FakeRouter: @unchecked Sendable {
             if let id = params.id { applied[id] = config.rev }
             return Data("{\"rev\":\(config.rev)}".utf8)
         case "devices.list":
-            return Data(DemoRouter.devices(now: Int64(Date().timeIntervalSince1970)).utf8)
+            return try RouterConnection.makeEncoder().encode(try DemoRouter.devices(config, now: Int64(Date().timeIntervalSince1970)))
         case "radios.list":
             return Data(DemoRouter.radiosJSON.utf8)
         default:

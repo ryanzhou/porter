@@ -236,6 +236,49 @@ final class InteropTests: XCTestCase {
         let taken = try await router.checkConfig(clash)
         XCTAssertTrue(taken.error?.contains("reach home through") ?? false, taken.error ?? "accepted")
 
+        // Groups of devices and their schedules. A router answers with
+        // a list of groups, a time zone that is not set, and the groups
+        // of every rule's source; and it says its clock is confirmed,
+        // having had the time from this session.
+        XCTAssertEqual(config.groups, [])
+        XCTAssertEqual(config.system.timezone, "")
+        XCTAssertEqual(untouched.policy.rules.map(\.src.groups), [])
+        XCTAssertEqual(status.groups, [])
+        XCTAssertEqual(status.held, [])
+        XCTAssertEqual(status.clock, ClockStatus(zone: "", trusted: true))
+        let allWeek = GroupSchedule(id: "always", name: "Always", days: [0, 1, 2, 3, 4, 5, 6], from: "00:00", to: "00:00")
+        config.groups = [
+            DeviceGroup(id: "kids", name: "Kids", icon: "child", members: ["02:AA:00:00:00:04", "02:aa:00:00:00:05"], route: RouteAction.block.raw, noAdblock: true,
+                        schedules: [GroupSchedule.bedtime(id: "bed"), allWeek]),
+            DeviceGroup(id: "work", name: "Work", members: ["02:aa:00:00:00:01"], forNow: GroupOverride.pause(until: status.time + 3_600)),
+        ]
+        config.policy.rules.append(PolicyRule(id: "r3", name: "Kids", src: RuleSource(groups: ["kids"]), dst: RuleDestination(ports: ["6881"]), action: RouteAction.block.raw))
+        config.devices.append(DeviceSettings(mac: "02:aa:00:00:00:05", allowUntil: status.time + 3_600))
+        // A schedule needs the time zone, and a zone the router knows.
+        let noZone = try await router.checkConfig(config)
+        XCTAssertEqual(noZone.error, "Choose your time zone under Settings before using a schedule: the router has to know what time it is where you are.")
+        config.system.timezone = "Mars/Olympus_Mons"
+        let noSuchZone = try await router.checkConfig(config)
+        XCTAssertEqual(noSuchZone.error, "The router does not know the time zone “Mars/Olympus_Mons”. Choose one like Europe/Berlin.")
+        // Every zone this machine knows is one the router knows.
+        for zone in TimeZone.knownTimeZoneIdentifiers {
+            config.system.timezone = zone
+            let known = try await router.checkConfig(config)
+            XCTAssertNil(known.error, zone)
+        }
+        config.system.timezone = "Europe/Berlin"
+        var twoGroups = config
+        twoGroups.groups?[1].members.append("02:aa:00:00:00:04")
+        let inTwo = try await router.checkConfig(twoGroups)
+        XCTAssertEqual(inTwo.error, "02:aa:00:00:00:04 is in two groups, Kids and Work. A device can be in one group.")
+        var gone = config
+        gone.groups?.removeFirst()
+        let dangling = try await router.checkConfig(gone)
+        XCTAssertEqual(dangling.error, "The rule “Kids” applies to a group that no longer exists.")
+        gone.removeGroup("kids")
+        let removed = try await router.checkConfig(gone)
+        XCTAssertNil(removed.error)
+
         // The write names itself; sent again, as it is when its answer
         // was lost, it is answered again and made once.
         XCTAssertEqual(config.system.bluetoothOnly, false)
@@ -258,7 +301,7 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(stored.ethernet.first?.tagged, [])
         XCTAssertEqual(stored.networks[1].address, "10.84.0.1/24") // chosen by the router
         XCTAssertFalse(stored.networks[1].ulaPrefix.isEmpty)
-        XCTAssertEqual(stored.policy.rules.last?.src.networks, ["guest"])
+        XCTAssertEqual(stored.policy.rules.map(\.src.networks), [[], ["guest"], []])
         // The order asked for, completed by the router with its wired ports.
         XCTAssertEqual(Array(stored.wan.order.prefix(1)), [RouterConfig.uplinkPhone])
         XCTAssertTrue(stored.wan.order.contains(RouterConfig.uplinkWifi))
@@ -300,6 +343,37 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(reach.forwards.first?.to6, [])
         try await router.refreshInbound()
 
+        // The groups as the router holds them, and how they stand: one
+        // offline by a schedule that never ends, one paused for an hour.
+        XCTAssertEqual(stored.system.timezone, "Europe/Berlin")
+        XCTAssertEqual(stored.groups?.map(\.id), ["kids", "work"])
+        XCTAssertEqual(stored.group("kids")?.members, ["02:aa:00:00:00:04", "02:aa:00:00:00:05"]) // normalised by the router
+        XCTAssertEqual(stored.group("kids")?.schedules, [GroupSchedule.bedtime(id: "bed"), allWeek])
+        XCTAssertEqual(stored.group("kids")?.forNow, GroupOverride())
+        XCTAssertEqual(stored.group("work")?.forNow, GroupOverride.pause(until: status.time + 3_600))
+        XCTAssertEqual(stored.policy.rules.map(\.src.groups), [[], [], ["kids"]])
+        XCTAssertEqual(stored.devices.first(where: { $0.mac == "02:aa:00:00:00:05" })?.allowUntil, status.time + 3_600)
+        XCTAssertEqual(after.clock, ClockStatus(zone: "Europe/Berlin", trusted: true))
+        let kids = try XCTUnwrap(after.group("kids"))
+        XCTAssertTrue(kids.offline)
+        XCTAssertEqual(kids.why, "schedule")
+        XCTAssertNil(kids.until)
+        XCTAssertEqual(kids.connected, 0)
+        XCTAssertEqual(after.group("work"), GroupStatus(id: "work", connected: 0, offline: true, why: "timer", until: status.time + 3_600))
+        // Cut off: one device of each group. The other of the first has
+        // been let through for the hour.
+        XCTAssertEqual(after.held, [
+            HeldDevice(mac: "02:aa:00:00:00:01", why: "timer", group: "work", until: status.time + 3_600),
+            HeldDevice(mac: "02:aa:00:00:00:04", why: "schedule", group: "kids"),
+        ])
+        XCTAssertNil(after.held("02:aa:00:00:00:05"))
+        // Members are listed as devices although none has ever been seen.
+        let members = try await router.devices()
+        XCTAssertEqual(members.first(where: { $0.mac == "02:aa:00:00:00:04" })?.group, "kids")
+        XCTAssertEqual(members.first(where: { $0.mac == "02:aa:00:00:00:05" })?.allowUntil, status.time + 3_600)
+        XCTAssertEqual(members.first(where: { $0.mac == "02:aa:00:00:00:01" })?.group, "work")
+        XCTAssertNil(members.first(where: { $0.mac == "02:aa:00:00:00:03" })?.group)
+
         // A stale write is refused, an invalid one explained.
         do {
             _ = try await router.setConfig(config)
@@ -327,6 +401,16 @@ final class InteropTests: XCTestCase {
         try await router.setDevice(DeviceSettings(mac: "02:aa:00:00:00:02", name: "Phone", paused: true, noAdblock: true))
         let devices = try await router.devices()
         XCTAssertTrue(devices.contains { $0.mac == "02:aa:00:00:00:02" && $0.paused && $0.noAdblock && $0.displayName == "Phone" })
+        // A device that is paused itself is among those cut off; one
+        // whose allowance is taken back is cut off with its group; and a
+        // device that is forgotten leaves its group.
+        try await router.setDevice(DeviceSettings(mac: "02:aa:00:00:00:05"))
+        let cut = try await router.status()
+        XCTAssertEqual(cut.held("02:aa:00:00:00:02"), HeldDevice(mac: "02:aa:00:00:00:02", why: "device"))
+        XCTAssertEqual(cut.held("02:aa:00:00:00:05"), HeldDevice(mac: "02:aa:00:00:00:05", why: "schedule", group: "kids"))
+        try await router.forgetDevice(mac: "02:aa:00:00:00:05")
+        let left = try await router.config()
+        XCTAssertEqual(left.group("kids")?.members, ["02:aa:00:00:00:04"])
 
         var sawStatus = false
         let deadline = Date().addingTimeInterval(10)

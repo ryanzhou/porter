@@ -38,6 +38,8 @@ and can send some or all of your traffic through your VPN.
 - **See and manage what is connected.** Per-device traffic, live
   connections, pause a device, block ads for the whole network, run a
   speed test.
+- **Groups and schedules.** Put the children's devices in a group and
+  they are offline at bedtime, by themselves, every night.
 - **IPv6** works too, wherever the network the router joins offers it.
 
 ## What you need
@@ -270,15 +272,16 @@ from your VPN provider or your own server (or import the `.conf` file).
 - **Everything through the VPN:** set **Everything else**, the last row
   of the rules, to that VPN.
 - **One device:** open it on the **Devices** tab and set its **Route**.
+- **A group of devices:** set the **Route** on the group's page.
 - **One network:** set its **Route** under Settings → Wi-Fi & networks.
-- **Some destinations:** tap **Add rule** and choose sources (devices or
-  whole networks) and destinations (domains, address ranges, countries,
-  ports), then where that traffic goes: a VPN, **Direct**, or
+- **Some destinations:** tap **Add rule** and choose sources (devices,
+  groups or whole networks) and destinations (domains, address ranges,
+  countries, ports), then where that traffic goes: a VPN, **Direct**, or
   **Blocked**.
 
 Rules are tried from the top and traffic follows the first one it fits;
-after the rules comes the device's own route, then its network's, then
-**Everything else**. Tap **Edit**
+after the rules comes the device's own route, then its group's, then
+its network's, then **Everything else**. Tap **Edit**
 to reorder, swipe a rule right to turn it off.
 
 **Kill switch** (per VPN, on by default): while the VPN is disconnected,
@@ -404,6 +407,55 @@ While any of this is switched on, the router asks a Cloudflare page now
 and then which address the internet sees it at; that is how it tells
 these cases apart.
 
+## Groups and schedules
+
+A group is a set of devices you look after together: the children's
+devices, work, the things that have no business online at night. On the
+**Devices** tab tap **New group** and name it, then open it and tap
+**Choose devices**. (Or open a device and pick its **Group** there.) A
+device is in one group at most. The Devices tab lists the groups first,
+each with how many of its devices are online and whether it is paused
+right now, and under them the devices that are in no group.
+
+On a group's page:
+
+- **Pause internet access** pauses all of its devices until you switch
+  it back. **Pause for a while** does it for half an hour, an hour or
+  two, and ends by itself.
+- **Schedules** are times when its devices have no internet access. Tap
+  **Add a schedule**: it starts out as bedtime, Sunday to Thursday from
+  21:00 to 07:00, so if that is what you want, tap **Add** and it is
+  done. Otherwise change the days and the times first. A group can have
+  several schedules.
+- While a schedule is in force the page says until when, with **Allow
+  until** that time (tonight is skipped, tomorrow is as usual) and
+  **Allow for a while** (half an hour more, an hour or two).
+- **Route** and **Skip ad blocking** apply to every device in the group.
+
+What a device says itself comes first. A device with a **Route** of its
+own keeps it. A device is paused when it is paused itself or its group
+is; its page says which, and until when. Switching **Pause internet
+access** off on the page of a device that is paused with its group asks
+what you mean: that one device until the schedule ends (the laptop, for
+homework), or the whole group.
+
+Paused means the same for a group as for one device: nothing of theirs
+gets to the internet or to your other networks, over IPv4 or IPv6,
+whatever they had open ends, and a port forwarded to one of them is
+closed until it is back. A rule on the VPN tab can apply to a group
+(**From groups**): it then holds for whichever devices are in it.
+
+**The time.** Schedules go by the clock where you live, daylight saving
+included. The app tells the router your phone's time zone the first
+time it connects; if the router moves, change it under Settings → Time
+zone, which also shows what the router's clock says. The Pi has no
+battery for its clock. It learns the time from the internet as soon as
+it is online, and from the app whenever that connects. After a power
+cut, until one of the two has happened, schedules go by the time the
+router last knew: right after a short cut, and behind by as long as the
+power was off after a long one, which lasts only until the router is
+online again.
+
 ## Everyday things
 
 - **Devices.** See what is connected, rename it, **pause** its internet,
@@ -506,8 +558,13 @@ down** while something big is uploading. If they do not move, the
 speeds are set higher than the source delivers: tap **Measure** again,
 at a time when the connection is as slow as it gets.
 
-**Online, but a device has no internet.** Check it is not paused, and
-whether it is routed through a VPN that is down (kill switch).
+**Online, but a device has no internet.** Check it is not paused, by
+itself or with its group (its page on the Devices tab says), and whether
+it is routed through a VPN that is down (kill switch).
+
+**A schedule starts or ends at the wrong hour.** Settings → Time zone
+shows the time the router has. If the hour is wrong, the time zone is;
+choose the one you live in.
 
 **Devices behind a managed switch get no address.** The port on the
 switch that the router's cable is in has to be set the way the port's

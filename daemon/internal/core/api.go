@@ -23,6 +23,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/netctl"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
+	"github.com/ryanzhou/porter/daemon/internal/sched"
 	"github.com/ryanzhou/porter/daemon/internal/shape"
 	"github.com/ryanzhou/porter/daemon/internal/speedtest"
 	"github.com/ryanzhou/porter/daemon/internal/stats"
@@ -422,6 +423,12 @@ type Status struct {
 	// Shaping says, for each uplink that is to be held to a speed, how
 	// that stands.
 	Shaping []shape.Status `json:"shaping"`
+	// Clock is what the router knows of the time; Groups how each group
+	// of devices stands, in the order of the configuration; Held the
+	// devices that are cut off right now, whatever cuts them off.
+	Clock  ClockStatus   `json:"clock"`
+	Groups []GroupStatus `json:"groups"`
+	Held   []HeldDevice  `json:"held"`
 }
 
 // GeoIPStatus says whether country rules and country display can work.
@@ -473,14 +480,18 @@ func (c *Core) status() Status {
 	states := c.wan.States()
 	st := Status{
 		Name: cfg.System.Name, ID: routerID(c.identity.Public), Version: c.opt.Version,
-		Time: time.Now().Unix(), Uptime: int64(time.Since(c.started) / time.Second), Temp: system.CPUTemp(),
+		Time: c.now().Unix(), Uptime: int64(time.Since(c.started) / time.Second), Temp: system.CPUTemp(),
 		Ready: cfg.Ready(), Rev: cfg.Rev, Pairing: c.pairingOpen(),
 		Internet: wan.StDown, WAN: states, APs: []wifi.APStatus{}, STAs: []wifi.STAStatus{}, VPNs: []VPNStatus{},
 		OffAir: append([]string{}, c.offAir...), Ports: []PortStatus{},
 		LAN:     LANStatus{Address: cfg.Main().Address, Networks: map[string]int{}, Prefixes: map[string]string{}},
 		Control: c.controlStatus(),
 		Shaping: c.shape.Status(),
+		Clock:   ClockStatus{Zone: cfg.System.Timezone, Trusted: c.clockTrusted},
 	}
+	devs := c.devs.List()
+	groups, held := sched.Evaluate(cfg, c.now())
+	st.Groups, st.Held = groupStatus(cfg, groups, held, devs)
 	for _, p := range c.ports {
 		st.Ports = append(st.Ports, PortStatus{Name: p.Name, Label: p.Label, Phone: p.Phone, Carrier: netx.Carrier(p.Name)})
 	}
@@ -504,7 +515,7 @@ func (c *Core) status() Status {
 	for id, g := range c.global {
 		st.LAN.Prefixes[id] = g.Masked().String()
 	}
-	for _, d := range c.devs.List() {
+	for _, d := range devs {
 		if d.Online {
 			st.LAN.Clients++
 			if d.Network != "" {
@@ -606,6 +617,25 @@ type DeviceView struct {
 	Portal bool   `json:"portal,omitempty"`
 	// NoAdblock: the device is exempt from ad blocking.
 	NoAdblock bool `json:"no_adblock"`
+	// AllowUntil: the device is let online although a schedule or a timer
+	// has its group offline, until then. Group is the id of the group it
+	// is in. Whether it is cut off right now, by its own settings or its
+	// group's, is in the status (Held).
+	AllowUntil int64  `json:"allow_until,omitempty"`
+	Group      string `json:"group,omitempty"`
+}
+
+// deviceView merges a device's settings into what is known of it. It must
+// run on the control loop.
+func (c *Core) deviceView(e devices.Entry) DeviceView {
+	v := DeviceView{Entry: e, Portal: e.MAC != "" && e.MAC == c.portalDev}
+	if d := c.cfg.Device(e.MAC); d != nil {
+		v.Name, v.Route, v.Paused, v.IP, v.NoAdblock, v.AllowUntil = d.Name, d.Route, d.Paused, d.IP, d.NoAdblock, d.AllowUntil
+	}
+	if g := c.cfg.GroupOf(e.MAC); g != nil {
+		v.Group = g.ID
+	}
+	return v
 }
 
 // RadioView is a radio's hardware description and configured role.
@@ -917,15 +947,22 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 			seen := map[string]bool{}
 			for _, e := range c.devs.List() {
 				seen[e.MAC] = true
-				v := DeviceView{Entry: e, Portal: e.MAC == c.portalDev}
-				if d := c.cfg.Device(e.MAC); d != nil {
-					v.Name, v.Route, v.Paused, v.IP, v.NoAdblock = d.Name, d.Route, d.Paused, d.IP, d.NoAdblock
-				}
-				out = append(out, v)
+				out = append(out, c.deviceView(e))
 			}
+			// And those the router has not met, or has forgotten, but has
+			// settings for or keeps in a group.
 			for _, d := range c.cfg.Devices {
 				if !seen[d.MAC] {
-					out = append(out, DeviceView{Entry: devices.Entry{MAC: d.MAC}, Name: d.Name, Route: d.Route, Paused: d.Paused, IP: d.IP, NoAdblock: d.NoAdblock})
+					seen[d.MAC] = true
+					out = append(out, c.deviceView(devices.Entry{MAC: d.MAC}))
+				}
+			}
+			for _, g := range c.cfg.Groups {
+				for _, m := range g.Members {
+					if !seen[m] {
+						seen[m] = true
+						out = append(out, c.deviceView(devices.Entry{MAC: m}))
+					}
 				}
 			}
 		})
@@ -944,7 +981,7 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 			if name := forwardedTo(cfg, p.MAC); name != "" && p.IP == "" {
 				return fmt.Errorf("This device has a port forwarded to it (“%s”) and keeps its fixed address for as long as it has. Remove the forward first.", name)
 			}
-			empty := p.Name == "" && p.Route == "" && !p.Paused && p.IP == "" && !p.NoAdblock
+			empty := p.Name == "" && p.Route == "" && !p.Paused && p.IP == "" && !p.NoAdblock && p.AllowUntil == 0
 			for i := range cfg.Devices {
 				if cfg.Devices[i].MAC == p.MAC {
 					if empty {
@@ -979,6 +1016,7 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 					break
 				}
 			}
+			leaveGroups(cfg, mac)
 			return nil
 		})
 		if perr == nil {
@@ -1302,12 +1340,9 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		if p.UnixMS < c.opt.BuildTime.UnixMilli() {
 			return nil, proto.Errf(proto.ErrInvalid, "time is earlier than this software was built")
 		}
-		adjusted, err := system.TimeFromPhone(time.UnixMilli(p.UnixMS))
+		adjusted, err := c.timeFromPhone(time.UnixMilli(p.UnixMS))
 		if err != nil {
 			return nil, proto.Errf(proto.ErrInternal, err.Error())
-		}
-		if adjusted {
-			system.SaveClock(filepath.Join(c.opt.DataDir, "clock"))
 		}
 		return map[string]bool{"adjusted": adjusted}, nil
 

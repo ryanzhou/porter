@@ -24,6 +24,9 @@ public struct RouterConfig: Codable, Equatable {
     public var vpns: [VPNProfile]
     public var policy: PolicyConfig
     public var devices: [DeviceSettings]
+    /// Sets of devices that share settings and schedules; nil from a
+    /// router too old to have groups.
+    public var groups: [DeviceGroup]?
     public var speedtest: SpeedTestConfig
     /// What may reach the router and its networks from outside; nil from
     /// a router too old to let anything in.
@@ -150,6 +153,9 @@ public struct SystemConfig: Codable, Equatable {
     /// The router is controlled over Bluetooth only, and not also over
     /// its own networks. Nil reads as false.
     public var bluetoothOnly: Bool?
+    /// The IANA name of the time zone schedules are kept in, like
+    /// "Europe/Berlin"; nil or empty while none is set.
+    public var timezone: String?
 }
 
 public struct SSHConfig: Codable, Equatable {
@@ -638,11 +644,20 @@ public struct RuleSource: Codable, Equatable {
     public var cidrs: [String]
     /// Ids of networks: every device on them.
     public var networks: [String]
-    public init(devices: [String] = [], cidrs: [String] = [], networks: [String] = []) {
+    /// Ids of groups: every device in them. Nil reads as none.
+    public var groups: [String]?
+    public init(devices: [String] = [], cidrs: [String] = [], networks: [String] = [], groups: [String]? = nil) {
         self.devices = devices
         self.cidrs = cidrs
         self.networks = networks
+        self.groups = groups
     }
+
+    /// The groups as a list, whichever way "none" was said.
+    public var groupIDs: [String] { groups ?? [] }
+
+    /// Nothing is named: the rule is for every device.
+    public var isEveryone: Bool { devices.isEmpty && cidrs.isEmpty && networks.isEmpty && groupIDs.isEmpty }
 }
 
 public struct RuleDestination: Codable, Equatable {
@@ -669,15 +684,219 @@ public struct DeviceSettings: Codable, Equatable, Identifiable {
     public var ip: String?
     /// Exempts the device from ad blocking.
     public var noAdblock: Bool
+    /// Until then (unix time) the device is let online although a
+    /// schedule or a timer has its group paused (the group's own switch
+    /// pauses it all the same); nil, 0 or a time that has passed for not
+    /// at all.
+    public var allowUntil: Int64?
     public var id: String { mac }
 
-    public init(mac: String, name: String = "", route: String = "", paused: Bool = false, ip: String? = nil, noAdblock: Bool = false) {
+    public init(mac: String, name: String = "", route: String = "", paused: Bool = false, ip: String? = nil, noAdblock: Bool = false, allowUntil: Int64? = nil) {
         self.mac = mac
         self.name = name
         self.route = route
         self.paused = paused
         self.ip = ip
         self.noAdblock = noAdblock
+        self.allowUntil = allowUntil
+    }
+}
+
+/// A set of devices looked after together: "the kids' devices", "work".
+/// What a device says itself comes first: its own route wins over its
+/// group's, it skips ad blocking if either says so, and its internet
+/// access is paused if its own is or its group's is.
+public struct DeviceGroup: Codable, Equatable, Identifiable {
+    public var id: String
+    public var name: String
+    /// The picture the app shows for it: a key of `GroupIcon`.
+    public var icon: String
+    /// The hardware addresses of its devices. A device is in one group
+    /// at most.
+    public var members: [String]
+    /// "", "direct", "block" or "vpn:<id>": for members without a route
+    /// of their own.
+    public var route: String
+    /// Every member's internet access is paused until this is switched
+    /// back.
+    public var paused: Bool
+    /// Every member skips ad blocking.
+    public var noAdblock: Bool
+    /// The times the group's internet access is paused.
+    public var schedules: [GroupSchedule]
+    /// What was asked for now, against the schedules.
+    public var forNow: GroupOverride
+
+    enum CodingKeys: String, CodingKey {
+        case forNow = "override"
+        case id, name, icon, members, route, paused, noAdblock, schedules
+    }
+
+    public init(id: String, name: String, icon: String = "", members: [String] = [], route: String = "", paused: Bool = false, noAdblock: Bool = false, schedules: [GroupSchedule] = [], forNow: GroupOverride = GroupOverride()) {
+        self.id = id
+        self.name = name
+        self.icon = icon
+        self.members = members
+        self.route = route
+        self.paused = paused
+        self.noAdblock = noAdblock
+        self.schedules = schedules
+        self.forNow = forNow
+    }
+}
+
+/// A time of day, on some days of the week, during which a group's
+/// internet access is paused: "Bedtime: Sunday to Thursday, 21:00 to
+/// 07:00". The times are those of a clock in the router's time zone.
+public struct GroupSchedule: Codable, Equatable, Identifiable {
+    public var id: String
+    public var name: String
+    public var enabled: Bool
+    /// The days of the week it starts on, 0 for Sunday to 6 for Saturday.
+    public var days: [Int]
+    /// Times of day, "21:00". An end that is not after the start is on
+    /// the following day.
+    public var from: String
+    public var to: String
+
+    public init(id: String, name: String = "", enabled: Bool = true, days: [Int] = [], from: String = "21:00", to: String = "07:00") {
+        self.id = id
+        self.name = name
+        self.enabled = enabled
+        self.days = days
+        self.from = from
+        self.to = to
+    }
+
+    /// What most schedules are: school nights, nine to seven.
+    public static func bedtime(id: String) -> GroupSchedule {
+        GroupSchedule(id: id, name: "Bedtime", days: [0, 1, 2, 3, 4])
+    }
+
+    /// A time of day as the router writes it, "07:05".
+    public static func time(hour: Int, minute: Int) -> String {
+        String(format: "%02d:%02d", hour, minute)
+    }
+
+    /// The hour and minute of a time of day written that way; nil for
+    /// anything else.
+    public static func parts(of time: String) -> (hour: Int, minute: Int)? {
+        let pieces = time.split(separator: ":", omittingEmptySubsequences: false)
+        guard time.utf8.count == 5, pieces.count == 2, let hour = Int(pieces[0]), let minute = Int(pieces[1]),
+              (0...23).contains(hour), (0...59).contains(minute) else { return nil }
+        return (hour, minute)
+    }
+
+    /// It ends on the day after the one it starts on.
+    public var endsNextDay: Bool { to <= from }
+
+    private static let dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+    /// The days in words: "Every day", "Weekdays", "Weekends", "Sunday
+    /// to Thursday", or "Mon, Wed and Fri".
+    public var daysText: String {
+        let set = Set(days.filter { (0...6).contains($0) })
+        if set.isEmpty { return "No days" }
+        if set.count == 7 { return "Every day" }
+        if set == [1, 2, 3, 4, 5] { return "Weekdays" }
+        if set == [0, 6] { return "Weekends" }
+        // Days that follow one another, round the end of the week too.
+        if set.count >= 3, let first = (0...6).first(where: { set.contains($0) && !set.contains(($0 + 6) % 7) }),
+           (0..<set.count).allSatisfy({ set.contains((first + $0) % 7) }) {
+            return GroupSchedule.dayNames[first] + " to " + GroupSchedule.dayNames[(first + set.count - 1) % 7]
+        }
+        // From Monday, as a week is read.
+        let listed: [String] = [1, 2, 3, 4, 5, 6, 0].filter { set.contains($0) }.map { String(GroupSchedule.dayNames[$0].prefix(3)) }
+        if listed.count == 1 { return GroupSchedule.dayNames[set.first ?? 0] + "s" }
+        return listed.dropLast().joined(separator: ", ") + " and " + (listed.last ?? "")
+    }
+}
+
+/// What a person asked of a group for now: "allow" lets it online
+/// although a schedule says otherwise, "pause" pauses it, each until a
+/// time. One whose time has passed means nothing.
+public struct GroupOverride: Codable, Equatable {
+    /// "", "allow" or "pause".
+    public var mode: String
+    /// Unix time.
+    public var until: Int64
+
+    public init(mode: String = "", until: Int64 = 0) {
+        self.mode = mode
+        self.until = until
+    }
+
+    public static func allow(until: Int64) -> GroupOverride { GroupOverride(mode: "allow", until: until) }
+    public static func pause(until: Int64) -> GroupOverride { GroupOverride(mode: "pause", until: until) }
+}
+
+public extension RouterConfig {
+    /// How many groups the router keeps, and schedules for each.
+    static let maxGroups = 16
+    static let maxSchedules = 8
+
+    /// The groups as a list, whichever way "none" was said.
+    var groupList: [DeviceGroup] { groups ?? [] }
+
+    func group(_ id: String) -> DeviceGroup? { groupList.first { $0.id == id } }
+
+    /// The group a device is in.
+    func group(of mac: String) -> DeviceGroup? { groupList.first { $0.members.contains(mac) } }
+
+    /// Changes the group with the given id in place.
+    mutating func editGroup(_ id: String, _ edit: (inout DeviceGroup) -> Void) {
+        guard var list = groups, let index = list.firstIndex(where: { $0.id == id }) else { return }
+        edit(&list[index])
+        groups = list
+    }
+
+    /// Puts a device into a group, taking it out of the one it was in:
+    /// a device is in one at most. Nil takes it out of every group.
+    mutating func setGroup(of mac: String, to id: String?) {
+        var list: [DeviceGroup] = groupList
+        for index in list.indices {
+            list[index].members.removeAll { $0 == mac }
+            if list[index].id == id {
+                list[index].members.append(mac)
+            }
+        }
+        groups = list
+    }
+
+    /// Pauses a group until a time. What single devices of it had been
+    /// allowed for now ends with that: the later wish is the one that
+    /// holds.
+    mutating func pauseGroup(_ id: String, until: Int64) {
+        editGroup(id) { $0.forNow = GroupOverride.pause(until: until) }
+        let members: [String] = group(id)?.members ?? []
+        for index in devices.indices where members.contains(devices[index].mac) {
+            devices[index].allowUntil = nil
+        }
+    }
+
+    /// Removes a group. Rules that named it lose it as a source, and a
+    /// rule that was for this group alone goes with it: left behind
+    /// with no source, it would become a rule for every device.
+    mutating func removeGroup(_ id: String) {
+        groups = groupList.filter { $0.id != id }
+        var kept: [PolicyRule] = []
+        for var rule in policy.rules {
+            guard rule.src.groupIDs.contains(id) else {
+                kept.append(rule)
+                continue
+            }
+            rule.src.groups = rule.src.groupIDs.filter { $0 != id }
+            if !rule.src.isEveryone {
+                kept.append(rule)
+            }
+        }
+        policy.rules = kept
+    }
+
+    /// The rules that are for one group alone, which `removeGroup`
+    /// removes with it.
+    func rulesOnly(forGroup id: String) -> [PolicyRule] {
+        policy.rules.filter { $0.src.groupIDs == [id] && $0.src.devices.isEmpty && $0.src.cidrs.isEmpty && $0.src.networks.isEmpty }
     }
 }
 
@@ -717,6 +936,67 @@ public struct RouterStatus: Codable, Equatable {
     /// How each internet source that is to be held to a speed stands;
     /// nil from a router too old to hold any.
     public var shaping: [ShapingStatus]?
+    /// What the router knows of the time, how each group stands, and
+    /// the devices whose internet access is paused right now, by
+    /// themselves or with their group; nil from a router too old to
+    /// have groups.
+    public var clock: ClockStatus?
+    public var groups: [GroupStatus]?
+    public var held: [HeldDevice]?
+}
+
+/// What the router knows of the time, for schedules.
+public struct ClockStatus: Codable, Equatable {
+    /// The time zone schedules are kept in; empty while none is set.
+    public var zone: String
+    /// Since it started, the router has had its clock confirmed: by a
+    /// time server, by this app, or by the site it checks its
+    /// connection against. Until then schedules go by the time the
+    /// router last knew.
+    public var trusted: Bool
+}
+
+/// How a group stands.
+public struct GroupStatus: Codable, Equatable, Identifiable {
+    public var id: String
+    /// How many of its devices are on one of the networks now.
+    public var connected: Int
+    /// Its devices' internet access is paused, by what `why` says:
+    /// "paused" (the group's switch), "timer" (paused until a time) or
+    /// "schedule", with the schedule's id.
+    public var offline: Bool
+    public var why: String?
+    public var schedule: String?
+    /// When it comes back by itself (unix time); nil when it does not.
+    public var until: Int64?
+    /// A schedule would have it paused now, and it has been allowed
+    /// online until then.
+    public var allowedUntil: Int64?
+    /// When a schedule next pauses it, within a week, and which.
+    public var next: Int64?
+    public var nextSchedule: String?
+}
+
+/// A device whose internet access is paused right now.
+public struct HeldDevice: Codable, Equatable, Identifiable {
+    public var mac: String
+    /// "device" (it is paused itself), or what pauses its group, as in
+    /// `GroupStatus`, with the group's id and until when.
+    public var why: String
+    public var group: String?
+    public var until: Int64?
+    public var id: String { mac }
+
+    /// Paused through its group, not by its own switch.
+    public var byGroup: Bool { why != "device" }
+}
+
+public extension RouterStatus {
+    func group(_ id: String) -> GroupStatus? { groups?.first { $0.id == id } }
+
+    /// What pauses a device's internet access right now; nil when
+    /// nothing does.
+    func held(_ mac: String) -> HeldDevice? { held?.first { $0.mac == mac } }
 }
 
 /// How holding one internet source to its speeds stands.
@@ -1098,6 +1378,10 @@ public struct DeviceInfo: Codable, Equatable, Identifiable {
     public var ip: String?
     public var portal: Bool?
     public var noAdblock: Bool
+    /// As in `DeviceSettings`.
+    public var allowUntil: Int64?
+    /// The id of the group the device is in.
+    public var group: String?
     public var id: String { mac }
 
     /// The name to show: the user's, else the device's own, else its MAC.
@@ -1108,7 +1392,7 @@ public struct DeviceInfo: Codable, Equatable, Identifiable {
     }
 
     public var settings: DeviceSettings {
-        DeviceSettings(mac: mac, name: name, route: route, paused: paused, ip: ip, noAdblock: noAdblock)
+        DeviceSettings(mac: mac, name: name, route: route, paused: paused, ip: ip, noAdblock: noAdblock, allowUntil: allowUntil)
     }
 }
 

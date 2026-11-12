@@ -218,6 +218,9 @@ struct VPNDetailView: View {
                 for index in cfg.networks.indices where cfg.networks[index].route == action {
                     cfg.networks[index].route = ""
                 }
+                for group in cfg.groupList where group.route == action {
+                    cfg.editGroup(group.id) { $0.route = "" }
+                }
             }
             if ok {
                 dismiss()
@@ -706,6 +709,7 @@ private struct RuleRow: View {
     /// Who: "All devices", one device's name, or the first of several.
     private var source: String {
         var names: [String] = rule.src.networks.map { model.networkName($0) }
+        names.append(contentsOf: rule.src.groupIDs.map { model.groupName($0) })
         names.append(contentsOf: rule.src.devices.map { model.deviceName($0) })
         names.append(contentsOf: rule.src.cidrs)
         guard let first = names.first else { return "All devices" }
@@ -810,12 +814,15 @@ struct RuleEditorView: View {
     }
 
     /// Where the traffic comes from: all devices, or the networks,
-    /// devices and addresses chosen.
+    /// groups, devices and addresses chosen.
     @ViewBuilder
     private var sourceSections: some View {
         sourceAllSection
         if model.hasSeveralNetworks || !draft.src.networks.isEmpty {
             sourceNetworksSection
+        }
+        if !(model.config?.groupList ?? []).isEmpty {
+            sourceGroupsSection
         }
         if !deviceChoices.isEmpty {
             sourceDevicesSection
@@ -872,11 +879,9 @@ struct RuleEditorView: View {
         }
     }
 
-    /// No network, device or address is chosen: the rule is for traffic
-    /// from every device.
-    private var anySource: Bool {
-        draft.src.networks.isEmpty && draft.src.devices.isEmpty && draft.src.cidrs.isEmpty
-    }
+    /// No network, group, device or address is chosen: the rule is for
+    /// traffic from every device.
+    private var anySource: Bool { draft.src.isEveryone }
 
     /// No domain, address or country is chosen: the rule is for traffic
     /// to anywhere.
@@ -885,11 +890,12 @@ struct RuleEditorView: View {
     }
 
     /// Says outright what an empty source means. Choosing it clears the
-    /// networks, devices and addresses below.
+    /// networks, groups, devices and addresses below.
     private var sourceAllSection: some View {
         Section {
             Button {
                 draft.src.networks = []
+                draft.src.groups = []
                 draft.src.devices = []
                 draft.src.cidrs = []
             } label: {
@@ -951,6 +957,30 @@ struct RuleEditorView: View {
             }
         } header: {
             Text("From networks")
+        }
+    }
+
+    /// Groups as the source: every device in them, whoever joins or
+    /// leaves later.
+    private var sourceGroupsSection: some View {
+        Section {
+            ForEach(model.config?.groupList ?? []) { group in
+                Button {
+                    toggleGroup(group.id)
+                } label: {
+                    HStack {
+                        Text(group.name)
+                        Spacer()
+                        if draft.src.groupIDs.contains(group.id) {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.tint)
+                        }
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+        } header: {
+            Text("From groups")
         }
     }
 
@@ -1020,6 +1050,16 @@ struct RuleEditorView: View {
         } else {
             draft.src.networks.append(id)
         }
+    }
+
+    private func toggleGroup(_ id: String) {
+        var chosen: [String] = draft.src.groupIDs
+        if let index = chosen.firstIndex(of: id) {
+            chosen.remove(at: index)
+        } else {
+            chosen.append(id)
+        }
+        draft.src.groups = chosen
     }
 
     private func toggleDevice(_ mac: String) {

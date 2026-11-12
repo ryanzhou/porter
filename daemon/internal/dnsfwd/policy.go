@@ -26,7 +26,8 @@ type Policy struct {
 	AdAllow  SuffixSet
 	AdExempt map[string]bool
 	Rules    []Rule
-	// Paused devices are refused outright.
+	// Paused devices are refused outright: those paused themselves, and
+	// those whose group is offline.
 	Paused map[string]bool
 	// DeviceRoute holds per-device actions, NetRoute those of the
 	// router's networks (matched by the client's address); Default applies
@@ -156,7 +157,8 @@ func RulesFrom(c *config.Config, global map[string]netip.Prefix) []Rule {
 			Domains: NewSuffixSet(r.Dst.Domains),
 			Action:  r.Action,
 		}
-		for _, m := range r.Src.Devices {
+		// The devices named one by one, and the members of the groups.
+		for _, m := range c.SrcDevices(r.Src) {
 			cr.SrcMACs[m] = true
 		}
 		for _, s := range r.Src.CIDRs {
@@ -183,6 +185,19 @@ func prefixesOf(n config.Network, global map[string]netip.Prefix) []netip.Prefix
 		out = append(out, g.Masked())
 	}
 	return out
+}
+
+// SetDevices fills in what the policy says of single devices: which are
+// cut off (held: those paused themselves and those whose group is offline
+// right now, as sched.Evaluate has them), which route each has, of its own
+// or from its group, and which skip ad blocking.
+func (p *Policy) SetDevices(c *config.Config, held []string) {
+	p.Paused = map[string]bool{}
+	for _, mac := range held {
+		p.Paused[mac] = true
+	}
+	p.DeviceRoute = c.DeviceRoutes()
+	p.AdExempt = c.AdExempt()
 }
 
 // NetRoutesFrom lists the routes set on networks; global as for RulesFrom.

@@ -44,6 +44,7 @@ private struct RouterSettingsSection: View {
         Section {
             SettingsLink(symbol: "wifi.router.fill", title: "Router name", value: model.config?.system.name ?? "") { RouterNamePage() }
             SettingsLink(symbol: "globe.europe.africa.fill", title: "Country", value: countryName) { CountryPage() }
+            SettingsLink(symbol: "clock.fill", title: "Time zone", value: zoneLabel(model.config?.system.timezone ?? "")) { TimeZonePage() }
             SettingsLink(symbol: "terminal.fill", title: "SSH", value: onOff(model.config?.system.ssh.enabled)) { SSHPage() }
             SettingsLink(symbol: "speedometer", title: "Speed test server") { SpeedTestServerPage() }
         }
@@ -226,6 +227,71 @@ private struct CountryFields: View {
             CountryPicker(selection: $country)
         } footer: {
             Text("The country decides which Wi-Fi channels the router is allowed to use.")
+        }
+    }
+}
+
+// MARK: - Time zone
+
+private struct TimeZonePage: View {
+    var body: some View {
+        ConfigEditor(
+            "Time zone",
+            \RouterConfig.system.timezone,
+            valid: { (zone: String?) -> Bool in zone?.isEmpty == false }
+        ) { (zone: Binding<String?>) in
+            TimeZoneFields(zone: zone)
+        }
+    }
+}
+
+private struct TimeZoneFields: View {
+    @EnvironmentObject private var model: AppModel
+    @Binding var zone: String?
+
+    private var chosen: String { zone ?? "" }
+    private var phoneZone: String { TimeZone.current.identifier }
+
+    private var selection: Binding<String> {
+        Binding(
+            get: { chosen },
+            set: { value in zone = value }
+        )
+    }
+
+    /// What the router's clock shows in the zone chosen, so that a wrong
+    /// choice is seen at once.
+    private var note: String {
+        var text: String = "Schedules for groups of devices go by the time in this zone, daylight saving included."
+        guard let status = model.status, let shown = TimeZone(identifier: chosen) else { return text }
+        let formatter = DateFormatter()
+        formatter.timeZone = shown
+        formatter.setLocalizedDateFormatFromTemplate("EEEjmm")
+        text += " There the router's clock shows " + formatter.string(from: Date(timeIntervalSince1970: TimeInterval(status.time))) + "."
+        if status.clock?.trusted == false {
+            text += " The router has not been able to check the time since it started."
+        }
+        return text
+    }
+
+    var body: some View {
+        Section {
+            Picker("Time zone", selection: selection) {
+                if chosen.isEmpty {
+                    Text("Not set").tag("")
+                } else if !TimeZone.knownTimeZoneIdentifiers.contains(chosen) {
+                    Text(zoneLabel(chosen)).tag(chosen)
+                }
+                ForEach(TimeZone.knownTimeZoneIdentifiers, id: \.self) { name in
+                    Text(zoneLabel(name)).tag(name)
+                }
+            }
+            .pickerStyle(.navigationLink)
+            if chosen != phoneZone {
+                Button("Use this phone's time zone") { zone = phoneZone }
+            }
+        } footer: {
+            Text(note)
         }
     }
 }

@@ -114,7 +114,11 @@ struct DemoScreen: View {
         case "adblock":
             NavigationStack { AdblockPage() }
         case "device":
-            NavigationStack { DeviceDetailView(mac: model.devices.first?.mac ?? "") }
+            // A device that is in a group, where there is one: its page
+            // has the most to show.
+            NavigationStack { DeviceDetailView(mac: (model.devices.first(where: { $0.group != nil }) ?? model.devices.first)?.mac ?? "") }
+        case "group":
+            NavigationStack { GroupDetailView(groupID: model.config?.groupList.first?.id ?? "") }
         case "software":
             NavigationStack { SoftwarePage() }
         case "networks":

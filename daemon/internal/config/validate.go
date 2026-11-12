@@ -107,6 +107,7 @@ func (c *Config) Normalize() {
 	c.Ethernet = ports
 	c.normalizeNetworks()
 	c.normalizeInbound()
+	c.normalizeGroups()
 	for i := range c.Ethernet {
 		e := &c.Ethernet[i]
 		e.IP.normalize()
@@ -347,6 +348,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateDevices(); err != nil {
+		return err
+	}
+	if err := c.validateGroups(); err != nil {
 		return err
 	}
 	if err := c.validateSpeedTest(); err != nil {
@@ -1191,6 +1195,9 @@ func (c *Config) validateDevices() error {
 		if err := c.validAction(d.Route, true); err != nil {
 			return fmt.Errorf("device %s: %w", d.MAC, err)
 		}
+		if d.AllowUntil < 0 || d.AllowUntil >= maxUnix {
+			return fmt.Errorf("device %s: until when it is allowed is not a time", d.MAC)
+		}
 		if d.IP != "" {
 			a, err := netip.ParseAddr(d.IP)
 			var home *Network
@@ -1261,7 +1268,12 @@ func (c *Config) validatePolicy() error {
 				return fmt.Errorf("The rule “%s” applies to a network that no longer exists.", r.Name)
 			}
 		}
-		if len(r.Src.Networks) > MaxNetworks || len(r.Src.Devices) > 64 || len(r.Src.CIDRs) > 64 || len(r.Dst.Domains) > 256 || len(r.Dst.CIDRs) > 256 || len(r.Dst.Ports) > 32 || len(r.Dst.Countries) > 64 {
+		for _, id := range r.Src.Groups {
+			if c.Group(id) == nil {
+				return fmt.Errorf("The rule “%s” applies to a group that no longer exists.", r.Name)
+			}
+		}
+		if len(r.Src.Networks) > MaxNetworks || len(r.Src.Groups) > MaxGroups || len(r.Src.Devices) > 64 || len(r.Src.CIDRs) > 64 || len(r.Dst.Domains) > 256 || len(r.Dst.CIDRs) > 256 || len(r.Dst.Ports) > 32 || len(r.Dst.Countries) > 64 {
 			return fmt.Errorf("rule %q: too many entries", r.Name)
 		}
 		for _, m := range r.Src.Devices {

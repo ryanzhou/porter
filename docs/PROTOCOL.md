@@ -201,16 +201,21 @@ devices behind a wired port losing their connection when the port
 changes hands or a network on it changes its VLAN ID).
 
 The document's format is `version` 3. (Format 3 added
-`system.bluetooth_only`; `vlan`, `pppoe`, `tagged` and `shaping` for
-wired ports; `vlan` and `discovery` for networks; `shaping` for saved
-Wi-Fi networks and `wan.phone`; and `inbound`, to format 2 and
-changed nothing else; a router that stored format 2 carries it over as
-it is, with nothing let in and no source held to a speed.) Its
-parts, briefly:
+`system.bluetooth_only` and `system.timezone`; `vlan`, `pppoe`, `tagged`
+and `shaping` for wired ports; `vlan` and `discovery` for networks;
+`shaping` for saved Wi-Fi networks and `wan.phone`; `inbound`; and
+`groups`, with `groups` in a rule's `src` and `allow_until` for a
+device, to format 2 and changed nothing else; a router that stored
+format 2 carries it over as it is, with nothing let in, no source held
+to a speed and no groups.) Its parts, briefly:
 
 ```
-system      {name country ssh{enabled authorized_keys[]} bluetooth_only}
+system      {name country ssh{enabled authorized_keys[]} bluetooth_only timezone}
             bluetooth_only: the router does not listen on TCP
+            timezone: the IANA name of the zone schedules are kept in
+            ("Europe/Berlin"), "" until one is set. The app sets it to
+            the phone's when it finds it empty. A name the router's
+            copy of the zone database lacks is refused.
 wifi[]      {id ssid passphrase security hidden isolate network enabled}
             the Wi-Fi networks broadcast; the first ("main") always exists
 networks[]  {id name address ula_prefix isolated route vlan discovery}
@@ -248,7 +253,33 @@ wan         {networks[] wifi_mac eth_mac order[] phone probe}
             order: uplink keys, best first: "eth:<port>", "wifi", "phone"
             phone {shaping}: what is set for a phone sharing its
             connection over USB, whichever phone it is
-policy      {default rules[{id name enabled src{devices cidrs networks} dst action}]}
+policy      {default rules[{id name enabled src{devices cidrs networks groups} dst action}]}
+            src.groups: ids of groups; the rule is for whoever is in
+            them when it is applied. A source that names only groups
+            without members matches nobody.
+devices[]   {mac name route paused ip no_adblock allow_until}
+            allow_until: unix time until which the device is online
+            although a schedule or override "pause" has its group
+            offline (not against the group's paused); 0 or past for
+            not at all.
+groups[]    {id name icon members[] route paused no_adblock schedules[] override}
+            a set of devices, by hardware address; a device is in one
+            group at most. icon: a key of the app's ([a-z0-9-], up to
+            20), which the router keeps and does not interpret.
+            route, no_adblock: for its members; a member's own route
+            comes first, and it skips ad blocking if either says so.
+            paused: every member is cut off until it is cleared.
+  schedules[] {id name enabled days[] from to}
+            a time the group is offline. days: the days of the week it
+            starts on, 0 (Sunday) to 6. from, to: "HH:MM" on a clock in
+            system.timezone; a to that is not after from is on the day
+            after, and the two the same is 24 hours. An enabled
+            schedule needs system.timezone to be set.
+  override  {mode until}
+            what was asked for now. mode "allow": online although a
+            schedule says otherwise; "pause": offline; each until
+            `until` (unix time). "" for none. One whose time has passed
+            means nothing and is left in place.
 inbound     {server forwards[] ddns check_url}   what may come in from the internet
   server    {enabled port private_key address ula_prefix peers[]}
             the router's own WireGuard server. port: UDP, 51820 unless
@@ -288,6 +319,9 @@ Status (`daemon/internal/core/api.go`):
 
 ```
 name id version time uptime temp ready rev pairing
+           time: the time schedules go by (unix time): the router's
+           clock, or what the site its connection is checked against
+           gave while the clock itself has not been set since the start
 internet   "down" | "connecting" | "limited" | "captive" | "online"
 active     interface of the uplink in use: the first in the configured
            order that reaches the internet or stands behind a sign-in page
@@ -353,7 +387,36 @@ shaping[]  {key if state down up error?}
            packets the queue has dropped or marked (ECN) to make a
            sender slow down since it was put there. The counters are
            read every few seconds and do not cause status events.
+clock      {zone trusted}
+           zone: system.timezone. trusted: since the router started,
+           `time` has been confirmed by a time server, by
+           `system.set_time`, or by the Date of the site its
+           connection is checked against. Until then schedules go by
+           the clock as restored from the time last saved.
+groups[]   {id connected offline why? schedule? until? allowed_until? next? next_schedule?}
+           one entry for each group, in the configuration's order.
+           connected: how many members are on a network now.
+           offline: its members are cut off, by `why`: "paused" (the
+           group's switch), "timer" (override "pause") or "schedule",
+           then with the schedule's id. until: when it comes back by
+           itself (unix time), through whatever follows without a gap;
+           absent for the switch, and when nothing ends it within a
+           week. allowed_until: a schedule is in force and override
+           "allow" holds it off until then. next, next_schedule: when
+           a schedule next takes it offline, within a week.
+held[]     {mac why group? until?}
+           every device that is cut off right now. why "device" (it is
+           paused itself), else its group's why, with the group's id
+           and until. A member whose allow_until has not passed is not
+           held by its group's schedule or timer.
 ```
+
+A device that is held is treated in every respect as one with `paused`
+set: its traffic is refused, its DNS lookups are refused, a port
+forwarded to it is closed, and connection tracking is flushed when the
+set of held devices changes. `groups[]` and `held[]` change at the
+start and end of a schedule, which causes a `status` event; the control
+loop notices within five seconds of the minute.
 
 ### Radios and upstream Wi-Fi
 
@@ -381,10 +444,16 @@ the network that was refused.
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `devices.list` | – | `[{mac,hostname,ipv4,ipv6[],first_seen,last_seen,online,online_since,link,signal,up,down,name,route,paused,ip,portal}]` |
-| `device.set` | `{mac,name,route,paused,ip,no_adblock}` | `{}` – replaces the device's settings |
-| `device.forget` | `{mac}` | `{}` |
+| `devices.list` | – | `[{mac,hostname,ipv4,ipv6[],first_seen,last_seen,online,online_since,link,signal,up,down,name,route,paused,ip,portal,no_adblock,allow_until?,group?}]` |
+| `device.set` | `{mac,name,route,paused,ip,no_adblock,allow_until}` | `{}` – replaces the device's settings |
+| `device.forget` | `{mac}` | `{}` – also takes it out of its group |
 | `device.queries` | `{mac}` | `[{t,mac,name,type,path,failed}]` recent DNS queries |
+
+`paused`, `route` and `no_adblock` in `devices.list` are the device's
+own settings. `group` is the id of the group it is in; which group a
+device is in is changed by writing `groups[].members`. Whether it is
+cut off right now, and by what, is in the status (`held[]`). The list
+also has the members of groups that the router has never seen.
 
 ### Traffic
 
@@ -468,7 +537,9 @@ that has a port forwarded to it.
 | `updates.check` | – | `{}` – look for newer block lists and a newer country database now |
 
 The app sends `system.set_time` at the start of every session: the Pi has
-no battery-backed clock.
+no battery-backed clock. The clock is set if it differs by more than two
+seconds (five minutes once a time server has set it), and counts as
+confirmed from then on (`clock.trusted`).
 
 ### Software updates
 
@@ -489,6 +560,6 @@ it ends with the router restarting, which drops the session. `state` is
 | Event | Data |
 |-------|------|
 | `status` | Status, whenever something other than a counter changed |
-| `event` | `{t,kind,msg,mac?}` – a new activity log entry |
+| `event` | `{t,kind,msg,mac?}` – a new activity log entry; kind `group` when a schedule takes a group offline or a group comes back by itself |
 | `speedtest` | `{phase: "latency"\|"download"\|"upload"\|"done", mbps}` – progress of a running test |
 | `firmware` | the result of `firmware.status`, whenever it changes |

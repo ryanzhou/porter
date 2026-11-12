@@ -263,6 +263,8 @@ final class AppModel: ObservableObject {
             mismatch = nil
             try await reload()
             guard isCurrent(supervisor) else { return }
+            await offerTimeZone(supervisor)
+            guard isCurrent(supervisor) else { return }
             let recent: [ActivityEvent] = (try? await supervisor.activity()) ?? []
             guard isCurrent(supervisor) else { return }
             activity = recent
@@ -275,6 +277,23 @@ final class AppModel: ObservableObject {
             // when it has.
             if isLinkFailure(error) || error is SupervisorError { return }
             if first { failed(error) }
+        }
+    }
+
+    /// Tells a router that has no time zone yet which one this phone is
+    /// in: schedules are kept in it. Only then; a zone that is set is the
+    /// household's, and a phone that travels does not change it. Nothing
+    /// is said if the router will not have it.
+    private func offerTimeZone(_ supervisor: ConnectionSupervisor) async {
+        guard let known = confirmedConfig, known.system.timezone?.isEmpty != false else { return }
+        let zone: String = TimeZone.current.identifier
+        let fresh: RouterConfig? = try? await supervisor.writeConfig(known: known) { cfg in
+            if cfg.system.timezone?.isEmpty != false {
+                cfg.system.timezone = zone
+            }
+        }
+        if let fresh, isCurrent(supervisor) {
+            setConfirmed(fresh)
         }
     }
 
@@ -584,11 +603,14 @@ final class AppModel: ObservableObject {
             devices[index].paused = settings.paused
             devices[index].ip = settings.ip
             devices[index].noAdblock = settings.noAdblock
+            devices[index].allowUntil = settings.allowUntil
         }
         let ok = await attempt { connection in
             try await connection.setDevice(settings)
             self.devices = try await connection.devices()
             self.setConfirmed(try await connection.config())
+            // Whether the device is paused right now is in the status.
+            self.status = try await connection.status()
         }
         if !ok {
             devices = before
@@ -621,6 +643,8 @@ final class AppModel: ObservableObject {
     func vpnName(_ id: String) -> String { config?.vpns.first { $0.id == id }?.name ?? "Unknown VPN" }
 
     func networkName(_ id: String) -> String { config?.networkName(id) ?? id }
+
+    func groupName(_ id: String) -> String { config?.group(id)?.name ?? "Unknown group" }
 
     /// What a radio is used for. The configuration says so first: it is
     /// what the app has just changed, where the radio list is only as

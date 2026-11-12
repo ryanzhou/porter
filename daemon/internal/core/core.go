@@ -37,6 +37,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/netctl"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
+	"github.com/ryanzhou/porter/daemon/internal/sched"
 	"github.com/ryanzhou/porter/daemon/internal/shape"
 	"github.com/ryanzhou/porter/daemon/internal/speedtest"
 	"github.com/ryanzhou/porter/daemon/internal/stats"
@@ -124,6 +125,20 @@ type Core struct {
 	shape     *shape.Manager
 	shaped    []shape.Source
 	measuring string
+
+	// clockTrusted: the time schedules go by has been confirmed since the
+	// router started (see groups.go). heard is the time they go by in
+	// place of the machine's clock: what a site gave, while the clock is
+	// behind it and has not been set itself. Where virtualClock is set
+	// it is what system.set_time gave: the end-to-end tests run that
+	// way, so that they can make it bedtime without setting the clock of
+	// the machine they run on. groupWas is how each group stood on the
+	// last pass, with the configuration's revision then (groupRev).
+	clockTrusted bool
+	virtualClock bool
+	heard        atomic.Pointer[heardTime]
+	groupWas     map[string]sched.State
+	groupRev     uint64
 
 	geo *geoip.DB
 	ads *adblock.Manager
@@ -234,7 +249,10 @@ func New(opt Options) (*Core, error) {
 		started:   time.Now(),
 		sessions:  map[*apiSession]struct{}{},
 	}
-	system.RestoreClock(filepath.Join(opt.DataDir, "clock"), opt.BuildTime, c.log)
+	c.virtualClock = os.Getenv("PORTER_VIRTUAL_CLOCK") != ""
+	if !c.virtualClock {
+		system.RestoreClock(filepath.Join(opt.DataDir, "clock"), opt.BuildTime, c.log)
+	}
 
 	cfg, err := c.store.Load()
 	if err != nil {
@@ -302,6 +320,16 @@ func New(opt Options) (*Core, error) {
 	c.lan = &lan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.LeaseHook, HookEnv: hookEnv,
 		Verbose: c.log.Enabled(context.Background(), slog.LevelDebug)}
 	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, PPPHooks: opt.PPPHooks, HookEnv: hookEnv, OnChange: c.Kick}
+	// The time a site gives is one more way to learn it. Not worth
+	// holding a probe up for: one that finds the loop busy is dropped,
+	// and the next comes within the minute.
+	c.wan.OnTime = func(said time.Time) {
+		heard := time.Now()
+		select {
+		case c.reqs <- func() { c.timeFromSite(said, heard) }:
+		default:
+		}
+	}
 	c.mpq = &mpquic.Manager{Log: c.log, RunDir: opt.RunDir, Binaries: opt.MPQUIC, OnChange: c.Kick}
 	c.mdns = &mdns.Relay{Log: c.log}
 	c.shape = &shape.Manager{Log: c.log}
@@ -515,7 +543,7 @@ func (c *Core) periodic() {
 	}
 	if now.Sub(c.lastSave) >= 10*time.Minute && !c.resetting {
 		c.lastSave = now
-		c.devs.Prune(func(mac string) bool { return c.cfg.Device(mac) != nil })
+		c.devs.Prune(func(mac string) bool { return c.cfg.Device(mac) != nil || c.cfg.GroupOf(mac) != nil })
 		c.devs.Save()
 		c.stats.Save()
 		system.SaveClock(filepath.Join(c.opt.DataDir, "clock"))
@@ -1034,6 +1062,16 @@ func (c *Core) reconcile() {
 		}
 	}
 
+	// Who is cut off at this moment: the devices that are paused, and the
+	// members of the groups that are offline by their switch, a schedule
+	// or a timer (see groups.go).
+	if (!c.clockTrusted || c.heard.Load() != nil) && !c.virtualClock && system.NTPSynced() {
+		c.clockSet("a time server")
+	}
+	groups, held := sched.Evaluate(cfg, c.now())
+	c.groupEvents(cfg, groups)
+	cutOff := heldMACs(held)
+
 	// Captive portal: one device is let straight through to sign in.
 	captive := active != nil && active.Internet == wan.StCaptive
 	devList := c.devs.List()
@@ -1050,7 +1088,7 @@ func (c *Core) reconcile() {
 			c.portalDev = ""
 			var first int64
 			for _, d := range devList {
-				if dc := cfg.Device(d.MAC); dc != nil && dc.Paused {
+				if _, cut := held[d.MAC]; cut {
 					continue // it could not sign in anyway
 				}
 				if d.Online && (first == 0 || d.OnlineSince < first) {
@@ -1166,7 +1204,7 @@ func (c *Core) reconcile() {
 	}
 	plan := fw.BuildPlan(&running, fw.Runtime{
 		WANIfs: wanIfs, Delegated: delegated, WANMTU: wanMTU, Global: global, Addrs6: forwardAddrs6(cfg, devList),
-		PortalDevs: portalDevs, Geo: c.geo.Ranges, GeoVersion: c.geo.Version(),
+		Held: cutOff, PortalDevs: portalDevs, Geo: c.geo.Ranges, GeoVersion: c.geo.Version(),
 	})
 	c.forwards = plan.Forwards
 	flush := false
@@ -1239,7 +1277,7 @@ func (c *Core) reconcile() {
 		}
 	}
 
-	c.applyDNS(&running, states, active, portalDevs, routerAddr, routes, global)
+	c.applyDNS(&running, states, active, portalDevs, cutOff, routerAddr, routes, global)
 	c.applySystem(cfg)
 	c.applyControl(cfg)
 	c.applyDiscovery(cfg)
@@ -1258,22 +1296,20 @@ func (c *Core) reconcile() {
 	c.publishStatus()
 }
 
-func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.State, portalDevs []string, router netip.Prefix, routes []fw.VPNRoutes, global map[string]netip.Prefix) {
+func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.State, portalDevs, cutOff []string, router netip.Prefix, routes []fw.VPNRoutes, global map[string]netip.Prefix) {
 	pol := &dnsfwd.Policy{
-		Hosts:       map[string][]netip.Addr{},
-		Reverse:     map[netip.Addr]string{},
-		Blocked:     dnsfwd.NewSuffixSet(cfg.DNS.Blocked),
-		Rules:       dnsfwd.RulesFrom(cfg, global),
-		Adblock:     cfg.DNS.Adblock.Enabled,
-		AdAllow:     dnsfwd.NewSuffixSet(cfg.DNS.Adblock.Allow),
-		AdExempt:    map[string]bool{},
-		Paused:      map[string]bool{},
-		DeviceRoute: map[string]string{},
-		Default:     cfg.Policy.Default,
-		PortalDevs:  map[string]bool{},
-		VPN:         map[string]dnsfwd.VPNDNS{},
-		NetRoute:    dnsfwd.NetRoutesFrom(cfg, global),
+		Hosts:      map[string][]netip.Addr{},
+		Reverse:    map[netip.Addr]string{},
+		Blocked:    dnsfwd.NewSuffixSet(cfg.DNS.Blocked),
+		Rules:      dnsfwd.RulesFrom(cfg, global),
+		Adblock:    cfg.DNS.Adblock.Enabled,
+		AdAllow:    dnsfwd.NewSuffixSet(cfg.DNS.Adblock.Allow),
+		Default:    cfg.Policy.Default,
+		PortalDevs: map[string]bool{},
+		VPN:        map[string]dnsfwd.VPNDNS{},
+		NetRoute:   dnsfwd.NetRoutesFrom(cfg, global),
 	}
+	pol.SetDevices(cfg, cutOff)
 	// The forwarder answers on the router's address in every network;
 	// the router's own name is its address in the main one. Devices are
 	// told the private addresses, which stay the same whatever the
@@ -1325,17 +1361,6 @@ func (c *Core) applyDNS(cfg *config.Config, states []wan.State, active *wan.Stat
 		pol.Hosts[name+"."+cfg.LAN.Domain] = addrs
 		for _, a := range addrs {
 			pol.Reverse[a] = name + "." + cfg.LAN.Domain
-		}
-	}
-	for _, d := range cfg.Devices {
-		if d.Paused {
-			pol.Paused[d.MAC] = true
-		}
-		if d.Route != "" {
-			pol.DeviceRoute[d.MAC] = d.Route
-		}
-		if d.NoAdblock {
-			pol.AdExempt[d.MAC] = true
 		}
 	}
 	c.ads.Configure(cfg.DNS.Adblock.Enabled, cfg.DNS.Adblock.Lists)

@@ -1,18 +1,26 @@
 import PorterKit
 import SwiftUI
 
-/// Everything that has joined the router's network.
+/// Everything that has joined the router's network: the groups first,
+/// then the devices that are in none.
 struct DevicesView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var addingGroup = false
+
+    /// The devices listed one by one: those that are in no group. The
+    /// others are on their group's page.
+    private var single: [DeviceInfo] {
+        model.devices.filter { model.config?.group(of: $0.mac) == nil }
+    }
 
     private var online: [DeviceInfo] {
-        model.devices
+        single
             .filter { $0.online }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
     private var offline: [DeviceInfo] {
-        model.devices
+        single
             .filter { !$0.online }
             .sorted { $0.lastSeen > $1.lastSeen }
     }
@@ -26,6 +34,8 @@ struct DevicesView: View {
                     description: Text("Devices are listed here once they join your Wi-Fi or are plugged into a wired port.")
                 )
                 .listRowBackground(Color.clear)
+            } else {
+                GroupsSection(adding: $addingGroup)
             }
             if !online.isEmpty {
                 Section("Online") {
@@ -53,6 +63,13 @@ struct DevicesView: View {
         .navigationTitle("Devices")
         .refreshable { _ = await reload() }
         .task { await poll() }
+        .sheet(isPresented: $addingGroup) {
+            NavigationStack {
+                NewGroupSheet()
+            }
+            .modifier(SheetErrorAlert())
+            .environmentObject(model)
+        }
     }
 
     @discardableResult
@@ -79,13 +96,16 @@ private struct DeviceRow: View {
     @EnvironmentObject private var model: AppModel
     let device: DeviceInfo
 
+    /// Paused by its own switch, or with its group.
+    private var paused: Bool { device.paused || model.held(device.mac) != nil }
+
     private var symbol: String {
-        if device.paused { return "pause.fill" }
+        if paused { return "pause.fill" }
         return device.link == "wired" ? "cable.connector" : "wifi"
     }
 
     private var color: Color {
-        if device.paused { return Color.orange }
+        if paused { return Color.orange }
         return device.online ? Color.accentColor : Color.gray
     }
 
@@ -144,8 +164,22 @@ struct DeviceDetailView: View {
     @State private var loadingQueries = false
     @State private var usage: [TrafficSample] = []
     @State private var usageLoaded = false
+    @State private var askingToAllow = false
 
     private var device: DeviceInfo? { model.device(mac) }
+
+    /// The group the device is in, and what pauses its internet access
+    /// right now: its own switch, or its group.
+    private var group: DeviceGroup? { model.config?.group(of: mac) }
+    private var held: HeldDevice? { model.held(mac) }
+
+    /// The device has been let online while a schedule or a timer has
+    /// its group paused, until then.
+    private var allowedUntil: Int64? {
+        guard let group, let state = model.status?.group(group.id), state.offline, state.why != "paused",
+              let until = device?.allowUntil, until > (model.status?.time ?? 0), device?.paused != true else { return nil }
+        return until
+    }
 
     private var cleanName: String { name.trimmingCharacters(in: .whitespaces) }
     private var cleanIP: String { reservedIP.trimmingCharacters(in: .whitespaces) }
@@ -156,13 +190,50 @@ struct DeviceDetailView: View {
     }
 
     /// Where the device's traffic goes when it has no route of its own:
-    /// its network's route, or else the default.
+    /// its group's route, else its network's, or else the default.
     private var defaultRouteLabel: String {
+        if let group, !group.route.isEmpty {
+            return group.name + " (" + model.actionLabel(group.route) + ")"
+        }
         var action: String = model.config?.policy.`default` ?? "direct"
         if let id = device?.network, let route = model.config?.network(id)?.route, !route.isEmpty {
             action = route
         }
         return "Default (" + model.actionLabel(action) + ")"
+    }
+
+    /// What the switches do not say by themselves: that the device is
+    /// paused with its group and until when, or let through for now, and
+    /// that it skips ad blocking because its group does.
+    private var groupNote: String {
+        guard let group else { return "" }
+        var notes: [String] = []
+        if let held, held.byGroup {
+            var text: String = group.name + " is paused"
+            if let until = held.until {
+                text += " until " + model.clockText(until)
+            }
+            if held.why == "schedule" {
+                text += " by " + model.scheduleName(group, model.status?.group(group.id)?.schedule)
+            }
+            notes.append(text + ", and this device with it.")
+        } else if let allowedUntil {
+            notes.append(group.name + " is paused. This device is allowed online until " + model.clockText(allowedUntil) + ".")
+        }
+        if group.noAdblock && model.config?.dns.adblock.enabled == true {
+            notes.append(group.name + " skips ad blocking, and this device with it.")
+        }
+        return notes.joined(separator: " ")
+    }
+
+    /// What to say when asked to unpause a device that is paused with
+    /// its group.
+    private var allowMessage: String {
+        guard let group, let held else { return "" }
+        guard let until = held.until else {
+            return group.name + " is paused. To let only this device online, take it out of the group."
+        }
+        return group.name + " is paused until " + model.clockText(until) + "."
     }
 
     var body: some View {
@@ -199,6 +270,35 @@ struct DeviceDetailView: View {
         .onChange(of: device?.settings) { _, _ in sync() }
         .task { await loadQueries() }
         .task { await loadUsage() }
+        .confirmationDialog("Paused with its group", isPresented: $askingToAllow, titleVisibility: .visible) {
+            allowChoices
+        } message: {
+            Text(allowMessage)
+        }
+    }
+
+    /// What can be done for a device that is paused with its group: let
+    /// it alone online, or the whole group, until the group would be
+    /// back anyway; or, where nothing ends the pause, end it.
+    @ViewBuilder
+    private var allowChoices: some View {
+        if let group, let held {
+            let groupID: String = group.id
+            if let until = held.until {
+                let time: String = model.clockText(until)
+                Button("Allow this device until \(time)") {
+                    applyNow { $0.allowUntil = until }
+                }
+                Button("Allow all of \(group.name) until \(time)") {
+                    editGroup(groupID) { $0.forNow = GroupOverride.allow(until: until) }
+                }
+            } else {
+                Button("Resume all of \(group.name)") {
+                    editGroup(groupID) { $0.paused = false }
+                }
+            }
+        }
+        Button("Cancel", role: .cancel) {}
     }
 
     /// The two fields Save is for, then the switches that apply at once,
@@ -216,9 +316,23 @@ struct DeviceDetailView: View {
         }
         Section {
             Toggle("Pause internet access", isOn: pausedBinding)
+            if allowedUntil != nil {
+                Button("Stop allowing") { applyNow { $0.allowUntil = nil } }
+            }
             if model.config?.dns.adblock.enabled == true {
                 Toggle("Skip ad blocking", isOn: noAdblockBinding)
+                    .disabled(group?.noAdblock == true)
             }
+            if !(model.config?.groupList ?? []).isEmpty {
+                Picker("Group", selection: groupBinding) {
+                    Text("None").tag("")
+                    ForEach(model.config?.groupList ?? []) { choice in
+                        Text(choice.name).tag(choice.id)
+                    }
+                }
+            }
+        } footer: {
+            Text(groupNote)
         }
         Section {
             Picker("Route", selection: routeBinding) {
@@ -273,18 +387,46 @@ struct DeviceDetailView: View {
         }
     }
 
+    /// The switch shows whether the device is paused in effect: by
+    /// itself or with its group. Switching it off unpauses the device
+    /// itself; a device that is paused with its group is asked about.
     private var pausedBinding: Binding<Bool> {
         Binding(
-            get: { device?.paused ?? false },
-            set: { value in applyNow { $0.paused = value } }
+            get: { (device?.paused ?? false) || held?.byGroup == true },
+            set: { value in
+                if value {
+                    applyNow { $0.paused = true }
+                } else if device?.paused == true {
+                    applyNow { $0.paused = false }
+                } else if held?.byGroup == true {
+                    askingToAllow = true
+                }
+            }
         )
     }
 
+    /// Shows what holds in effect: the device skips ad blocking if it or
+    /// its group is set to.
     private var noAdblockBinding: Binding<Bool> {
         Binding(
-            get: { device?.noAdblock ?? false },
+            get: { (device?.noAdblock ?? false) || group?.noAdblock == true },
             set: { value in applyNow { $0.noAdblock = value } }
         )
+    }
+
+    private var groupBinding: Binding<String> {
+        Binding(
+            get: { group?.id ?? "" },
+            set: { value in
+                let target: String = mac
+                Task { await model.update { cfg in cfg.setGroup(of: target, to: value.isEmpty ? nil : value) } }
+            }
+        )
+    }
+
+    /// Applies a change to a group at once.
+    private func editGroup(_ id: String, _ change: @escaping (inout DeviceGroup) -> Void) {
+        Task { await model.update { cfg in cfg.editGroup(id, change) } }
     }
 
     private var routeBinding: Binding<String> {
@@ -323,7 +465,8 @@ struct DeviceDetailView: View {
             route: current.route,
             paused: current.paused,
             ip: newIP.isEmpty ? nil : newIP,
-            noAdblock: current.noAdblock
+            noAdblock: current.noAdblock,
+            allowUntil: current.allowUntil
         )
         Task { await model.setDevice(settings) }
     }

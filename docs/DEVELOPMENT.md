@@ -391,6 +391,85 @@ every subsystem against it and against what the network is doing.
   as its endpoint follows from that: the dynamic DNS name, else the
   public IPv4 address, else a public IPv6 address, else nothing, and
   then no device is made.
+- **Groups and schedules.** A group (`groups` in the configuration)
+  names devices by hardware address and has a route, a switch that
+  pauses it, and schedules: times of the week it is offline. Nothing
+  new enforces any of it. `internal/sched` works out, for a moment in
+  time, how each group stands and which devices that cuts off
+  (`sched.Evaluate`); the control loop asks on every pass and hands the
+  answer to the firewall (`fw.Runtime.Held`) and the DNS forwarder
+  (`Policy.SetDevices`) as devices that are paused. So a device that is
+  offline with its group is refused by the same two rules as a paused
+  one, which match by hardware address and therefore whatever the
+  address family; its lookups are refused; a port forwarded to it is
+  left out of the ruleset, as for a paused device; and because the set
+  of paused devices is part of `fw.ClassKey`, the start and the end of
+  a schedule flush connection tracking, which is what ends the
+  connections a device had open. (All of them, as pausing one device
+  does: a schedule has a few edges a day.) The loop comes round every
+  five seconds, which is how late an edge can be.
+  *Order.* Where a device and its group both say something, the
+  device's own setting comes first, and the three places that decide
+  are each in one function: `Config.DeviceRoutes` (own route, else the
+  group's; a rule still beats both and a network's route comes after),
+  `Config.AdExempt` (either), and `sched.Evaluate` (cut off if paused
+  itself, or if its group is offline and the device has not been let
+  through with `allow_until`, which holds against a schedule or a timer
+  and not against the group's switch). A device is in one group at
+  most, so that each of these has one answer and the app can say where
+  it comes from. A rule's source can name groups (`Config.SrcDevices`
+  turns them into their members); a rule whose only sources are groups
+  without members is left out of the ruleset, because a rule with no
+  source to match would read as one for everybody.
+  *For now.* `override` on a group is what a person asked against the
+  schedules: "allow" until a time, "pause" until a time. The time is
+  absolute and comes from the app, which takes "until the schedule
+  ends" from the status (`groups[].until`), so that nothing but the
+  router does schedule arithmetic. An override, or a device's
+  `allow_until`, that has passed is simply ignored and stays in the
+  document until the next one replaces it: the router does not rewrite
+  the configuration because time went by, and a clock that jumped
+  forward by mistake cannot have deleted what was still meant.
+  *Local time.* Schedules are wall-clock times in `system.timezone`, an
+  IANA name, evaluated with Go's `time` package. The zone database is
+  compiled into the daemon (`time/tzdata`, imported by
+  `internal/config`) and not installed as the `tzdata` package: the
+  root file system is replaced whole by an update either way, so the
+  two would be equally current, and built in it is the same database in
+  the image, in the tests and on a development machine, and what
+  `config.set` checks a zone's name against is exactly what the
+  scheduler will find. It costs 450 kB. On the night the clocks change
+  a schedule's edges are still where the clock on the wall says, so
+  that night is an hour shorter or longer. A time the clocks skip is
+  taken for the moment they jump, one they show twice for the first of
+  the two (`sched.wall`).
+  *A clock that may be wrong.* The Pi has no clock battery; at start
+  the clock is restored from the time last saved (every ten minutes and
+  at shutdown), so it is right after a restart and behind by as long as
+  the power was off otherwise. Until something has confirmed the clock
+  (`clock.trusted` in the status: a time server, `system.set_time` from
+  the app, or the `Date` of the site the uplink probe fetches),
+  schedules simply go by the clock as it is. That keeps a group offline
+  through a restart in the middle of the night, which "no schedule
+  until the time is known" would not, and it locks nobody out for
+  longer than "offline until the time is known" would. What is left is
+  being wrong by the length of a power cut, in either direction, for
+  the seconds between an uplink getting its address and the first
+  probe through it being answered: the probe's answer is where the
+  time comes from. (Longer only on a network that lets everything
+  through but the probe's site and time servers; then until the app
+  connects.) The probe is plain HTTP, and its `Date` is believed for
+  schedules only: where the clock is more than two minutes behind it,
+  schedules count on from the site's time by the monotonic clock
+  (`Core.heard`, read by `Core.now`), and the machine's clock is left
+  alone until a time server or the app sets it, from when schedules go
+  by it again. WireGuard must never see the clock go forward and then
+  back, and one web server's word is not worth that. Nor are schedules
+  ever turned back on it.
+  The end-to-end tests cannot set the clock of the machine they run on.
+  With `PORTER_VIRTUAL_CLOCK` set, `system.set_time` sets that same
+  clock of the daemon's own instead, which is what schedules and the
+  status's `time` go by; nothing else in the daemon uses it.
 - **Firewall replacement** is atomic, and the ruleset is left in place
   when the daemon stops, so a restarting daemon never leaves the router
   open.
@@ -429,6 +508,9 @@ The image is deliberately appliance-like:
 - Time: the Pi 5 has no clock battery by default. Besides NTP, the app
   sets the clock at the start of every session and the last known time
   is restored at boot, so that WireGuard never sees time run backwards.
+  What that means for schedules is under *Groups and schedules* above.
+  There is no time zone on the system itself: the household's is a
+  setting, and the zone database is part of `porterd`.
 
 ### Updates
 
@@ -559,7 +641,16 @@ CI runs the end-to-end tests this way.
   switches it off); a second network (its own addresses, isolation, a
   route and a rule of its own, and its removal); a second uplink
   standing in for a phone (the order of uplinks, and falling back when
-  the first stops reaching the internet); an uplink held to a speed
+  the first stops reaching the internet); a group of devices
+  (`groups_test.go`: with the router's own clock set to a few seconds
+  before bedtime, a device in the group is cut off when the schedule
+  starts, not before and within a pass of the control loop, its
+  lookups refused and the connection it had open gone, IPv6 included,
+  the other device untouched; it is let back by allowing the group
+  until the schedule ends and by letting the one device through; it
+  comes back by itself when the schedule ends; a rule for the group, the
+  group's switch and its route apply to its member, whose own route
+  wins); an uplink held to a speed
   (`shape_test.go`: the queues for both directions with their options,
   a device's download and upload landing near the rates set where they
   ran at hundreds of times that a moment before, the status counting
@@ -638,7 +729,7 @@ project file.
 sample router and never touches Bluetooth. `-demoScreen <name>` opens one
 screen directly: a tab name (`overview`, `internet`, `devices`, `vpn`,
 `settings`) or `traffic`, `flows`, `speedtest`, `device`, `adblock`,
-`networks`, `outside`, `smoothing`, `software`, `setup`, `connect`, `share`. The *iOS* workflow
+`networks`, `outside`, `smoothing`, `group`, `software`, `setup`, `connect`, `share`. The *iOS* workflow
 uses this to publish screenshots as an artifact.
 
 **Two ways of changing things.** Most controls apply at once: the app
@@ -735,6 +826,10 @@ draft or pre-release. The router and the app both show the version.
   rules resets connection tracking, which also clears the active list.
 - Downloaded data (block lists, the country database) is checked for
   plausibility before it replaces the copy in use.
+- A schedule starts and ends up to five seconds late: whenever the
+  control loop next comes round. After a power cut it goes by the time
+  the router last knew until the router is online or the app has
+  connected (see *Groups and schedules*).
 - Without a delegated prefix clients hold only ULA IPv6 addresses, so
   for dual-stack destinations most systems prefer IPv4.
 - A delegated prefix is announced to devices with the lifetimes of the
