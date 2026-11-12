@@ -119,8 +119,14 @@ type EthPort struct {
 	// PPPoE makes the uplink sign in to the provider, in place of DHCP
 	// or a fixed address for IPv4.
 	PPPoE PPPoE `json:"pppoe"`
-	// Network is the network a LAN port belongs to.
+	// Network is the network a LAN port carries untagged: what arrives
+	// there without a VLAN tag belongs to it. Empty for a port that
+	// carries tagged networks only.
 	Network string `json:"network"`
+	// Tagged are the networks a LAN port carries under their VLAN tags
+	// (Network.VLAN), next to the untagged one. Each has a sub-interface
+	// of the port (VLANIfName) in its bridge.
+	Tagged []string `json:"tagged"`
 }
 
 // PPPoE is a provider's sign-in for a wired uplink. Username and Password
@@ -234,6 +240,14 @@ type Network struct {
 	// Route overrides Policy.Default for this network: "", "direct",
 	// "vpn:<id>" or "block". A device's own route wins over it.
 	Route string `json:"route"`
+	// VLAN is the tag the network has on the wired ports that carry it
+	// tagged (EthPort.Tagged), 1 to 4094; 0 for none. No two networks
+	// have the same.
+	VLAN int `json:"vlan"`
+	// Discovery lets the devices here be found from the router's other
+	// networks: multicast DNS is relayed between this network and those
+	// that are not isolated (see DiscoveryPeers).
+	Discovery bool `json:"discovery"`
 }
 
 // Prefix returns the router's address on the network and its subnet.
@@ -617,6 +631,25 @@ func (c *Config) Network(id string) *Network {
 	return nil
 }
 
+// DiscoveryPeers says between which networks multicast DNS is relayed:
+// for each network that takes part, by id, the others it is relayed to
+// and from. A network that lets itself be found (Discovery) is paired
+// with every network that is not isolated; two networks of which neither
+// asked, or where the only one that did would be found from an isolated
+// one, are not.
+func (c *Config) DiscoveryPeers() map[string][]string {
+	out := map[string][]string{}
+	for i, a := range c.Networks {
+		for _, b := range c.Networks[i+1:] {
+			if (a.Discovery && !b.Isolated) || (b.Discovery && !a.Isolated) {
+				out[a.ID] = append(out[a.ID], b.ID)
+				out[b.ID] = append(out[b.ID], a.ID)
+			}
+		}
+	}
+	return out
+}
+
 // NetworkOf returns the network an address belongs to.
 func (c *Config) NetworkOf(a netip.Addr) *Network {
 	for i := range c.Networks {
@@ -708,10 +741,11 @@ func (s *Store) Load() (*Config, error) {
 // When SchemaVersion is raised, the step from the previous version goes
 // here. Without it a router that updates itself would lose its settings.
 //
-// Format 3 only added fields (system.bluetooth_only, and a wired port's
-// vlan and pppoe), so format 2 has no entry. The number was raised all the
-// same: an app that knows format 2 would write the document back without
-// them, and has to be told that it cannot.
+// Format 3 only added fields (system.bluetooth_only, a wired port's vlan,
+// pppoe and tagged, a network's vlan and discovery), so format 2 has no
+// entry. The number was raised all the same: an app that knows format 2
+// would write the document back without them, and has to be told that it
+// cannot.
 var migrations = map[int]func(doc map[string]any) error{
 	1: networksAndOrder,
 }

@@ -99,3 +99,81 @@ func TestIsPhone(t *testing.T) {
 		}
 	}
 }
+
+func TestPortEffects(t *testing.T) {
+	base := config.Default()
+	base.Networks = append(base.Networks,
+		config.Network{ID: "iot", Name: "Things", VLAN: 20},
+		config.Network{ID: "guest", Name: "Guest", VLAN: 30, Isolated: true})
+	base.Ethernet = []config.EthPort{
+		{Name: "eth0", Role: config.EthWAN},
+		{Name: "eth1", Role: config.EthLAN, Network: "lan", Tagged: []string{"iot", "guest"}},
+		{Name: "eth2", Role: config.EthLAN, Network: "iot"},
+		{Name: "eth9", Role: config.EthLAN, Network: "lan"}, // not plugged in
+	}
+	base.Normalize()
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]string{"eth0": "eth0", "eth1": "eth1", "eth2": "USB Ethernet"}
+	effects := func(mutate func(c *config.Config)) []string {
+		next := base.Clone()
+		mutate(next)
+		next.Normalize()
+		if err := next.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		return portEffects(base, next, names, "eth:eth0")
+	}
+	port := func(c *config.Config, name string) *config.EthPort {
+		for i := range c.Ethernet {
+			if c.Ethernet[i].Name == name {
+				return &c.Ethernet[i]
+			}
+		}
+		t.Fatalf("no port %s", name)
+		return nil
+	}
+	for what, tc := range map[string]struct {
+		mutate func(c *config.Config)
+		want   []string // a fragment of each line expected, in order
+	}{
+		"nothing about ports": {func(c *config.Config) { c.Network("iot").Discovery = true }, nil},
+		"one more tagged network is no loss": {func(c *config.Config) {
+			c.Networks = append(c.Networks, config.Network{ID: "cams", Name: "Cameras", VLAN: 40})
+			port(c, "eth1").Tagged = append(port(c, "eth1").Tagged, "cams")
+		}, nil},
+		"a port given to another network": {func(c *config.Config) { port(c, "eth2").Network = "guest" },
+			[]string{"Devices connected to USB Ethernet move from Things to Guest."}},
+		"a port no longer for devices": {func(c *config.Config) { port(c, "eth1").Role = config.EthOff },
+			[]string{"Devices connected to eth1 lose their connection."}},
+		"the internet source in use given away": {func(c *config.Config) { port(c, "eth0").Role = config.EthLAN },
+			[]string{"The router is online through eth0 and loses that connection."}},
+		"a tagged network taken off a port": {func(c *config.Config) { port(c, "eth1").Tagged = []string{"guest"} },
+			[]string{"eth1 no longer carries Things under VLAN 20."}},
+		"a network's VLAN ID changed": {func(c *config.Config) { c.Network("guest").VLAN = 31 },
+			[]string{"Guest changes from VLAN 30 to VLAN 31 on eth1."}},
+		"only tagged networks left": {func(c *config.Config) { port(c, "eth1").Network = "" },
+			[]string{"eth1 carries tagged networks only from now on."}},
+		"the untagged network now tagged": {func(c *config.Config) {
+			c.Network("lan").VLAN = 5
+			port(c, "eth1").Network, port(c, "eth1").Tagged = "", []string{"iot", "guest", "lan"}
+		}, []string{"eth1 carries Main tagged from now on, as VLAN 5."}},
+		"a port that is not plugged in": {func(c *config.Config) { port(c, "eth9").Network = "guest" }, nil},
+		"a network removed, its ports to the main one": {func(c *config.Config) {
+			c.Networks = c.Networks[:2]
+			port(c, "eth1").Tagged = []string{"iot"}
+		}, nil},
+	} {
+		got := effects(tc.mutate)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: %q", what, got)
+			continue
+		}
+		for i, want := range tc.want {
+			if !strings.Contains(got[i], want) {
+				t.Errorf("%s: %q lacks %q", what, got[i], want)
+			}
+		}
+	}
+}

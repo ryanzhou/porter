@@ -14,6 +14,22 @@ final class DemoTests: XCTestCase {
         let status = try await router.status()
         XCTAssertEqual(status.internet, "online")
         XCTAssertEqual(status.wan.map(\.key), ["eth:end0", "wifi", "phone"])
+        // A second wired port, for devices: the main network as it is
+        // and the one for things under its VLAN ID, where a printer is
+        // that the other networks can find.
+        let sample = try await router.config()
+        let trunk = try XCTUnwrap(sample.ethernet.last)
+        XCTAssertEqual(trunk.role, .lan)
+        XCTAssertEqual(trunk.network, RouterConfig.mainNetwork)
+        XCTAssertEqual(trunk.taggedNetworks, ["things"])
+        XCTAssertTrue(status.ports.contains { $0.name == trunk.name && !$0.phone })
+        XCTAssertTrue(sample.wan.order.contains(RouterConfig.uplinkEthernet(trunk.name)))
+        XCTAssertEqual(sample.ethernet.first?.taggedNetworks, [])
+        let things = try XCTUnwrap(sample.network("things"))
+        XCTAssertEqual(things.vlanID, 20)
+        XCTAssertEqual(things.discovery, true)
+        XCTAssertEqual(sample.networks.filter { $0.vlanID != 0 }.count, 1)
+        XCTAssertEqual(status.lan.networks["things"], 1)
         XCTAssertEqual(status.offAir, ["guest"])
         // Looking at a change tells what it would do and changes nothing.
         var draft = try await router.config()
@@ -62,7 +78,7 @@ final class DemoTests: XCTestCase {
         XCTAssertEqual(kept, stored)
 
         let devices = try await router.devices()
-        XCTAssertEqual(devices.count, 5)
+        XCTAssertEqual(devices.count, 6)
         XCTAssertEqual(devices.filter(\.online).count, status.lan.clients)
         // Settings shown on devices agree with the configuration.
         for setting in stored.devices {

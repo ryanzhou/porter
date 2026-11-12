@@ -79,9 +79,17 @@ public struct EthernetPort: Codable, Equatable, Identifiable {
     /// The provider's sign-in, in place of automatic or manual IPv4
     /// addresses; nil reads as not signing in.
     public var pppoe: PPPoESetup?
-    /// The network a local port belongs to.
+    /// The network a port for your devices carries untagged: what
+    /// arrives there without a VLAN tag belongs to it. Empty for a port
+    /// that carries tagged networks only.
     public var network: String
+    /// The networks such a port carries tagged as well, by id, each under
+    /// its own VLAN ID; nil reads as none.
+    public var tagged: [String]?
     public var id: String { name }
+
+    /// The tagged networks as a list, whichever way "none" was said.
+    public var taggedNetworks: [String] { tagged ?? [] }
 }
 
 /// A provider's PPPoE sign-in for a wired uplink. The router keeps the
@@ -176,15 +184,26 @@ public struct NetworkConfig: Codable, Equatable, Identifiable {
     /// "", "direct", "block" or "vpn:<id>": where its devices' traffic
     /// goes unless a rule or the device says otherwise.
     public var route: String
+    /// The VLAN ID the network has on wired ports that carry it tagged,
+    /// 1 to 4094; 0 or nil for none.
+    public var vlan: Int?
+    /// Devices on the other networks that are not kept apart can find
+    /// the devices here (AirPlay, casting, printing). Nil reads as false.
+    public var discovery: Bool?
 
-    public init(id: String, name: String, address: String = "", ulaPrefix: String = "", isolated: Bool = false, route: String = "") {
+    public init(id: String, name: String, address: String = "", ulaPrefix: String = "", isolated: Bool = false, route: String = "", vlan: Int? = nil, discovery: Bool? = nil) {
         self.id = id
         self.name = name
         self.address = address
         self.ulaPrefix = ulaPrefix
         self.isolated = isolated
         self.route = route
+        self.vlan = vlan
+        self.discovery = discovery
     }
+
+    /// The VLAN ID, 0 for none, whichever way "none" was said.
+    public var vlanID: Int { vlan ?? 0 }
 }
 
 public extension RouterConfig {

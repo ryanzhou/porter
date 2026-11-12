@@ -23,6 +23,9 @@ and can send some or all of your traffic through your VPN.
   and passes on the IPv6 addresses the provider gives out.
 - **More than one network.** A second Wi-Fi name for guests or for work,
   on addresses of its own, kept apart from your devices if you like.
+  Several of them over one cable to a managed switch or to access
+  points (VLANs), and the printer and the TV on one still found from the
+  phones on another.
 - **Controlled from your phone, directly.** The app talks to the router
   over Bluetooth, or over your own network when the phone is on it, so
   it works whether or not anything has internet yet. No account, no
@@ -196,8 +199,33 @@ why they cannot be applied; **Discard** puts everything back.
   Pi's built-in radio broadcasts one Wi-Fi name at a time; a second name
   needs a USB Wi-Fi adapter that can broadcast several, or a second
   radio. The page tells you when a name is not broadcast.
-- **Wired ports** can each be an **Internet source**, be for devices on
-  one of your networks, or not be used.
+- **Wired ports** can each be an **Internet source**, be for your
+  devices, or not be used. Tap a port to choose. A port for your devices
+  puts what is plugged into it on the network you pick.
+- **Several networks on one cable.** A managed switch, or an access
+  point with several Wi-Fi names, takes more than one network over a
+  single cable by telling them apart with VLAN tags. Give each network
+  that is to travel that way a **VLAN ID** on its page (any number from 1
+  to 4094 that your other networks do not use). Then tap the port the
+  cable is in and tick those networks under **Tagged networks**. The
+  network chosen under **Network** stays on the cable untagged, for
+  devices that know nothing of VLANs; choose **None** there if the cable
+  is for tagged networks only. The page then says what the port at the
+  other end has to be set to: the same VLAN IDs, tagged, and the same
+  untagged network. A device that arrives tagged is on its network in
+  every way: its addresses, its route, its rules, kept apart or not.
+- **Finding devices on another network.** Once the printer, the speakers
+  and the TV have a network of their own, phones on your main network no
+  longer see them in AirPlay, casting or printing: devices look for each
+  other only on the network they are on. Turn on **Let your other
+  networks find devices here** on the page of the network those devices
+  are on. They then show up on your other networks, except on those you
+  keep apart (guests do not get to see your TV). If the network with the
+  devices is itself kept apart, phones can still connect to what they
+  find, which is all that printing and most casting need. A speaker or
+  TV that has to connect back to the phone cannot; if something shows up
+  but does not play, that network needs **Keep apart from your other
+  networks** turned off.
 
 ## Using a VPN
 
@@ -333,6 +361,21 @@ your provider wants a VLAN ID.
 
 **Online, but a device has no internet.** Check it is not paused, and
 whether it is routed through a VPN that is down (kill switch).
+
+**Devices behind a managed switch get no address.** The port on the
+switch that the router's cable is in has to be set the way the port's
+page in the app says: each tagged network under its VLAN ID, and the
+untagged network (some switches call it the native VLAN or PVID) the
+same at both ends. A device that was moved to another network keeps its
+old address for a while; unplugging its cable for a moment makes it ask
+again.
+
+**The printer or TV does not show up from another network.** **Let your
+other networks find devices here** has to be on for the network the
+printer or TV is on, and the phone has to be on a network that is not
+kept apart. Some devices are found in other ways than the one the
+router passes on (Sonos speakers and DLNA players, for instance); those
+only show up on their own network.
 
 **Seeing what the router is doing.** Put the SD card in your computer
 and create an empty file named `porter-debug` on the `BOOTFS` volume.

@@ -232,7 +232,7 @@ final class SupervisorTests: XCTestCase {
         XCTAssertEqual(rig.recorder.statuses, heard + 1, "an event was taken from both links")
         gate.release()
         let devices = try await held.value
-        XCTAssertEqual(devices.count, 5)
+        XCTAssertEqual(devices.count, 6)
         XCTAssertEqual(rig.router.count("devices.list", over: .bluetooth), 1)
         XCTAssertEqual(rig.router.count("devices.list", over: .network), 0)
         // ...and is let go once that is done.
@@ -316,7 +316,7 @@ final class SupervisorTests: XCTestCase {
         let during = Task { try await supervisor.status() }
 
         let devices = try await read.value
-        XCTAssertEqual(devices.count, 5, "the read that died with the link was not made again")
+        XCTAssertEqual(devices.count, 6, "the read that died with the link was not made again")
         let status = try await during.value
         XCTAssertEqual(status.name, "Porter")
         do {
@@ -902,6 +902,30 @@ final class NetworkControlModelTests: XCTestCase {
         let port = String(decoding: try RouterConnection.makeEncoder().encode(fibre), as: UTF8.self)
         XCTAssertTrue(port.contains("\"vlan\":7") && port.contains("\"pppoe\":{") && port.contains("\"username\":\"user@provider.example\""), port)
         XCTAssertEqual(try decoder.decode(EthernetPort.self, from: Data(port.utf8)), fibre)
+
+        // A network and a port for devices, as a router says them that
+        // knows nothing of networks on one cable or of finding devices
+        // across networks, and as one says them that does.
+        XCTAssertNil(plain.tagged)
+        XCTAssertEqual(plain.taggedNetworks, [])
+        let old = try decoder.decode(NetworkConfig.self, from: Data(#"{"id":"lan","name":"Main","address":"10.83.0.1/24","ula_prefix":"fd00:0:0:1::/64","isolated":false,"route":""}"#.utf8))
+        XCTAssertNil(old.vlan)
+        XCTAssertNil(old.discovery)
+        XCTAssertEqual(old.vlanID, 0)
+        let things = try decoder.decode(NetworkConfig.self, from: Data(#"{"id":"things","name":"Things","address":"10.85.0.1/24","ula_prefix":"fd00:0:0:3::/64","isolated":true,"route":"","vlan":20,"discovery":true}"#.utf8))
+        XCTAssertEqual(things.vlanID, 20)
+        XCTAssertEqual(things.discovery, true)
+        let network = String(decoding: try RouterConnection.makeEncoder().encode(things), as: UTF8.self)
+        XCTAssertTrue(network.contains("\"vlan\":20") && network.contains("\"discovery\":true"), network)
+        XCTAssertEqual(try decoder.decode(NetworkConfig.self, from: Data(network.utf8)), things)
+        let trunk = try decoder.decode(EthernetPort.self, from: Data(#"{"name":"eth1","role":"lan","network":"","tagged":["things","guest"]}"#.utf8))
+        XCTAssertEqual(trunk.network, "")
+        XCTAssertEqual(trunk.taggedNetworks, ["things", "guest"])
+        let cable = String(decoding: try RouterConnection.makeEncoder().encode(trunk), as: UTF8.self)
+        XCTAssertTrue(cable.contains("\"tagged\":[\"things\",\"guest\"]") && cable.contains("\"network\":\"\""), cable)
+        // A network made here has neither until it is given one.
+        XCTAssertNil(NetworkConfig(id: "new", name: "New").vlan)
+        XCTAssertEqual(NetworkConfig(id: "new", name: "New", vlan: 30, discovery: true).vlanID, 30)
 
         // An internet source with and without what is new about it.
         let before = try decoder.decode(UplinkStatus.self, from: Data(#"{"if":"eth0","kind":"eth","key":"eth:eth0","metric":100,"rank":0,"carrier":true,"internet":"online","has_v6":true}"#.utf8))

@@ -9,7 +9,8 @@
 // kernel module when present, otherwise the wireguard-go binary named by
 // PORTER_WG_USERSPACE; without either the VPN checks are skipped. The
 // subtests for a home connection (home_test.go) also need pppd and
-// pppoe-server, and a kernel with VLANs, PPPoE and IPv6.
+// pppoe-server, and a kernel with VLANs, PPPoE and IPv6; the one for
+// several networks on a cable (trunk_test.go) a kernel with VLANs.
 //
 //	go test -tags e2e -count=1 ./e2e/
 package e2e
@@ -244,6 +245,7 @@ type device struct {
 	IPv4     string `json:"ipv4"`
 	Online   bool   `json:"online"`
 	Hostname string `json:"hostname"`
+	Link     string `json:"link"`
 }
 
 func TestRouter(t *testing.T) {
@@ -1552,19 +1554,42 @@ func TestRouter(t *testing.T) {
 	t.Run("PPPoE", func(t *testing.T) { pppoe(t, home) })
 	t.Run("PrefixDelegation", func(t *testing.T) { prefixDelegation(t, home) })
 
+	// Devices finding each other across the router's networks, and
+	// several networks on one cable (trunk_test.go).
+	t.Run("Discovery", func(t *testing.T) { discovery(t, home) })
+	t.Run("Trunk", func(t *testing.T) { trunk(t, home) })
+
 	t.Run("Events", func(t *testing.T) {
 		var evs []struct {
 			Kind string `json:"kind"`
+			MAC  string `json:"mac"`
 		}
 		if err := c.Call("events.list", nil, &evs); err != nil {
 			t.Fatal(err)
 		}
 		kinds := map[string]int{}
+		joined := map[string]int{}
 		for _, e := range evs {
 			kinds[e.Kind]++
+			if e.Kind == "device" {
+				joined[e.MAC]++
+			}
 		}
-		if kinds["device"] != 2 {
-			t.Errorf("expected exactly the two clients as new devices, got %v", kinds)
+		// Each of the two clients was announced as a new device, once.
+		// So, at most once, was each device a subtest put behind the
+		// router, and nothing else: none of the router's own interfaces,
+		// whatever it has made of them since.
+		known := map[string]bool{mac1: true, mac2: true}
+		for _, mac := range home.joined {
+			known[mac] = true
+		}
+		if joined[mac1] != 1 || joined[mac2] != 1 {
+			t.Errorf("expected each of the two clients as a new device once, got %v", joined)
+		}
+		for mac, n := range joined {
+			if !known[mac] || n != 1 {
+				t.Errorf("%s was announced as a new device %d times; the devices there were: %v", mac, n, known)
+			}
 		}
 		b, _ := json.Marshal(kinds)
 		t.Logf("events: %s", b)

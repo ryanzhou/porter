@@ -46,6 +46,9 @@ struct NetworkSetup: Equatable {
         for old in base.networks where !networks.contains(where: { $0.id == old.id }) {
             out.removeNetwork(old.id)
         }
+        // A port changed here may carry a network the router has lost
+        // since.
+        out.tidyPorts()
         return out
     }
 
@@ -119,11 +122,15 @@ struct NetworkSetup: Equatable {
         var out: EthernetPort = port
         if mine.role != old.role {
             out.role = mine.role
-            // A port given to a network here was given to that one, also
-            // when it is the one the port had been left with before.
-            if mine.role == .lan { out.network = mine.network }
+            // A port given to networks here was given to those, also
+            // when they are the ones the port had been left with before.
+            if mine.role == .lan {
+                out.network = mine.network
+                out.tagged = mine.tagged
+            }
         }
         if mine.network != old.network { out.network = mine.network }
+        if mine.taggedNetworks != old.taggedNetworks { out.tagged = mine.tagged }
         return out
     }
 
@@ -140,6 +147,25 @@ struct NetworkSetup: Equatable {
         }
         for index in ethernet.indices where ethernet[index].network == id {
             ethernet[index].network = RouterConfig.mainNetwork
+        }
+        tidyPorts()
+    }
+
+    /// Puts right what the ports carry after networks have gone or moved:
+    /// a network that is no longer there is not carried tagged, nor is
+    /// the one a port has untagged, and a port for your devices that is
+    /// left with nothing is on the main network. A port that is in order
+    /// is left exactly as it is.
+    mutating func tidyPorts() {
+        for index in ethernet.indices {
+            let port: EthernetPort = ethernet[index]
+            let kept: [String] = port.taggedNetworks.filter { id in
+                id != port.network && networks.contains(where: { $0.id == id })
+            }
+            if kept != port.taggedNetworks { ethernet[index].tagged = kept }
+            if port.role == .lan && port.network.isEmpty && kept.isEmpty {
+                ethernet[index].network = RouterConfig.mainNetwork
+            }
         }
     }
 }
@@ -517,6 +543,7 @@ private struct NetworksSection: View {
         var parts: [String] = []
         if !network.address.isEmpty { parts.append(network.address) }
         if network.isolated { parts.append("kept apart") }
+        if network.vlanID != 0 { parts.append("VLAN \(network.vlanID)") }
         if !network.route.isEmpty { parts.append(model.actionLabel(network.route)) }
         return parts.joined(separator: " · ")
     }
@@ -582,6 +609,9 @@ private struct NetworkEditor: View {
     @Binding var setup: NetworkSetup
     let id: String
 
+    @State private var vlan: String = ""
+    @State private var loaded = false
+
     private var isMain: Bool { id == RouterConfig.mainNetwork }
 
     private var current: NetworkConfig? { setup.networks.first(where: { $0.id == id }) }
@@ -606,8 +636,77 @@ private struct NetworkEditor: View {
     }
 
     private var portNames: String {
-        let names: [String] = setup.ethernet.filter { $0.role == .lan && $0.network == id }.map { $0.name }
+        var names: [String] = []
+        for port in setup.ethernet where port.role == .lan {
+            if port.network == id {
+                names.append(port.name)
+            } else if port.taggedNetworks.contains(id) {
+                names.append(port.name + " (tagged)")
+            }
+        }
         return names.isEmpty ? "None" : names.joined(separator: ", ")
+    }
+
+    private var discoveryBinding: Binding<Bool> {
+        let id = self.id
+        return Binding(
+            get: { setup.networks.first(where: { $0.id == id })?.discovery ?? false },
+            set: { value in
+                guard let index = setup.networks.firstIndex(where: { $0.id == id }) else { return }
+                if (setup.networks[index].discovery ?? false) != value {
+                    setup.networks[index].discovery = value
+                }
+            }
+        )
+    }
+
+    /// What finding devices across networks does, and what it cannot do
+    /// for a network that is kept apart.
+    private var discoveryNote: String {
+        let found: String = "Printers, speakers and TVs on this network then show up on your other networks that are not kept apart, for printing, AirPlay and casting."
+        guard let current, current.isolated, current.discovery == true else { return found }
+        return found + " Some speakers and TVs have to connect back to the phone that plays to them, which they cannot do while this network is kept apart."
+    }
+
+    /// The VLAN ID as typed: 0 for none, nil for something that is not
+    /// one.
+    private var vlanID: Int? {
+        let text: String = vlan.trimmingCharacters(in: .whitespaces)
+        if text.isEmpty { return 0 }
+        guard let typed = Int(text), typed >= 1, typed <= 4094 else { return nil }
+        return typed
+    }
+
+    /// What is wrong with the VLAN ID as typed, if anything.
+    private var vlanProblem: String? {
+        guard let typed = vlanID else { return "A VLAN ID is a number from 1 to 4094." }
+        let id = self.id
+        if typed == 0 {
+            let carried: Bool = setup.ethernet.contains(where: { $0.role == .lan && $0.taggedNetworks.contains(id) })
+            return carried ? "A wired port carries this network tagged, which takes a VLAN ID." : nil
+        }
+        if let other = setup.networks.first(where: { $0.id != id && $0.vlanID == typed }) {
+            return "\(other.name) already has VLAN ID \(typed). Each network needs one of its own."
+        }
+        return nil
+    }
+
+    private func loadVLAN() {
+        guard !loaded else { return }
+        loaded = true
+        let stored: Int = current?.vlanID ?? 0
+        vlan = stored == 0 ? "" : String(stored)
+    }
+
+    /// Takes the VLAN ID over into the draft. What is not one stays out
+    /// of it: the note under the field says what is wrong.
+    private func storeVLAN() {
+        guard loaded, let typed = vlanID else { return }
+        let id = self.id
+        guard let index = setup.networks.firstIndex(where: { $0.id == id }) else { return }
+        if setup.networks[index].vlanID != typed {
+            setup.networks[index].vlan = typed
+        }
     }
 
     /// What is wrong with the name or the address as typed, if anything.
@@ -660,6 +759,13 @@ private struct NetworkEditor: View {
             } footer: {
                 Text("Devices on your other networks can still reach the ones on this network.")
             }
+            if setup.networks.count > 1 {
+                Section {
+                    Toggle("Let your other networks find devices here", isOn: discoveryBinding)
+                } footer: {
+                    Text(discoveryNote)
+                }
+            }
             Section {
                 Picker("Route", selection: field(\.route, "")) {
                     Text(defaultRouteLabel).tag("")
@@ -676,6 +782,20 @@ private struct NetworkEditor: View {
             } footer: {
                 Text("Devices join this network through these. To change them, choose the network on a Wi-Fi network's page or under Wired ports.")
             }
+            Section {
+                LabeledContent("VLAN ID") {
+                    TextField("VLAN ID", text: $vlan, prompt: Text("None"))
+                        .multilineTextAlignment(.trailing)
+                        .keyboardType(.numberPad)
+                }
+            } footer: {
+                if let problem = vlanProblem {
+                    Text(problem)
+                        .foregroundStyle(.red)
+                } else {
+                    Text("With a VLAN ID, a wired port can carry this network tagged, on one cable with your other networks. Add it to the port under Wired ports.")
+                }
+            }
             if !isMain {
                 Section {
                     Button("Remove this network", role: .destructive) { remove() }
@@ -686,6 +806,8 @@ private struct NetworkEditor: View {
         }
         .navigationTitle(current?.name ?? "Network")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { loadVLAN() }
+        .onChange(of: vlan) { _, _ in storeVLAN() }
     }
 
     private func remove() {
@@ -993,8 +1115,9 @@ private struct RadioSetupRows: View {
 
 // MARK: - Wired ports
 
-/// What each wired port that is there is used for: the internet, one of
-/// the networks, or nothing.
+/// What each wired port that is there is used for: the internet, your
+/// devices, or nothing. A port for your devices has a page of its own for
+/// the networks it carries.
 private struct PortsSection: View {
     @EnvironmentObject private var model: AppModel
     @Binding var setup: NetworkSetup
@@ -1010,46 +1133,216 @@ private struct PortsSection: View {
         return name
     }
 
-    private func choice(_ name: String) -> Binding<String> {
-        Binding(
-            get: {
-                guard let port = setup.ethernet.first(where: { $0.name == name }) else { return "off" }
-                switch port.role {
-                case .wan: return "wan"
-                case .off: return "off"
-                case .lan: return "lan:" + port.network
-                }
-            },
-            set: { value in
-                guard let index = setup.ethernet.firstIndex(where: { $0.name == name }) else { return }
-                if value == "wan" {
-                    setup.ethernet[index].role = .wan
-                } else if value == "off" {
-                    setup.ethernet[index].role = .off
-                } else {
-                    setup.ethernet[index].role = .lan
-                    setup.ethernet[index].network = String(value.dropFirst(4))
-                }
-            }
-        )
+    /// What a port is used for, in a line.
+    private func caption(_ port: EthernetPort) -> String {
+        switch port.role {
+        case .wan: return "Internet source"
+        case .off: return "Not used"
+        case .lan:
+            let tagged: [String] = port.taggedNetworks.map { setup.networkName($0) }
+            if tagged.isEmpty { return "Devices on " + setup.networkName(port.network) }
+            let list: String = tagged.joined(separator: ", ")
+            if port.network.isEmpty { return "Devices on tagged networks: " + list }
+            return "Devices on " + setup.networkName(port.network) + " · tagged: " + list
+        }
     }
 
     var body: some View {
         if !ports.isEmpty {
             Section {
                 ForEach(ports) { port in
-                    Picker(selection: choice(port.name)) {
-                        Text("Internet source").tag("wan")
-                        ForEach(setup.networks) { network in
-                            Text("Devices on " + network.name).tag("lan:" + network.id)
-                        }
-                        Text("Not used").tag("off")
+                    NavigationLink {
+                        PortEditor(setup: $setup, name: port.name, title: title(port.name))
                     } label: {
-                        Label(title(port.name), systemImage: "cable.connector")
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(title(port.name))
+                                    .lineLimit(1)
+                                Text(caption(port))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        } icon: {
+                            Image(systemName: "cable.connector")
+                        }
                     }
                 }
             } header: {
                 Text("Wired ports")
+            }
+        }
+    }
+}
+
+/// One wired port: what it is used for and, when that is your devices,
+/// the network they join and the networks the cable carries tagged
+/// besides.
+private struct PortEditor: View {
+    @Binding var setup: NetworkSetup
+    let name: String
+    let title: String
+
+    private var port: EthernetPort? { setup.ethernet.first(where: { $0.name == name }) }
+
+    private var untagged: String { port?.network ?? RouterConfig.mainNetwork }
+
+    private var tagged: [String] { port?.taggedNetworks ?? [] }
+
+    private func edit(_ change: (inout EthernetPort) -> Void) {
+        let name = self.name
+        guard let index = setup.ethernet.firstIndex(where: { $0.name == name }) else { return }
+        change(&setup.ethernet[index])
+    }
+
+    private var roleBinding: Binding<PortRole> {
+        Binding(
+            get: { port?.role ?? .off },
+            set: { value in
+                edit { entry in
+                    entry.role = value
+                    // Only a port for your devices carries networks.
+                    if value != .lan {
+                        if !entry.taggedNetworks.isEmpty { entry.tagged = [] }
+                        if entry.network.isEmpty { entry.network = RouterConfig.mainNetwork }
+                    }
+                }
+            }
+        )
+    }
+
+    private var untaggedBinding: Binding<String> {
+        Binding(
+            get: { untagged },
+            set: { value in
+                edit { entry in
+                    entry.network = value
+                    // A port carries a network one way or the other.
+                    if entry.taggedNetworks.contains(value) {
+                        entry.tagged = entry.taggedNetworks.filter { $0 != value }
+                    }
+                }
+            }
+        )
+    }
+
+    /// The networks that can be ticked: those with a VLAN ID, and any
+    /// that is ticked although it has lost its ID, so that it can be
+    /// unticked. The port's untagged network is not among them.
+    private var choices: [NetworkConfig] {
+        let own: String = untagged
+        let ticked: [String] = tagged
+        return setup.networks.filter { $0.id != own && ($0.vlanID != 0 || ticked.contains($0.id)) }
+    }
+
+    private func toggle(_ id: String) {
+        let order: [String] = setup.networks.map { $0.id }
+        edit { entry in
+            var list: [String] = entry.taggedNetworks
+            if list.contains(id) {
+                list.removeAll(where: { $0 == id })
+            } else {
+                list.append(id)
+            }
+            // Kept in the order of the networks, so that ticking a box
+            // and unticking it again leaves no change behind.
+            entry.tagged = order.filter { list.contains($0) }
+            // A port for your devices carries something.
+            if list.isEmpty && entry.network.isEmpty {
+                entry.network = RouterConfig.mainNetwork
+            }
+        }
+    }
+
+    private func tagLabel(_ network: NetworkConfig) -> String {
+        network.vlanID == 0 ? "No VLAN ID" : "VLAN \(network.vlanID)"
+    }
+
+    private var untaggedNote: String {
+        if untagged.isEmpty {
+            return "Devices that reach this port without a VLAN tag are on none of your networks."
+        }
+        return "Devices that reach this port without a VLAN tag join \(setup.networkName(untagged))."
+    }
+
+    /// What the tagged networks are for and, once there are some, what
+    /// the other end of the cable has to be set to.
+    private var taggedNote: String {
+        let ticked: [String] = tagged
+        let carried: [NetworkConfig] = setup.networks.filter { ticked.contains($0.id) && $0.vlanID != 0 }
+        if carried.isEmpty {
+            return "A managed switch or access point can take several of your networks over this one cable, each under its VLAN ID."
+        }
+        let tags: String = carried.map { "VLAN \($0.vlanID) (\($0.name))" }.joined(separator: ", ")
+        let rest: String = untagged.isEmpty ? "no untagged network" : "\(setup.networkName(untagged)) untagged"
+        return "Set the port at the other end of this cable, on your switch or access point, to the same: tagged for \(tags), with \(rest)."
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Used for", selection: roleBinding) {
+                    Text("Internet source").tag(PortRole.wan)
+                    Text("Your devices").tag(PortRole.lan)
+                    Text("Not used").tag(PortRole.off)
+                }
+            }
+            if port?.role == .lan {
+                Section {
+                    Picker("Network", selection: untaggedBinding) {
+                        ForEach(setup.networks) { network in
+                            Text(network.name).tag(network.id)
+                        }
+                        if !tagged.isEmpty || untagged.isEmpty {
+                            Text("None").tag("")
+                        }
+                    }
+                } footer: {
+                    if !tagged.isEmpty {
+                        Text(untaggedNote)
+                    }
+                }
+                // With one network there is nothing more for the cable to
+                // carry, and nothing to explain.
+                if setup.networks.count > 1 || !choices.isEmpty {
+                    taggedSection
+                }
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var taggedSection: some View {
+        Section {
+            if choices.isEmpty {
+                Text("This cable can carry more of your networks, each under a VLAN ID. Give a network one on its page under Your networks, and it can be ticked here.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(choices) { network in
+                Button {
+                    toggle(network.id)
+                } label: {
+                    HStack {
+                        Text(network.name)
+                        Spacer()
+                        Text(tagLabel(network))
+                            .foregroundStyle(network.vlanID == 0 ? Color.red : Color.secondary)
+                            .monospacedDigit()
+                        if tagged.contains(network.id) {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.tint)
+                        }
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+        } header: {
+            Text("Tagged networks")
+        } footer: {
+            if !choices.isEmpty {
+                Text(taggedNote)
             }
         }
     }

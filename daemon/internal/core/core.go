@@ -31,6 +31,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/fw"
 	"github.com/ryanzhou/porter/daemon/internal/geoip"
 	"github.com/ryanzhou/porter/daemon/internal/lan"
+	"github.com/ryanzhou/porter/daemon/internal/mdns"
 	"github.com/ryanzhou/porter/daemon/internal/mpquic"
 	"github.com/ryanzhou/porter/daemon/internal/netctl"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
@@ -103,6 +104,7 @@ type Core struct {
 	wan  *wan.Manager
 	vpn  *vpn.Manager
 	mpq  *mpquic.Manager
+	mdns *mdns.Relay
 	devs *devices.Table
 
 	geo *geoip.DB
@@ -133,7 +135,7 @@ type Core struct {
 	ports  []wiredPort
 	// global holds, by network id, the router's address in the /64 the
 	// network has of the prefix delegated by the uplink in use; vlanErr
-	// is the last problem making a tagged port's interface, said once.
+	// is the last problem making a port's interface for a VLAN, said once.
 	global  map[string]netip.Prefix
 	vlanErr string
 	// apStarted is when each access point was last (re)started, by radio.
@@ -283,6 +285,7 @@ func New(opt Options) (*Core, error) {
 		Verbose: c.log.Enabled(context.Background(), slog.LevelDebug)}
 	c.wan = &wan.Manager{Log: c.log, RunDir: opt.RunDir, HookPath: opt.DHCPHook, PPPHooks: opt.PPPHooks, HookEnv: hookEnv, OnChange: c.Kick}
 	c.mpq = &mpquic.Manager{Log: c.log, RunDir: opt.RunDir, Binaries: opt.MPQUIC, OnChange: c.Kick}
+	c.mdns = &mdns.Relay{Log: c.log}
 	c.vpn = &vpn.Manager{Log: c.log, OnChange: c.Kick, UserspaceImpl: opt.WGUserspace, Resolve: c.resolveDirect}
 	c.vpn.Carrying = func(id string) (bool, string) {
 		if paths, running := c.mpq.Health(id); !running || paths == 0 {
@@ -434,6 +437,7 @@ func (c *Core) shutdown() {
 	c.wan.Stop()
 	c.vpn.Stop()
 	c.mpq.Stop()
+	c.mdns.Stop()
 	c.lan.Stop()
 	c.dns.Close()
 	// The firewall table is left in place on purpose: a router whose
@@ -729,10 +733,32 @@ func (c *Core) reconcile() {
 	}
 	var uplinks []wan.Uplink
 	lanPorts := map[string][]string{}
-	// tagged are the sub-interfaces of ports whose internet arrives under
-	// a VLAN tag; any other the router once made goes, further down.
+	// tagged are the sub-interfaces of ports that are wanted: of a port
+	// whose internet arrives under a VLAN tag, and of a port that carries
+	// networks tagged, one for each. Any other the router once made goes,
+	// further down.
 	tagged := map[string]bool{}
 	vlanErr := ""
+	// vlanOf makes sure a port has its sub-interface for a tag, on every
+	// pass: one that went with its port (an adapter unplugged and plugged
+	// in again) is made anew.
+	vlanOf := func(port string, id int) (string, bool) {
+		sub := config.VLANIfName(port, id)
+		tagged[sub] = true
+		if err := netx.EnsureVLAN(sub, port, id); err != nil {
+			vlanErr = fmt.Sprintf("%s: %v", sub, err)
+			return sub, false
+		}
+		// A sub-interface has its port's hardware address, and on the
+		// kernels of the last years keeps to it when that changes. Where
+		// it does not, it is told.
+		if hw, _, err := netx.HardwareAddr(port); err == nil {
+			if own, _, _ := netx.HardwareAddr(sub); own != hw {
+				_ = netx.SetMAC(sub, hw)
+			}
+		}
+		return sub, true
+	}
 	for i, e := range cfg.Ethernet {
 		hw, here := present[e.Name]
 		if !here {
@@ -752,19 +778,9 @@ func (c *Core) reconcile() {
 				// The port under it stays what it is to everything
 				// else: the uplink's key, its place in the order and
 				// its metric are the port's.
-				up.If = config.VLANIfName(e.Name, e.VLAN)
-				tagged[up.If] = true
-				if err := netx.EnsureVLAN(up.If, e.Name, e.VLAN); err != nil {
-					vlanErr = fmt.Sprintf("%s: %v", up.If, err)
+				var made bool
+				if up.If, made = vlanOf(e.Name, e.VLAN); !made {
 					continue
-				}
-				// A sub-interface has its port's hardware address, and
-				// on the kernels of the last years keeps to it when
-				// that changes. Where it does not, it is told.
-				if port, _, err := netx.HardwareAddr(e.Name); err == nil {
-					if sub, _, _ := netx.HardwareAddr(up.If); sub != port {
-						_ = netx.SetMAC(up.If, port)
-					}
 				}
 			}
 			if e.PPPoE.Enabled {
@@ -776,7 +792,27 @@ func (c *Core) reconcile() {
 			uplinks = append(uplinks, up)
 		case config.EthLAN:
 			_ = netx.SetMAC(e.Name, "")
-			lanPorts[e.Network] = append(lanPorts[e.Network], e.Name)
+			// What arrives without a tag belongs to the port's own
+			// network, if it has one: the port itself is in that
+			// network's bridge. Each network it carries tagged has a
+			// sub-interface of the port in its bridge, and the kernel
+			// hands a tagged frame to the sub-interface for its tag
+			// before the port's bridge sees it. Everything that goes by
+			// a network's bridge (addresses, the firewall, rules, which
+			// network a device is on) is therefore the same for a device
+			// that arrives tagged.
+			if e.Network != "" {
+				lanPorts[e.Network] = append(lanPorts[e.Network], e.Name)
+			}
+			for _, id := range e.Tagged {
+				n := cfg.Network(id)
+				if n == nil || n.VLAN == 0 {
+					continue
+				}
+				if sub, made := vlanOf(e.Name, n.VLAN); made {
+					lanPorts[id] = append(lanPorts[id], sub)
+				}
+			}
 		}
 	}
 	nPhone := 0
@@ -839,7 +875,7 @@ func (c *Core) reconcile() {
 	if vlanErr != c.vlanErr {
 		c.vlanErr = vlanErr
 		if vlanErr != "" {
-			c.log.Warn("the internet port's VLAN could not be set up", "err", vlanErr)
+			c.log.Warn("a port's interface for a VLAN could not be set up", "err", vlanErr)
 		}
 	}
 	for id, spec := range wantSTA {
@@ -1165,6 +1201,7 @@ func (c *Core) reconcile() {
 	c.applyDNS(&running, states, active, portalDevs, routerAddr, routes, global)
 	c.applySystem(cfg)
 	c.applyControl(cfg)
+	c.applyDiscovery(cfg)
 
 	if changedCfg && !c.resetting {
 		cfg.Rev++
@@ -1317,6 +1354,24 @@ func (c *Core) applySystem(cfg *config.Config) {
 	if err := system.SetSSH(c.opt.DataDir, cfg.System.SSH.Enabled, cfg.System.SSH.AuthorizedKeys); err != nil {
 		c.log.Warn("SSH setup", "err", err)
 	}
+}
+
+// applyDiscovery runs the relay for multicast DNS between the networks the
+// configuration pairs up, on their bridges, which are there by now.
+func (c *Core) applyDiscovery(cfg *config.Config) {
+	peers := cfg.DiscoveryPeers()
+	var nets []mdns.Net
+	for _, n := range cfg.Networks {
+		if len(peers[n.ID]) == 0 {
+			continue
+		}
+		entry := mdns.Net{If: fw.Bridge(n.ID)}
+		for _, id := range peers[n.ID] {
+			entry.Peers = append(entry.Peers, fw.Bridge(id))
+		}
+		nets = append(nets, entry)
+	}
+	c.mdns.Apply(nets, cfg.LAN.IPv6 && fw.HaveIPv6())
 }
 
 func (c *Core) geoDataPath() string { return filepath.Join(c.opt.DataDir, "geoip.csv.gz") }

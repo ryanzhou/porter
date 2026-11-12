@@ -37,10 +37,11 @@ jobs:
           # Simulated radios for the Wi-Fi test; it is skipped if the
           # runner's kernel does not ship the module.
           sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" || true
-          # VLANs and PPPoE, for the tests of a tagged internet port and of
-          # a PPPoE sign-in. They run inside the image's userland, which
-          # has no modules of its own to load, and count as failed there
-          # if they have to skip themselves: so these must load.
+          # VLANs and PPPoE, for the tests of a tagged internet port, of
+          # networks on one cable and of a PPPoE sign-in. They run inside
+          # the image's userland, which has no modules of its own to load,
+          # and count as failed there if they have to skip themselves: so
+          # these must load.
           sudo modprobe -a 8021q ppp_generic pppox pppoe
           test -c /dev/ppp
           sudo systemctl stop hostapd wpa_supplicant 2>/dev/null || true

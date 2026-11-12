@@ -25,7 +25,7 @@ func Fingerprint(p *Plan) string { return render(p, false) }
 // it would stall every one of them.
 func ClassKey(p *Plan) string {
 	q := *p
-	q.WANIfs, q.SSH, q.Control, q.Intercept, q.Learned = nil, false, false, false, nil
+	q.WANIfs, q.SSH, q.Control, q.Intercept, q.Learned, q.MDNS = nil, false, false, false, nil, nil
 	// Nor does a delegated prefix arriving or changing: the connections
 	// there are go on as they were set up, and nothing was under way to
 	// addresses that did not exist.
@@ -254,6 +254,14 @@ func render(p *Plan, full bool) string {
 		// SSH, not from an isolated one, and never from an uplink: no
 		// rule lets anything in from there but replies and DHCP.
 		w("\t\tiifname { %s } tcp dport %d accept", strings.Join(quoteAll(sorted(open)), ", "), proto.ControlPort)
+	}
+	if len(p.MDNS) > 0 {
+		// Multicast DNS, to be repeated on the other networks it is
+		// relayed between. Only what is sent to its group: a question put
+		// to the router's own address is not one for the relay.
+		mdns := strings.Join(quoteAll(p.MDNS), ", ")
+		w("\t\tiifname { %s } ip daddr 224.0.0.251 udp dport 5353 accept", mdns)
+		w("\t\tiifname { %s } ip6 daddr ff02::fb udp dport 5353 accept", mdns)
 	}
 	w("\t\tiifname @wan_ifs udp dport { 68, 546 } accept")
 	w("\t}")

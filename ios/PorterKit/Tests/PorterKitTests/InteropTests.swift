@@ -166,6 +166,31 @@ final class InteropTests: XCTestCase {
         config.ethernet[0].vlan = 35
         config.ethernet[0].pppoe = PPPoESetup(enabled: true, username: "user@provider.example", password: "pa\"ss \\word #1")
 
+        // Networks on one cable, and finding devices across networks:
+        // a router answers with a list of tagged networks for every
+        // port, and holds a network's VLAN ID and its switch.
+        XCTAssertEqual(config.ethernet.first?.tagged, [])
+        XCTAssertEqual(config.networks.first?.vlan, 0)
+        XCTAssertEqual(config.networks.first?.discovery, false)
+        config.networks[1].vlan = 20
+        config.networks[1].discovery = true
+        var twice = config
+        twice.networks[0].vlan = 20
+        let sameID = try await router.checkConfig(twice)
+        XCTAssertEqual(sameID.error, "Main and Guest have the same VLAN ID, 20. Each network needs one of its own.")
+        // Only a port for devices carries networks: on the first port,
+        // which is an internet source, the router does not keep them.
+        var source = config
+        source.ethernet[0].role = .lan
+        source.ethernet[0].network = ""
+        source.ethernet[0].tagged = ["guest"]
+        let trunk = try await router.checkConfig(source)
+        XCTAssertNil(trunk.error)
+        source.ethernet[0].tagged = ["lan"]
+        let untaggable = try await router.checkConfig(source)
+        XCTAssertEqual(untaggable.error, "Main has no VLAN ID, so the port \(config.ethernet[0].name) cannot carry it tagged. Give the network a VLAN ID first.")
+        config.ethernet[0].tagged = ["guest"]
+
         // The write names itself; sent again, as it is when its answer
         // was lost, it is answered again and made once.
         XCTAssertEqual(config.system.bluetoothOnly, false)
@@ -183,6 +208,9 @@ final class InteropTests: XCTestCase {
         XCTAssertEqual(stored.system.name, "Swift Test")
         XCTAssertEqual(stored.wifi.map(\.ssid), ["Porter Tést", "Porter Guests"])
         XCTAssertEqual(stored.networks.map(\.id), ["lan", "guest"])
+        XCTAssertEqual(stored.networks[1].vlan, 20)
+        XCTAssertEqual(stored.networks[1].discovery, true)
+        XCTAssertEqual(stored.ethernet.first?.tagged, [])
         XCTAssertEqual(stored.networks[1].address, "10.84.0.1/24") // chosen by the router
         XCTAssertFalse(stored.networks[1].ulaPrefix.isEmpty)
         XCTAssertEqual(stored.policy.rules.last?.src.networks, ["guest"])

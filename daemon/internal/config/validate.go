@@ -109,7 +109,16 @@ func (c *Config) Normalize() {
 	for i := range c.Ethernet {
 		e := &c.Ethernet[i]
 		e.IP.normalize()
-		if e.Network == "" || e.Role != EthLAN {
+		e.Network = strings.TrimSpace(e.Network)
+		for j := range e.Tagged {
+			e.Tagged[j] = strings.TrimSpace(e.Tagged[j])
+		}
+		// Only a port for the router's own devices carries networks, and
+		// such a port carries at least one: the main one, where nothing
+		// else is said.
+		if e.Role != EthLAN {
+			e.Network, e.Tagged = MainNetwork, nil
+		} else if e.Network == "" && len(e.Tagged) == 0 {
 			e.Network = MainNetwork
 		}
 		// Not trimmed further than this: a provider's password may begin
@@ -448,8 +457,40 @@ func (c *Config) validateRadios() error {
 		if err := e.validatePPPoE(); err != nil {
 			return err
 		}
-		if c.Network(e.Network) == nil {
-			return fmt.Errorf("%s: belongs to a network that does not exist", e.Name)
+		if err := c.validatePortNetworks(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validatePortNetworks checks which networks a port carries: one untagged
+// at most, and tagged only those that have a VLAN ID to be tagged with.
+func (c *Config) validatePortNetworks(e EthPort) error {
+	if e.Network == "" && (e.Role != EthLAN || len(e.Tagged) == 0) {
+		return fmt.Errorf("%s: belongs to no network", e.Name)
+	}
+	if e.Network != "" && c.Network(e.Network) == nil {
+		return fmt.Errorf("%s: belongs to a network that does not exist", e.Name)
+	}
+	if len(e.Tagged) > 0 && e.Role != EthLAN {
+		return fmt.Errorf("%s: only a port for your devices carries tagged networks", e.Name)
+	}
+	seen := map[string]bool{}
+	for _, id := range e.Tagged {
+		n := c.Network(id)
+		if n == nil {
+			return fmt.Errorf("%s: carries a network that does not exist", e.Name)
+		}
+		if seen[id] {
+			return fmt.Errorf("%s: %s is among its tagged networks twice", e.Name, n.Name)
+		}
+		seen[id] = true
+		if id == e.Network {
+			return fmt.Errorf("%s is the untagged network of the port %s already. A port carries a network either untagged or tagged, not both.", n.Name, e.Name)
+		}
+		if n.VLAN == 0 {
+			return fmt.Errorf("%s has no VLAN ID, so the port %s cannot carry it tagged. Give the network a VLAN ID first.", n.Name, e.Name)
 		}
 	}
 	return nil
@@ -728,6 +769,7 @@ func (c *Config) validateLAN() error {
 		return fmt.Errorf("The router has room for %d networks.", MaxNetworks)
 	}
 	ids := map[string]bool{}
+	vlans := map[int]string{}
 	var v4, v6 []netip.Prefix
 	for _, n := range c.Networks {
 		if !reID.MatchString(n.ID) {
@@ -774,6 +816,13 @@ func (c *Config) validateLAN() error {
 		if err := c.validAction(n.Route, true); err != nil {
 			return fmt.Errorf("%s: %w", n.Name, err)
 		}
+		if n.VLAN < 0 || n.VLAN > 4094 {
+			return fmt.Errorf("A VLAN ID is a number from 1 to 4094.")
+		}
+		if other, taken := vlans[n.VLAN]; taken && n.VLAN != 0 {
+			return fmt.Errorf("%s and %s have the same VLAN ID, %d. Each network needs one of its own.", other, n.Name, n.VLAN)
+		}
+		vlans[n.VLAN] = n.Name
 	}
 	return nil
 }

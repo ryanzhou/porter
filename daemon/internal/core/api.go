@@ -1275,19 +1275,21 @@ func (c *Core) check(next *config.Config) CheckResult {
 		out.Error = err.Error()
 		return out
 	}
-	if !next.Ready() {
-		return out
-	}
-	plan := planRadios(next, c.radios)
-	out.Notes = append(out.Notes, plan.notes...)
 	cur := c.cfg
-	j := func(v any) string { b, _ := json.Marshal(v); return string(b) }
-	if j(cur.Wifi) != j(next.Wifi) || j(cur.Radios) != j(next.Radios) || cur.System.Country != next.System.Country {
-		out.Effects = append(out.Effects, "Your Wi-Fi restarts. Devices reconnect by themselves within a few seconds.")
-	}
-	for _, w := range next.Wifi {
-		if old := cur.SSID(w.ID); old != nil && old.SSID != "" && (old.SSID != w.SSID || old.Passphrase != w.Passphrase) && w.Enabled {
-			out.Effects = append(out.Effects, fmt.Sprintf("Devices on “%s” have to join again with the new name or password.", old.SSID))
+	// Until the router has been set up there is no Wi-Fi to say anything
+	// about. Its wired ports work from the start, and so does what
+	// follows about networks and ports.
+	if next.Ready() {
+		plan := planRadios(next, c.radios)
+		out.Notes = append(out.Notes, plan.notes...)
+		j := func(v any) string { b, _ := json.Marshal(v); return string(b) }
+		if j(cur.Wifi) != j(next.Wifi) || j(cur.Radios) != j(next.Radios) || cur.System.Country != next.System.Country {
+			out.Effects = append(out.Effects, "Your Wi-Fi restarts. Devices reconnect by themselves within a few seconds.")
+		}
+		for _, w := range next.Wifi {
+			if old := cur.SSID(w.ID); old != nil && old.SSID != "" && (old.SSID != w.SSID || old.Passphrase != w.Passphrase) && w.Enabled {
+				out.Effects = append(out.Effects, fmt.Sprintf("Devices on “%s” have to join again with the new name or password.", old.SSID))
+			}
 		}
 	}
 	for _, n := range next.Networks {
@@ -1298,6 +1300,91 @@ func (c *Core) check(next *config.Config) CheckResult {
 	for _, n := range cur.Networks {
 		if next.Network(n.ID) == nil {
 			out.Effects = append(out.Effects, fmt.Sprintf("%s is removed. Its devices lose their connection.", n.Name))
+		}
+	}
+	// What is plugged into a port notices when the port changes hands.
+	// Only ports that are there: nothing is plugged into the others.
+	names := map[string]string{}
+	for _, p := range c.ports {
+		if p.Phone {
+			continue
+		}
+		names[p.Name] = p.Name
+		if p.Label != "" {
+			names[p.Name] = p.Label
+		}
+	}
+	inUse := ""
+	if a := wan.Active(c.wan.States()); a != nil {
+		inUse = a.Key
+	}
+	out.Effects = append(out.Effects, portEffects(cur, next, names, inUse)...)
+	return out
+}
+
+// portEffects says what a change to the wired ports will be noticed as by
+// the devices behind them. names are the ports that are plugged in, as
+// they are called for a person, and inUse is the key of the uplink the
+// router is online through.
+func portEffects(cur, next *config.Config, names map[string]string, inUse string) []string {
+	var out []string
+	for _, now := range next.Ethernet {
+		name, here := names[now.Name]
+		var was *config.EthPort
+		for i := range cur.Ethernet {
+			if cur.Ethernet[i].Name == now.Name {
+				was = &cur.Ethernet[i]
+			}
+		}
+		if !here || was == nil {
+			continue
+		}
+		if was.Role == config.EthWAN && now.Role != config.EthWAN && inUse == config.UplinkEth(now.Name) {
+			out = append(out, fmt.Sprintf("The router is online through %s and loses that connection.", name))
+		}
+		if was.Role != config.EthLAN {
+			continue
+		}
+		if now.Role != config.EthLAN {
+			out = append(out, fmt.Sprintf("Devices connected to %s lose their connection.", name))
+			continue
+		}
+		called := func(id string) string {
+			if n := next.Network(id); n != nil {
+				return n.Name
+			}
+			if n := cur.Network(id); n != nil {
+				return n.Name
+			}
+			return id
+		}
+		tagged := func(e *config.EthPort, id string) bool {
+			for _, t := range e.Tagged {
+				if t == id {
+					return true
+				}
+			}
+			return false
+		}
+		switch {
+		case was.Network == now.Network || was.Network == "":
+		case now.Network == "" && tagged(&now, was.Network):
+			out = append(out, fmt.Sprintf("%s carries %s tagged from now on, as VLAN %d. Devices connected to it without a VLAN tag are offline until the switch at the other end is set to that.", name, called(was.Network), next.Network(was.Network).VLAN))
+		case now.Network == "":
+			out = append(out, fmt.Sprintf("%s carries tagged networks only from now on. Devices connected to it without a VLAN tag lose their connection.", name))
+		default:
+			out = append(out, fmt.Sprintf("Devices connected to %s move from %s to %s. Each one is offline until it reconnects, which unplugging its cable for a moment makes it do.", name, called(was.Network), called(now.Network)))
+		}
+		for _, id := range was.Tagged {
+			before, after := cur.Network(id), next.Network(id)
+			switch {
+			case before == nil || after == nil:
+				// A network that is removed has been spoken for above.
+			case !tagged(&now, id):
+				out = append(out, fmt.Sprintf("%s no longer carries %s under VLAN %d. Devices that reach %s that way lose their connection.", name, after.Name, before.VLAN, after.Name))
+			case before.VLAN != after.VLAN:
+				out = append(out, fmt.Sprintf("%s changes from VLAN %d to VLAN %d on %s. Its devices there are offline until the switch at the other end is set to the new ID.", after.Name, before.VLAN, after.VLAN, name))
+			}
 		}
 	}
 	return out

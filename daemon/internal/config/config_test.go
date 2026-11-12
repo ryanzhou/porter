@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -759,5 +760,184 @@ func TestMadeInterfaceNames(t *testing.T) {
 	c.Normalize()
 	if len(c.Ethernet) != 1 || strings.Join(c.WAN.Order, " ") != "eth:eth0 wifi phone" {
 		t.Errorf("after forgetting: %+v %v", c.Ethernet, c.WAN.Order)
+	}
+}
+
+// Networks on one cable: a network has a VLAN ID, and a port for the
+// router's own devices carries one network untagged (or none) and any
+// number of others under their IDs.
+func TestTrunkPorts(t *testing.T) {
+	base := func() *Config {
+		c := ready()
+		c.Networks = append(c.Networks,
+			Network{ID: "iot", Name: "Things", VLAN: 20},
+			Network{ID: "guest", Name: "Guest", VLAN: 30, Isolated: true})
+		c.Ethernet = append(c.Ethernet, EthPort{Name: "eth1", Role: EthLAN, Network: "lan", Tagged: []string{"iot", "guest"}})
+		c.Normalize()
+		return c
+	}
+	trunk := func(c *Config) *EthPort { return &c.Ethernet[1] }
+	c := base()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stored before either existed: no ID, nothing tagged, and a port
+	// for devices without a network named is on the main one, as ever.
+	var old Config
+	if err := json.Unmarshal([]byte(`{"version":3,"networks":[{"id":"lan","name":"Main"}],"ethernet":[{"name":"eth0","role":"lan"},{"name":"eth1","role":"lan","network":""}]}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	old.Normalize()
+	for _, e := range old.Ethernet {
+		if e.Network != MainNetwork || e.Tagged == nil || len(e.Tagged) != 0 {
+			t.Errorf("a port stored without the fields: %+v", e)
+		}
+	}
+	if n := old.Networks[0]; n.VLAN != 0 || n.Discovery {
+		t.Errorf("a network stored without the fields: %+v", n)
+	}
+
+	good := map[string]func(c *Config){
+		"the lowest and highest IDs":  func(c *Config) { c.Networks[1].VLAN, c.Networks[2].VLAN = 1, 4094 },
+		"the main network with an ID": func(c *Config) { c.Networks[0].VLAN = 7 },
+		"tagged networks only":        func(c *Config) { trunk(c).Network = "" },
+		"the main network tagged": func(c *Config) {
+			c.Networks[0].VLAN = 7
+			trunk(c).Network, trunk(c).Tagged = "iot", []string{"lan", "guest"}
+		},
+		"an ID that no port uses": func(c *Config) { trunk(c).Tagged = nil },
+		"two ports carrying one network": func(c *Config) {
+			c.Ethernet[0].Role, c.Ethernet[0].Network, c.Ethernet[0].Tagged = EthLAN, "guest", []string{"iot"}
+		},
+		"the internet port's own ID again": func(c *Config) { c.Ethernet[0].VLAN = 20 },
+	}
+	for name, mutate := range good {
+		next := base()
+		mutate(next)
+		next.Normalize()
+		if err := next.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	bad := map[string]struct {
+		mutate func(c *Config)
+		says   string
+	}{
+		"an ID below the range":       {func(c *Config) { c.Networks[1].VLAN = -1 }, "from 1 to 4094"},
+		"an ID above the range":       {func(c *Config) { c.Networks[1].VLAN = 4095 }, "from 1 to 4094"},
+		"two networks with one ID":    {func(c *Config) { c.Networks[2].VLAN = 20 }, "Things and Guest have the same VLAN ID, 20"},
+		"tagging a network without":   {func(c *Config) { c.Networks[1].VLAN = 0 }, "Things has no VLAN ID"},
+		"untagged and tagged at once": {func(c *Config) { trunk(c).Network = "iot" }, "Things is the untagged network of the port eth1 already"},
+		"tagged twice":                {func(c *Config) { trunk(c).Tagged = []string{"iot", "guest", "iot"} }, "twice"},
+		"tagging a network not there": {func(c *Config) { trunk(c).Tagged = []string{"gone"} }, "does not exist"},
+		"a network removed under it":  {func(c *Config) { c.Networks = c.Networks[:2] }, "does not exist"},
+	}
+	for name, tc := range bad {
+		next := base()
+		tc.mutate(next)
+		next.Normalize()
+		if err := next.Validate(); err == nil || !strings.Contains(err.Error(), tc.says) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// What Normalize would have put right is still refused as it stands:
+	// the router checks its own changes without normalizing them.
+	for name, mutate := range map[string]func(c *Config){
+		"a port for devices on no network at all": func(c *Config) { trunk(c).Network, trunk(c).Tagged = "", nil },
+		"an internet port carrying networks":      func(c *Config) { trunk(c).Role = EthWAN },
+	} {
+		next := base()
+		mutate(next)
+		if err := next.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+
+	// A port that stops being one for devices carries nothing, and one
+	// left with nothing is on the main network again.
+	c = base()
+	trunk(c).Role = EthWAN
+	c.Normalize()
+	if e := trunk(c); e.Network != MainNetwork || len(e.Tagged) != 0 {
+		t.Errorf("an internet port still carries networks: %+v", e)
+	}
+	c = base()
+	trunk(c).Network, trunk(c).Tagged = "", []string{}
+	c.Normalize()
+	if e := trunk(c); e.Network != MainNetwork {
+		t.Errorf("a port left with no network: %+v", e)
+	}
+	// The lists are lists on the wire.
+	c = base()
+	c.Ethernet[0].Tagged = nil
+	c.Normalize()
+	if b := mustJSON(c); strings.Contains(b, `"tagged":null`) {
+		t.Error("a port's tagged networks are sent as null")
+	}
+	// The sub-interface for a tagged network is named like the one for a
+	// tagged internet port, and is never taken for a port.
+	if name := VLANIfName("eth1", c.Network("iot").VLAN); name != "v20-eth1" || !MadeIf(name) {
+		t.Errorf("the interface for a tagged network is %q", name)
+	}
+}
+
+// Which networks find each other's devices: a network that lets itself
+// be found, and every network that is not kept apart.
+func TestDiscoveryPeers(t *testing.T) {
+	type net struct {
+		id               string
+		found, keptApart bool
+	}
+	pairs := func(nets ...net) string {
+		c := ready()
+		c.Networks[0].Discovery, c.Networks[0].Isolated = nets[0].found, nets[0].keptApart
+		for _, n := range nets[1:] {
+			c.Networks = append(c.Networks, Network{ID: n.id, Name: n.id, Discovery: n.found, Isolated: n.keptApart})
+		}
+		c.Normalize()
+		if err := c.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for a, peers := range c.DiscoveryPeers() {
+			for _, b := range peers {
+				if a < b {
+					out = append(out, a+"-"+b)
+				}
+				// Every pairing is there from both ends.
+				back := false
+				for _, p := range c.DiscoveryPeers()[b] {
+					back = back || p == a
+				}
+				if !back {
+					t.Errorf("%s is relayed to %s but not back", a, b)
+				}
+			}
+		}
+		sort.Strings(out)
+		return strings.Join(out, " ")
+	}
+	for _, tc := range []struct {
+		what string
+		nets []net
+		want string
+	}{
+		{"nothing asked for", []net{{id: "lan"}, {id: "iot"}, {id: "guest", keptApart: true}}, ""},
+		{"one network alone", []net{{id: "lan", found: true}}, ""},
+		{"the things network found from the main one, guests left out",
+			[]net{{id: "lan"}, {id: "iot", found: true, keptApart: true}, {id: "guest", keptApart: true}}, "iot-lan"},
+		{"found from every network that is not kept apart, which do not find each other for it",
+			[]net{{id: "lan"}, {id: "iot", found: true}, {id: "kids"}, {id: "guest", keptApart: true}}, "iot-kids iot-lan"},
+		{"the main network found from the others, but not from one kept apart",
+			[]net{{id: "lan", found: true}, {id: "iot"}, {id: "guest", keptApart: true}}, "iot-lan"},
+		{"two that are both kept apart do not find each other",
+			[]net{{id: "lan"}, {id: "iot", found: true, keptApart: true}, {id: "cams", found: true, keptApart: true}}, "cams-lan iot-lan"},
+		{"only networks kept apart: nobody to be found by",
+			[]net{{id: "lan", keptApart: true}, {id: "iot", found: true, keptApart: true}}, ""},
+	} {
+		if got := pairs(tc.nets...); got != tc.want {
+			t.Errorf("%s: relayed between %q, want %q", tc.what, got, tc.want)
+		}
 	}
 }

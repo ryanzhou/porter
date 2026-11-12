@@ -127,26 +127,34 @@ public enum DemoRouter {
     static let tablet = "f2:9b:40:d1:66:0e"
     static let reader = "28:ef:01:a4:3b:77"
     static let console = "98:b6:e9:52:1c:d0"
+    static let printer = "00:1e:8f:3a:5b:c2"
+    /// A USB Ethernet adapter: the cable to a switch that takes the main
+    /// network as it is and the one for things under its VLAN ID.
+    static let adapter = "enx00e04c6801a7"
 
     static let configJSON = """
     {"version":3,"rev":12,
      "system":{"name":"Porter","country":"AU","ssh":{"enabled":false,"authorized_keys":[]},"bluetooth_only":false},
      "radios":[{"id":"builtin","role":"ap","band":"5","channel":0,"width":0},
                {"id":"usb:9c:ef:d5:12:34:56","role":"wan","band":"","channel":0,"width":0}],
-     "ethernet":[{"name":"end0","role":"wan","network":"lan","vlan":7,
+     "ethernet":[{"name":"end0","role":"wan","network":"lan","tagged":[],"vlan":7,
                   "ip":{"v4":{"mode":"auto","address":"","gateway":"","dns":[]},"v6":{"mode":"auto","address":"","gateway":"","dns":[]}},
-                  "pppoe":{"enabled":true,"username":"porter@fibre.example","password":"not-a-real-password"}}],
+                  "pppoe":{"enabled":true,"username":"porter@fibre.example","password":"not-a-real-password"}},
+                 {"name":"\(adapter)","role":"lan","network":"lan","tagged":["things"],"vlan":0,
+                  "ip":{"v4":{"mode":"auto","address":"","gateway":"","dns":[]},"v6":{"mode":"auto","address":"","gateway":"","dns":[]}},
+                  "pppoe":{"enabled":false,"username":"","password":""}}],
      "wifi":[{"id":"main","ssid":"Porter","passphrase":"correct horse battery","security":"wpa2","hidden":false,"isolate":false,"network":"lan","enabled":true},
              {"id":"guest","ssid":"Porter Guest","passphrase":"welcome aboard","security":"wpa2","hidden":false,"isolate":true,"network":"guest","enabled":true}],
      "wan":{"networks":[{"ssid":"Harbour Hotel Guest","psk":"","hidden":false,"priority":3},
                         {"ssid":"Home","psk":"not-a-real-password","hidden":false,"priority":2},
                         {"ssid":"Airport Free WiFi","psk":"","hidden":false,"priority":1}],
             "wifi_mac":{"mode":"random","address":"06:5a:91:c3:7e:12"},"eth_mac":{"mode":"hardware"},
-            "order":["eth:end0","wifi","phone"],
+            "order":["eth:end0","eth:\(adapter)","wifi","phone"],
             "probe":{"url":"http://captive.apple.com/hotspot-detect.html","expect":"Success"}},
      "lan":{"auto_renumber":true,"lease_minutes":720,"domain":"lan","ipv6":true},
-     "networks":[{"id":"lan","name":"Main","address":"10.83.0.1/24","ula_prefix":"fd4c:91a7:20be:1::/64","isolated":false,"route":""},
-                 {"id":"guest","name":"Guest","address":"10.84.0.1/24","ula_prefix":"fd4c:91a7:20be:2::/64","isolated":true,"route":""}],
+     "networks":[{"id":"lan","name":"Main","address":"10.83.0.1/24","ula_prefix":"fd4c:91a7:20be:1::/64","isolated":false,"route":"","vlan":0,"discovery":false},
+                 {"id":"guest","name":"Guest","address":"10.84.0.1/24","ula_prefix":"fd4c:91a7:20be:2::/64","isolated":true,"route":"","vlan":0,"discovery":false},
+                 {"id":"things","name":"Things","address":"10.85.0.1/24","ula_prefix":"fd4c:91a7:20be:3::/64","isolated":true,"route":"","vlan":20,"discovery":true}],
      "dns":{"upstreams":["tls://9.9.9.9#dns.quad9.net"],"intercept":true,"blocked":["ads.example.net"],
             "adblock":{"enabled":true,"lists":["https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"],"allow":["links.example.com"]}},
      "vpns":[{"id":"home","name":"Home","enabled":true,"kill_switch":true,
@@ -196,8 +204,9 @@ public enum DemoRouter {
          "aps":[{"radio":"builtin","iface":"wlan0","state":"up","band":"5","channel":36,"mode":"ac/80MHz","ssids":["main"]}],
          "stas":[{"radio":"usb:9c:ef:d5:12:34:56","iface":"wlan1","state":"connected","ssid":"Harbour Hotel Guest","bssid":"7c:10:c9:2b:55:e0","freq":5220,"signal":-58}],
          "off_air":["guest"],
-         "ports":[{"name":"end0","phone":false,"carrier":false},{"name":"enx3a1f0c2299d4","label":"iPhone","phone":true,"carrier":true}],
-         "lan":{"address":"10.83.0.1/24","ula":"fd4c:91a7:20be:1::/64","clients":4,"networks":{"lan":4},"prefixes":{}},
+         "ports":[{"name":"end0","phone":false,"carrier":false},{"name":"\(adapter)","label":"USB 10/100/1000 LAN","phone":false,"carrier":true},
+                  {"name":"enx3a1f0c2299d4","label":"iPhone","phone":true,"carrier":true}],
+         "lan":{"address":"10.83.0.1/24","ula":"fd4c:91a7:20be:1::/64","clients":5,"networks":{"lan":4,"things":1},"prefixes":{}},
          "control":\(control),
          "vpns":[{"id":"home","name":"Home","if":"wg-home","state":"up","endpoint":"203.0.113.24:51820","handshake":\(now - 47),"rx":1843200512,"tx":211812352},
                  {"id":"us","name":"Streaming (US)","state":"off","rx":0,"tx":0}],
@@ -213,6 +222,7 @@ public enum DemoRouter {
          {"mac":"\(laptop)","hostname":"MacBook-Pro","ipv4":"10.83.0.57","ipv6":["fd4c:91a7:20be:1:8d2:41ff:fe7a:c4e2"],"first_seen":\(now - 41 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 5_100),"link":"wlan0","network":"lan","signal":-53,"up":1288490188,"down":9126805504,"name":"Work laptop","route":"vpn:home","paused":false,"no_adblock":true},
          {"mac":"\(tablet)","hostname":"iPad","ipv4":"10.83.0.61","first_seen":\(now - 12 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 2_700),"link":"wlan0","network":"lan","signal":-61,"up":96468992,"down":2254857830,"name":"","route":"","paused":false,"no_adblock":false},
          {"mac":"\(reader)","hostname":"kindle","ipv4":"10.83.0.66","first_seen":\(now - 9 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 900),"link":"wlan0","network":"lan","signal":-70,"up":1258291,"down":48234496,"name":"","route":"","paused":false,"no_adblock":false},
+         {"mac":"\(printer)","hostname":"Printer","ipv4":"10.85.0.60","first_seen":\(now - 20 * 86_400),"last_seen":\(now),"online":true,"online_since":\(now - 86_000),"link":"wired","network":"things","up":3145728,"down":20971520,"name":"","route":"","paused":false,"no_adblock":false},
          {"mac":"\(console)","hostname":"Switch","first_seen":\(now - 30 * 86_400),"last_seen":\(now - 3 * 86_400),"online":false,"up":734003200,"down":18146236006,"name":"Games console","route":"","paused":true,"no_adblock":false}]
         """
     }

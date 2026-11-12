@@ -190,27 +190,40 @@ is left to carry the router's own network. `config.check` answers what
 `config.set` would do with a document without doing it: `error` is why
 it would be refused, `notes` what the hardware cannot do of it (a Wi-Fi
 network that fits on no radio), `effects` what will be noticed (Wi-Fi
-restarting, devices having to rejoin or getting new addresses).
+restarting, devices having to rejoin or getting new addresses, the
+devices behind a wired port losing their connection when the port
+changes hands or a network on it changes its VLAN ID).
 
 The document's format is `version` 3. (Format 3 added
-`system.bluetooth_only`, and `vlan` and `pppoe` for wired ports, to
-format 2 and changed nothing else; a router that stored format 2 carries
-it over as it is.) Its parts, briefly:
+`system.bluetooth_only`; `vlan`, `pppoe` and `tagged` for wired ports;
+and `vlan` and `discovery` for networks, to format 2 and changed nothing
+else; a router that stored format 2 carries it over as it is.) Its
+parts, briefly:
 
 ```
 system      {name country ssh{enabled authorized_keys[]} bluetooth_only}
             bluetooth_only: the router does not listen on TCP
 wifi[]      {id ssid passphrase security hidden isolate network enabled}
             the Wi-Fi networks broadcast; the first ("main") always exists
-networks[]  {id name address ula_prefix isolated route}
+networks[]  {id name address ula_prefix isolated route vlan discovery}
             the router's own networks; the first ("lan") always exists.
             address and ula_prefix may be left empty for a new one: the
             router chooses. isolated: cannot open connections to the
-            others. route: "", "direct", "block" or "vpn:<id>"
+            others. route: "", "direct", "block" or "vpn:<id>".
+            vlan: the VLAN ID the network has on wired ports that carry
+            it tagged, 1 to 4094, 0 for none; no two networks have the
+            same. discovery: multicast DNS is relayed between this
+            network and every network that is not isolated, both ways
 lan         {auto_renumber lease_minutes domain ipv6}   shared by all networks
 radios[]    {id role band channel width}   role "off" | "ap" | "wan" | "ap+wan"
-ethernet[]  {name role ip vlan pppoe network}   role "wan" | "lan" | "off";
-            network: the network a "lan" port belongs to.
+ethernet[]  {name role ip vlan pppoe network tagged[]}
+            role "wan" | "lan" | "off".
+            For a "lan" port: network: the id of the network it carries
+            untagged, "" for none; tagged: the ids of the networks it
+            carries under their VLAN IDs as well. Each of those needs a
+            vlan, and none can be the port's untagged network. A "lan"
+            port with neither is given the main network; for any other
+            role the router sets network to "lan" and empties tagged.
             For a "wan" port: ip {v4 v6}, each {mode address gateway dns[]},
             mode "auto" | "static"; vlan: the VLAN ID the internet arrives
             under, 1 to 4094, 0 for none; pppoe {enabled username password}:

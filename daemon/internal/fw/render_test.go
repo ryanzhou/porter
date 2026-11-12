@@ -32,7 +32,7 @@ func testConfig() *config.Config {
 	}
 	c.Networks = append(c.Networks,
 		config.Network{ID: "guest", Name: "Guest", Address: "10.84.0.1/24", ULAPrefix: "fd00:0:0:84::/64", Isolated: true, Route: "vpn:work"},
-		config.Network{ID: "iot", Name: "Things", Address: "10.85.0.1/24", ULAPrefix: "fd00:0:0:85::/64", Route: "block"},
+		config.Network{ID: "iot", Name: "Things", Address: "10.85.0.1/24", ULAPrefix: "fd00:0:0:85::/64", Route: "block", Discovery: true},
 	)
 	c.Policy.Rules = append(c.Policy.Rules,
 		config.Rule{ID: "r7", Enabled: true, Src: config.Src{Networks: []string{"guest", "iot"}}, Dst: config.Dst{Ports: []string{"9000"}}, Action: "block"})
@@ -107,6 +107,11 @@ func TestRender(t *testing.T) {
 		// The app over the network: the same networks as SSH, the
 		// isolated one left out.
 		`iifname { "br-iot", "br-lan" } tcp dport 7678 accept`,
+		// Multicast DNS is listened to on the networks it is relayed
+		// between: the one that lets itself be found and the one that
+		// is not kept apart, and not the guests'.
+		`iifname { "br-iot", "br-lan" } ip daddr 224.0.0.251 udp dport 5353 accept`,
+		`iifname { "br-iot", "br-lan" } ip6 daddr ff02::fb udp dport 5353 accept`,
 		// What the router sends itself for a kill-switched tunnel leaves
 		// by that tunnel or not at all.
 		`meta mark & 0xff == 0x10 oifname != "wg-home" jump refuse`,
@@ -172,6 +177,16 @@ func TestRender(t *testing.T) {
 	if ClassKey(&alt) != ClassKey(p) || Fingerprint(&alt) == Fingerprint(p) {
 		t.Error("ClassKey follows changes that reroute nothing")
 	}
+	// Nor is where multicast DNS is listened to. Nothing but that one
+	// port is opened for it, and only to what is sent to its groups.
+	alt = *p
+	alt.MDNS = nil
+	if ClassKey(&alt) != ClassKey(p) || Fingerprint(&alt) == Fingerprint(p) {
+		t.Error("ClassKey follows the relaying of multicast DNS, or the ruleset does not")
+	}
+	if n := strings.Count(out, "5353"); n != 2 || strings.Count(Render(&alt), "5353") != 0 {
+		t.Errorf("%d rules mention the multicast DNS port, want one per address family and none without a relay", n)
+	}
 	bare := BuildPlan(c, Runtime{WANIfs: p.WANIfs, PortalDevs: p.PortalDevs, GeoVersion: p.GeoVersion, Geo: p.Geo, Learned: p.Learned})
 	if ClassKey(bare) != ClassKey(p) || Fingerprint(bare) == Fingerprint(p) {
 		t.Error("ClassKey follows a delegated prefix, or the ruleset does not")
@@ -216,7 +231,7 @@ func TestRender(t *testing.T) {
 	single.Networks = single.Networks[:1]
 	single.Policy.Rules = single.Policy.Rules[:6]
 	one := Render(BuildPlan(single, Runtime{WANIfs: []string{"eth0"}}))
-	for _, absent := range []string{"lan_lan", "lan_nets4", "iifname map"} {
+	for _, absent := range []string{"lan_lan", "lan_nets4", "iifname map", "5353"} {
 		if strings.Contains(one, absent) {
 			t.Errorf("a router with one network has %q in its ruleset", absent)
 		}

@@ -67,8 +67,11 @@ type Plan struct {
 	VPNs []PlanVPN
 	SSH  bool
 	// Control: the app may connect over the router's own networks.
-	Control    bool
-	Intercept  bool
+	Control   bool
+	Intercept bool
+	// MDNS are the bridges of the networks between which multicast DNS is
+	// relayed (see internal/mdns): the router listens to it there.
+	MDNS       []string
 	Paused     []string // MACs
 	PortalDevs []string // MACs allowed to bypass policy while captive
 	Rules      []PlanRule
@@ -189,6 +192,10 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 	}
 	sort.Strings(p.WANIfs)
 	sort.Strings(p.PortalDevs)
+	for id := range c.DiscoveryPeers() {
+		p.MDNS = append(p.MDNS, Bridge(id))
+	}
+	sort.Strings(p.MDNS)
 	for _, n := range c.Networks {
 		l := PlanLAN{If: Bridge(n.ID), Isolated: n.Isolated}
 		_, l.Net4 = n.Prefix()

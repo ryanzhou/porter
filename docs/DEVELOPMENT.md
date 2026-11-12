@@ -24,7 +24,8 @@ the project's GitHub releases, and only when asked for from the app.
                                                     ├─ nftables         (firewall, NAT44/NAT66, classification)
                                                     ├─ policy routing   (one table per VPN profile)
                                                     ├─ WireGuard        (kernel)
-                                                    └─ DNS forwarder    (built in)
+                                                    ├─ DNS forwarder    (built in)
+                                                    └─ mDNS relay       (built in)
 ```
 
 `porterd` owns one configuration document and continuously reconciles
@@ -123,6 +124,54 @@ every subsystem against it and against what the network is doing.
   interface is `ppp-<port>`. Both names are shortened to a hash for a
   port whose name leaves no room in 15 bytes, and `config.MadeIf`
   recognises them, so that neither is ever listed or stored as a port.
+- **Networks on one cable.** A network can have a VLAN ID, and a wired
+  port for devices then carries, next to the one network it has
+  untagged (or none), any of the others tagged. Each tagged network has
+  a sub-interface of the port, made the same way and named by the same
+  rule as a tagged internet port's (`v<id>-<port>`), and that
+  sub-interface is a member of the network's bridge; the port itself is
+  a member of its untagged network's bridge, or of none. The kernel
+  hands a tagged frame to the sub-interface for its tag before the
+  bridge the port is in gets to see it, so one port can be both.
+  Nothing else knows about tags: addresses, router advertisements, the
+  firewall, routes and rules by network, and which network a device is
+  listed on all go by the bridge. The control loop names the
+  sub-interfaces it wants on every pass (`tagged` in `reconcile`):
+  one that has gone with its port (an adapter unplugged) is made again
+  when the port is back, and one nobody names any more (another ID,
+  the network taken off the port, the port given another job) is
+  removed by the same sweep that removes a tagged internet port's.
+- **Finding devices across networks.** Multicast DNS never leaves the
+  network it is sent on, so the router repeats it (`internal/mdns`, a
+  reflector: no cache, no answers of its own). A network with
+  `discovery` set is paired with every network that is not isolated
+  (`Config.DiscoveryPeers`); what is heard on one of a pair is sent out
+  on the other from the router's address there, with the hop limit of
+  255 that mDNS expects. One socket per address family is bound to port
+  5353 and joins the group on the bridges that take part, and the input
+  chain accepts the port there, for the two group addresses only.
+  IPv6 goes out from a bridge's link-local address; what counts as the
+  router's own is every address a bridge has, a delegated one included.
+  A question that asks for a unicast answer is repeated without that
+  bit: the answer would come to the router and end there, and as a
+  multicast answer it is relayed back like any other. Questions from
+  another port than 5353 (one-shot "legacy" lookups) are not relayed:
+  their answers go back to the asking port alone, which a relay that
+  remembers nothing cannot deliver. Three things keep it from looping
+  or flooding: the sockets do not hear what they send, and anything
+  from one of the router's own addresses is dropped; a message is
+  repeated once in half a second wherever it is heard again (a hash of
+  it is kept that long), which is what ends the exchange with a second
+  reflector on the same networks or across a cable that joins them; and
+  each network may have 50 messages a second repeated after a burst of
+  100, the rest staying where it was said. The relay only makes devices
+  visible. Whether a connection can follow is the forward chain's
+  business as before: into an isolated network yes, out of it no. That
+  covers what a phone opens itself (printing, HomeKit, most casting)
+  and not what a device has to open back to the phone (AirPlay's timing
+  and some speakers' control connections), for which the network must
+  not be isolated. Discovery by other means than mDNS (SSDP, as DLNA
+  and Sonos use) is not relayed.
 - **PPPoE.** One pppd per wired uplink that signs in, with the kernel's
   PPPoE (`plugin pppoe.so`), over the port or its VLAN. Its options,
   with the user name and password, are in a file under the run
@@ -335,7 +384,7 @@ The end-to-end tests run the real daemon in network namespaces. They
 need root and `ip`, `nft`, `dnsmasq`, `dhcpcd` and `wg`; for PPPoE also
 `pppd` and `pppoe-server`, and a kernel with VLANs, PPPoE and IPv6 for
 the tests of those (which skip themselves, saying why, where it has
-none):
+none; the relay for multicast DNS is tested over IPv4 on any kernel):
 
 ```bash
 cd daemon && sudo go test -tags e2e -count=1 -v ./e2e/
@@ -370,9 +419,18 @@ CI runs the end-to-end tests this way.
   the server restarting under it); and a prefix delegated by a DHCPv6
   server written out in the test (`dhcp6_test.go`), with a device going
   out from its own address, nothing coming in, a second network with a
-  /64 of its own, and the prefix being withdrawn. These three explain
-  themselves at length when they fail, for whoever has only the log of
-  a run elsewhere. There is no Bluetooth in the namespaces, so the phone
+  /64 of its own, and the prefix being withdrawn; devices finding each
+  other across networks (`trunk_test.go`: a question asked by multicast
+  DNS on one network heard on another from the router's address there,
+  the answer coming back, nothing repeated twice or handed back, the
+  connection it leads to, and none of it with the setting off); and
+  several networks on one cable: a namespace that does what a managed
+  switch does takes the cable, splits the tags, and a device behind
+  each kind of its ports gets its addresses from the right network and
+  is kept apart as configured, through a change of VLAN ID, the cable
+  being unplugged and plugged in again, and a port for tagged networks
+  only. These explain themselves at length when they fail, for whoever
+  has only the log of a run elsewhere. There is no Bluetooth in the namespaces, so the phone
   these tests connect as is written into the pairing list before the
   daemon starts.
 - `TestWifi` uses simulated radios (`mac80211_hwsim`): hostapd and

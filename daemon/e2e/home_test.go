@@ -40,6 +40,9 @@ type rig struct {
 	v6         bool
 	mac1, mac2 string
 	start      func(name, logTo string, argv ...string) *exec.Cmd
+	// joined are the hardware addresses of the devices a subtest has
+	// added to the two that are always there.
+	joined []string
 }
 
 func (r *rig) status(t *testing.T) status {
