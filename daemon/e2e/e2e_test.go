@@ -36,6 +36,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/config"
 	"github.com/ryanzhou/porter/daemon/internal/fw"
 	"github.com/ryanzhou/porter/daemon/internal/geoip"
+	"github.com/ryanzhou/porter/daemon/internal/proto"
 	"github.com/ryanzhou/porter/daemon/internal/vpn"
 )
 
@@ -185,6 +186,44 @@ type status struct {
 	LAN struct {
 		Clients int `json:"clients"`
 	} `json:"lan"`
+	Control struct {
+		Port  int      `json:"port"`
+		Addrs []string `json:"addrs"`
+	} `json:"control"`
+}
+
+// dialControl opens a control session over TCP from inside a namespace,
+// as the app does from a phone on one of the router's networks. A session
+// that the router means to refuse can still come back from here: the
+// handshake is what shows the router whose it is.
+func dialControl(ns, addr string, id proto.Identity) (*client.Client, error) {
+	var conn net.Conn
+	var err error
+	inNS(ns, func() {
+		conn, err = net.DialTimeout("tcp", net.JoinHostPort(addr, fmt.Sprint(proto.ControlPort)), 2*time.Second)
+	})
+	if err != nil {
+		return nil, err
+	}
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	cl, err := client.New(proto.NewStreamConn(conn), id)
+	if err != nil {
+		return nil, err
+	}
+	conn.SetDeadline(time.Time{})
+	return cl, nil
+}
+
+// answered reports whether a call on a control session gets an answer.
+func answered(cl *client.Client, method string) bool {
+	done := make(chan error, 1)
+	go func() { done <- cl.Call(method, map[string]string{"name": "e2e"}, nil) }()
+	select {
+	case err := <-done:
+		return err == nil
+	case <-time.After(5 * time.Second):
+		return false
+	}
 }
 
 type device struct {
@@ -397,6 +436,20 @@ func TestRouter(t *testing.T) {
 	os.Setenv("PORTER_SPEEDTEST_DURATION", "1500ms")
 	os.Setenv("PORTER_GEOIP_URL", "http://"+siteA+"/geoip/dbip-country-lite-%s.csv.gz")
 	os.Setenv("PORTER_GEOIP_MIN", "1")
+	// One phone is paired already, as if it had been over Bluetooth:
+	// there is no Bluetooth here to pair one over, and control over the
+	// network is for paired phones only.
+	phone, err := proto.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairings, err := proto.LoadPairings(filepath.Join(dir, "data", "pairings.json"))
+	if err == nil {
+		err = pairings.Add(phone.Public, "Test phone")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 	args := []string{"netns", "exec", nsRtr, bin, "-data", filepath.Join(dir, "data"), "-run", run, "-no-ble", "-debug", "-geoip", geoFile}
 	if !kernelWG && wgUser != "" {
 		args = append(args, "-wg-userspace", wgUser)
@@ -1103,6 +1156,144 @@ func TestRouter(t *testing.T) {
 		}
 	})
 
+	// The app on a phone that is on the router's network: the same
+	// sessions as over Bluetooth, for paired phones, from the router's own
+	// networks only, and not at all once that is switched off.
+	t.Run("ControlOverNetwork", func(t *testing.T) {
+		ctl := getStatus().Control
+		if ctl.Port != proto.ControlPort || len(ctl.Addrs) == 0 || ctl.Addrs[0] != router {
+			t.Fatalf("status says the app connects to %+v", ctl)
+		}
+		if v6 && len(ctl.Addrs) != 2 {
+			t.Errorf("with IPv6 on, the router names %v", ctl.Addrs)
+		}
+		// At every address the router names, a paired phone has a session
+		// like any other.
+		var over *client.Client
+		for _, addr := range ctl.Addrs {
+			cl, err := dialControl(nsC1, addr, phone)
+			if err != nil {
+				t.Fatalf("paired phone connecting to %s: %v", addr, err)
+			}
+			defer cl.Close()
+			var hello struct {
+				Paired  bool `json:"paired"`
+				Control struct {
+					Port  int      `json:"port"`
+					Addrs []string `json:"addrs"`
+				} `json:"control"`
+			}
+			if err := cl.Call("hello", nil, &hello); err != nil || !hello.Paired || hello.Control.Port != ctl.Port || len(hello.Control.Addrs) != len(ctl.Addrs) {
+				t.Errorf("hello over %s: %+v %v", addr, hello, err)
+			}
+			var st status
+			if err := cl.Call("status.get", nil, &st); err != nil || st.Internet != "online" {
+				t.Errorf("status over %s: %+v %v", addr, st, err)
+			}
+			if err := cl.Call("ping", nil, nil); err != nil {
+				t.Errorf("ping over %s: %v", addr, err)
+			}
+			over = cl
+		}
+		var phones []struct {
+			Name     string `json:"name"`
+			Self     bool   `json:"self"`
+			LastSeen int64  `json:"last_seen"`
+		}
+		if err := over.Call("pairing.list", nil, &phones); err != nil || len(phones) != 1 || !phones[0].Self || phones[0].LastSeen == 0 {
+			t.Errorf("paired phones as seen over the network: %+v %v", phones, err)
+		}
+
+		// A write sent twice under one name is made once: the app does
+		// that when the answer to the first was lost with its link.
+		var cfg config.Config
+		if err := over.Call("config.get", nil, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg.System.Name = "Twice"
+		var first, again struct {
+			Rev uint64 `json:"rev"`
+		}
+		write := map[string]any{"config": &cfg, "id": "e2e-write-1"}
+		if err := over.Call("config.set", write, &first); err != nil || first.Rev != cfg.Rev+1 {
+			t.Fatalf("config.set over the network: %+v %v", first, err)
+		}
+		// The second time over another link, as it would be.
+		if err := c.Call("config.set", write, &again); err != nil || again.Rev != first.Rev {
+			t.Errorf("the same write again: %+v %v", again, err)
+		}
+		if rev := getRev(t, c); rev != first.Rev {
+			t.Errorf("after the same write twice the router is at revision %d, not %d", rev, first.Rev)
+		}
+		// Under no name, or another, it is the stale write it looks like.
+		if err := c.Call("config.set", map[string]any{"config": &cfg}, nil); err == nil || !strings.Contains(err.Error(), proto.ErrConflict) {
+			t.Errorf("a stale write without a name: %v", err)
+		}
+		editConfig(func(cfg *config.Config) { cfg.System.Name = "Porter" })
+
+		// A phone that is not paired gets through the handshake, which is
+		// what shows who it is, and no further: nothing it calls is
+		// answered, asking to be paired included.
+		stranger, _ := proto.NewIdentity()
+		for _, method := range []string{"hello", "pair", "status.get"} {
+			cl, err := dialControl(nsC1, router, stranger)
+			if err != nil {
+				continue // refused even earlier
+			}
+			if answered(cl, method) {
+				t.Errorf("a phone that is not paired had %s answered over the network", method)
+			}
+			cl.Close()
+		}
+		if err := c.Call("pairing.list", nil, &phones); err != nil || len(phones) != 1 {
+			t.Errorf("paired phones after a stranger asked: %+v %v", phones, err)
+		}
+
+		// Not from an internet source, whoever asks.
+		if cl, err := dialControl(nsISP, wanIP, phone); err == nil {
+			cl.Close()
+			t.Error("the app's port is open to the internet source")
+		}
+
+		// Set to Bluetooth only: sessions that came over the network end,
+		// nothing listens any more, and the status says so.
+		editConfig(func(cfg *config.Config) { cfg.System.BluetoothOnly = true })
+		listening := func() bool {
+			var conn net.Conn
+			var err error
+			// From the router itself, where no firewall rule is in the way.
+			inNS(nsRtr, func() {
+				conn, err = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", proto.ControlPort), time.Second)
+			})
+			if err == nil {
+				conn.Close()
+			}
+			return err == nil
+		}
+		eventually(t, "nothing listening once set to Bluetooth only", 10*time.Second, func() bool {
+			return !listening() && getStatus().Control.Port == 0
+		})
+		if len(getStatus().Control.Addrs) != 0 {
+			t.Errorf("set to Bluetooth only, the router still names %v", getStatus().Control.Addrs)
+		}
+		if answered(over, "ping") {
+			t.Error("a session over the network outlived the setting")
+		}
+		if cl, err := dialControl(nsC1, router, phone); err == nil {
+			cl.Close()
+			t.Error("a new session over the network after it was switched off")
+		}
+		editConfig(func(cfg *config.Config) { cfg.System.BluetoothOnly = false })
+		eventually(t, "control over the network back", 10*time.Second, func() bool {
+			cl, err := dialControl(nsC1, router, phone)
+			if err != nil {
+				return false
+			}
+			defer cl.Close()
+			return answered(cl, "ping") && getStatus().Control.Port == proto.ControlPort
+		})
+	})
+
 	// A second network: its own addresses, kept apart from the main one,
 	// with a route and rules of its own.
 	t.Run("Networks", func(t *testing.T) {
@@ -1176,10 +1367,34 @@ func TestRouter(t *testing.T) {
 		if got, err := httpGet(nsC2, "http://"+ip1+":8088/"); err == nil {
 			t.Errorf("an isolated network reached into the main one: %q", got)
 		}
+		// Nor is the app let in from there, paired or not, at either of
+		// the router's addresses; from the main network it still is.
+		for _, addr := range []string{guestRouter, router} {
+			if cl, err := dialControl(nsC2, addr, phone); err == nil {
+				cl.Close()
+				t.Errorf("the app's port at %s is open to an isolated network", addr)
+			}
+		}
+		if addrs := getStatus().Control.Addrs; len(addrs) == 0 || addrs[0] != router || strings.Contains(strings.Join(addrs, " "), guestRouter) {
+			t.Errorf("with the guest network isolated the app is told to connect to %v", addrs)
+		}
+		if cl, err := dialControl(nsC1, router, phone); err != nil || !answered(cl, "ping") {
+			t.Errorf("the app from the main network while another is isolated: %v", err)
+		} else {
+			cl.Close()
+		}
 		editConfig(func(cfg *config.Config) { cfg.Network("guest").Isolated = false })
 		eventually(t, "guest network, no longer isolated, reaching the main one", 15*time.Second, func() bool {
 			got, err := httpGet(nsC2, "http://"+ip1+":8088/")
 			return err == nil && got == "hello"
+		})
+		eventually(t, "the app let in from the guest network once it is no longer isolated", 15*time.Second, func() bool {
+			cl, err := dialControl(nsC2, guestRouter, phone)
+			if err != nil {
+				return false
+			}
+			defer cl.Close()
+			return answered(cl, "ping") && strings.Contains(strings.Join(getStatus().Control.Addrs, " "), guestRouter)
 		})
 
 		// A route for the whole network, which a device's own overrides.
@@ -1335,6 +1550,18 @@ func TestRouter(t *testing.T) {
 		b, _ := json.Marshal(kinds)
 		t.Logf("events: %s", b)
 	})
+}
+
+// getRev reads the revision of the router's configuration.
+func getRev(t *testing.T, c *client.Client) uint64 {
+	t.Helper()
+	var cfg struct {
+		Rev uint64 `json:"rev"`
+	}
+	if err := c.Call("config.get", nil, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg.Rev
 }
 
 // daemonBinary returns the porterd to test: the one PORTER_E2E_BIN names

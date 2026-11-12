@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -31,6 +32,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/geoip"
 	"github.com/ryanzhou/porter/daemon/internal/lan"
 	"github.com/ryanzhou/porter/daemon/internal/mpquic"
+	"github.com/ryanzhou/porter/daemon/internal/netctl"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
 	"github.com/ryanzhou/porter/daemon/internal/speedtest"
@@ -164,6 +166,23 @@ type Core struct {
 
 	sessMu   sync.Mutex
 	sessions map[*apiSession]struct{}
+
+	// ctl is the listener for the app on the router's own networks, nil
+	// while it is switched off or could not be started (ctlFailed), and
+	// ctlNets is where it accepts connections from.
+	ctl       *netctl.Server
+	ctlFailed bool
+	ctlNets   atomic.Pointer[controlNets]
+	// writes are the last configuration writes that named themselves,
+	// oldest first: see config.set.
+	writes []appliedWrite
+}
+
+// appliedWrite is a config.set that was carried out, and the revision it
+// produced.
+type appliedWrite struct {
+	id  string
+	rev uint64
 }
 
 func New(opt Options) (*Core, error) {
@@ -385,6 +404,9 @@ func (c *Core) shutdown() {
 	}
 	for _, sta := range c.stas {
 		sta.Stop()
+	}
+	if c.ctl != nil {
+		c.ctl.Close()
 	}
 	c.wan.Stop()
 	c.vpn.Stop()
@@ -1030,6 +1052,7 @@ func (c *Core) reconcile() {
 
 	c.applyDNS(&running, states, active, portalDevs, routerAddr, routes)
 	c.applySystem(cfg)
+	c.applyControl(cfg)
 
 	if changedCfg && !c.resetting {
 		cfg.Rev++

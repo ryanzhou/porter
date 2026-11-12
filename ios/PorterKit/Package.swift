@@ -21,7 +21,9 @@ let package = Package(
     dependencies: dependencies,
     targets: [
         .target(name: "PorterKit", dependencies: targetDependencies),
-        .testTarget(name: "PorterKitTests", dependencies: ["PorterKit"], resources: [.copy("Resources/vectors.json")]),
+        // The tests play the router's side of the handshake, which takes
+        // the same primitives.
+        .testTarget(name: "PorterKitTests", dependencies: ["PorterKit"] + targetDependencies, resources: [.copy("Resources/vectors.json")]),
     ],
     swiftLanguageVersions: [.v5]
 )

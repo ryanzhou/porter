@@ -12,12 +12,27 @@ public struct KnownRouter: Codable, Equatable, Identifiable {
     public var publicKey: Data
     /// CoreBluetooth's identifier for the router on this phone.
     public var peripheral: UUID
+    /// Where the router last said it can be reached over its own
+    /// networks, for trying that way before it has been asked again.
+    public var endpoints: ControlEndpoints
 
-    public init(id: String, name: String, publicKey: Data, peripheral: UUID) {
+    public init(id: String, name: String, publicKey: Data, peripheral: UUID, endpoints: ControlEndpoints = ControlEndpoints()) {
         self.id = id
         self.name = name
         self.publicKey = publicKey
         self.peripheral = peripheral
+        self.endpoints = endpoints
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        publicKey = try c.decode(Data.self, forKey: .publicKey)
+        peripheral = try c.decode(UUID.self, forKey: .peripheral)
+        // Records from before routers could be reached over the network
+        // have none.
+        endpoints = try c.decodeIfPresent(ControlEndpoints.self, forKey: .endpoints) ?? ControlEndpoints()
     }
 }
 

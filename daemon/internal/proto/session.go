@@ -1,7 +1,8 @@
 // Package proto implements the control protocol spoken between the router
 // and its apps: an authenticated, encrypted channel (Noise XX) carrying
 // JSON requests, responses and events. It is transport-agnostic; the BLE
-// GATT link and the local debug socket both provide a PacketConn.
+// GATT link, the TCP listener on the router's own networks and the local
+// debug socket each provide a PacketConn.
 //
 // The wire format is specified in docs/PROTOCOL.md.
 package proto
@@ -23,6 +24,11 @@ import (
 
 // Prologue binds the handshake to this protocol and version.
 const Prologue = "porter/1"
+
+// ControlPort is the TCP port the protocol is served on inside the
+// router's own networks. Nothing else on the router uses it: DNS has 53,
+// DHCP 67 and 547, SSH 22, and the tunnels only make outgoing connections.
+const ControlPort = 7678
 
 const (
 	// MaxPacket is the largest packet a PacketConn has to carry.

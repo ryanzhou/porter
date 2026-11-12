@@ -81,10 +81,15 @@ final class InteropTests: XCTestCase {
         let hello = try await router.hello()
         XCTAssertTrue(hello.paired) // the local socket is trusted
         try await router.setTime()
+        try await router.ping()
+        // The router says where it listens on its own networks.
+        XCTAssertEqual(hello.control?.port, 7678)
 
         // Every document the app reads must decode.
         let status = try await router.status()
         XCTAssertEqual(status.name, hello.name)
+        XCTAssertEqual(status.control, hello.control)
+        XCTAssertEqual(status.control?.addrs.first, "10.83.0.1")
         _ = try await router.radios()
         _ = try await router.devices()
         _ = try await router.activity()
@@ -149,10 +154,18 @@ final class InteropTests: XCTestCase {
         let refused = try await router.checkConfig(overlapping)
         XCTAssertNotNil(refused.error)
 
-        let rev = try await router.setConfig(config)
+        // The write names itself; sent again, as it is when its answer
+        // was lost, it is answered again and made once.
+        XCTAssertEqual(config.system.bluetoothOnly, false)
+        config.system.bluetoothOnly = true
+        let rev = try await router.setConfig(config, id: "interop-1")
         XCTAssertGreaterThan(rev, config.rev)
+        let again = try await router.setConfig(config, id: "interop-1")
+        XCTAssertEqual(again, rev)
 
         let stored = try await router.config()
+        XCTAssertEqual(stored.rev, rev)
+        XCTAssertEqual(stored.system.bluetoothOnly, true)
         XCTAssertEqual(stored.system.name, "Swift Test")
         XCTAssertEqual(stored.wifi.map(\.ssid), ["Porter Tést", "Porter Guests"])
         XCTAssertEqual(stored.networks.map(\.id), ["lan", "guest"])

@@ -39,9 +39,9 @@ public enum DemoRouter {
                 config = next
                 return Data("{\"rev\":\(next.rev)}".utf8)
             case "hello":
-                return Data(#"{"name":"Porter","id":"3fa9c210","version":"v1.0.0","paired":true,"claimed":true,"pairing":false,"ready":true}"#.utf8)
+                return Data(#"{"name":"Porter","id":"3fa9c210","version":"v1.0.0","paired":true,"claimed":true,"pairing":false,"ready":true,"control":\#(DemoRouter.control(config))}"#.utf8)
             case "status.get":
-                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name).utf8)
+                return Data(DemoRouter.status(now: now, rev: config.rev, name: config.system.name, control: DemoRouter.control(config)).utf8)
             case "devices.list":
                 return Data(DemoRouter.devices(now: now).utf8)
             case "config.check":
@@ -129,8 +129,8 @@ public enum DemoRouter {
     static let console = "98:b6:e9:52:1c:d0"
 
     static let configJSON = """
-    {"version":2,"rev":12,
-     "system":{"name":"Porter","country":"AU","ssh":{"enabled":false,"authorized_keys":[]}},
+    {"version":3,"rev":12,
+     "system":{"name":"Porter","country":"AU","ssh":{"enabled":false,"authorized_keys":[]},"bluetooth_only":false},
      "radios":[{"id":"builtin","role":"ap","band":"5","channel":0,"width":0},
                {"id":"usb:9c:ef:d5:12:34:56","role":"wan","band":"","channel":0,"width":0}],
      "ethernet":[{"name":"end0","role":"wan","network":"lan"}],
@@ -172,7 +172,15 @@ public enum DemoRouter {
      "peers":[{"public_key":"MDEyMzQ1Njc4OWFiY2RlZmdoaWprbG1ub3BxcnN0dXY=","endpoint":"home.example.net:51820","allowed_ips":["0.0.0.0/0","::/0"],"keepalive":25}]}
     """
 
-    static func status(now: Int64, rev: UInt64, name: String) -> String {
+    /// Where the sample router says the app reaches it over its networks:
+    /// at its addresses in the main one (the guest network is kept
+    /// apart), unless it is set to Bluetooth only.
+    static func control(_ config: RouterConfig) -> String {
+        if config.system.bluetoothOnly == true { return #"{"port":0,"addrs":[]}"# }
+        return #"{"port":7678,"addrs":["10.83.0.1","fd4c:91a7:20be:1::1"]}"#
+    }
+
+    static func status(now: Int64, rev: UInt64, name: String, control: String) -> String {
         let safeName = name.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "\"", with: "'")
         return """
         {"name":"\(safeName)","id":"3fa9c210","version":"v1.0.0","time":\(now),"uptime":93784,"temp":51.3,"ready":true,"rev":\(rev),"pairing":false,
@@ -188,6 +196,7 @@ public enum DemoRouter {
          "off_air":["guest"],
          "ports":[{"name":"end0","phone":false,"carrier":false},{"name":"enx3a1f0c2299d4","label":"iPhone","phone":true,"carrier":true}],
          "lan":{"address":"10.83.0.1/24","ula":"fd4c:91a7:20be:1::/64","clients":4,"networks":{"lan":4}},
+         "control":\(control),
          "vpns":[{"id":"home","name":"Home","if":"wg-home","state":"up","endpoint":"203.0.113.24:51820","handshake":\(now - 47),"rx":1843200512,"tx":211812352},
                  {"id":"us","name":"Streaming (US)","state":"off","rx":0,"tx":0}],
          "geoip":{"available":true,"date":"2026-11"},

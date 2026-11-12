@@ -46,6 +46,27 @@ private struct RouterSettingsSection: View {
             SettingsLink(symbol: "terminal.fill", title: "SSH", value: onOff(model.config?.system.ssh.enabled)) { SSHPage() }
             SettingsLink(symbol: "speedometer", title: "Speed test server") { SpeedTestServerPage() }
         }
+        Section {
+            Toggle("Connect over your network too", isOn: model.networkControl)
+                .disabled(onlyWayLeft)
+        } footer: {
+            Text(networkControlNote)
+        }
+    }
+
+    /// With Bluetooth unusable on this phone the network is the only way
+    /// to the router, and switching it off from here would lock the app
+    /// out.
+    private var onlyWayLeft: Bool {
+        model.central.unavailableReason != nil && model.config?.system.bluetoothOnly != true
+    }
+
+    private var networkControlNote: String {
+        let note: String = "With this on, the app also reaches the router whenever this phone is on one of your networks, which is faster than Bluetooth and works wherever your Wi-Fi does. Pairing a new phone always uses Bluetooth."
+        if onlyWayLeft {
+            return note + " To switch it off, turn Bluetooth on first: it would be the only way left to the router."
+        }
+        return note
     }
 }
 
@@ -769,10 +790,20 @@ private struct AboutSection: View {
         return "Installed"
     }
 
+    /// Which way the app reaches the router at this moment.
+    private var connection: String {
+        switch model.link {
+        case .network: return "Over your network"
+        case .bluetooth: return "Over Bluetooth"
+        case nil: return "Reconnecting"
+        }
+    }
+
     var body: some View {
         Section {
             LabeledContent("ID", value: model.status?.id ?? "")
             LabeledContent("Version", value: model.status?.version ?? "")
+            LabeledContent("Connection", value: connection)
             LabeledContent("Country database", value: countryDatabase)
         } footer: {
             Text(verbatim: "IP geolocation by DB-IP (https://db-ip.com)")

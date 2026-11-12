@@ -38,6 +38,9 @@ public struct SystemConfig: Codable, Equatable {
     public var name: String
     public var country: String
     public var ssh: SSHConfig
+    /// The router is controlled over Bluetooth only, and not also over
+    /// its own networks. Nil reads as false.
+    public var bluetoothOnly: Bool?
 }
 
 public struct SSHConfig: Codable, Equatable {
@@ -167,7 +170,7 @@ public struct NetworkConfig: Codable, Equatable, Identifiable {
 public extension RouterConfig {
     /// The format of the configuration document this version of the app
     /// reads and writes (`version` in the document).
-    static let format = 2
+    static let format = 3
 
     /// Ids of the Wi-Fi network and the network that always exist.
     static let mainWifi = "main"
@@ -452,9 +455,28 @@ public struct RouterStatus: Codable, Equatable {
     /// The wired interfaces that are plugged in, uplinks or not.
     public var ports: [PortStatus]
     public var lan: LANStatus
+    /// Where the app reaches the router over its own networks; nil from
+    /// a router too old to be reached that way.
+    public var control: ControlEndpoints?
     public var vpns: [VPNStatus]
     public var geoip: GeoIPStatus
     public var adblock: AdblockStatus
+}
+
+/// Where the router listens for the app on its own networks.
+public struct ControlEndpoints: Codable, Equatable, Sendable {
+    /// 0 while the router does not listen there.
+    public var port: Int
+    /// The router's addresses in its networks that are not kept apart.
+    public var addrs: [String]
+
+    public init(port: Int = 0, addrs: [String] = []) {
+        self.port = port
+        self.addrs = addrs
+    }
+
+    /// Whether there is anywhere to connect to.
+    public var isUsable: Bool { port > 0 && port < 65536 && !addrs.isEmpty }
 }
 
 public struct AdblockStatus: Codable, Equatable {
@@ -603,6 +625,8 @@ public struct HelloInfo: Codable, Equatable {
     public var claimed: Bool
     public var pairing: Bool
     public var ready: Bool
+    /// As in the status; only told to a paired phone.
+    public var control: ControlEndpoints?
 }
 
 /// The unauthenticated Info characteristic.
@@ -842,8 +866,18 @@ public struct FirmwareProgress: Codable, Equatable {
 
 // MARK: - Typed calls
 
-public extension RouterConnection {
+// What the calls below send and read that has no use anywhere else.
+private struct ConfigHead: Decodable { let version: Int }
+private struct ConfigParams: Encodable {
+    let config: RouterConfig
+    var id: String?
+}
+private struct RevisionResult: Decodable { let rev: UInt64 }
+
+public extension RouterAPI {
     func hello() async throws -> HelloInfo { try await call("hello") }
+    /// Asks for nothing but an answer: a sign that the link works.
+    func ping() async throws { try await run("ping") }
     func pair(name: String) async throws { try await run("pair", ["name": name]) }
     func status() async throws -> RouterStatus { try await call("status.get") }
     func config() async throws -> RouterConfig { try await call("config.get") }
@@ -852,23 +886,61 @@ public extension RouterConnection {
     /// decoding the rest of it: a router of another generation than the
     /// app has a document the app cannot read, and this is how to tell.
     func configFormat() async throws -> Int {
-        struct Head: Decodable { let version: Int }
-        let head: Head = try await call("config.get")
+        let head: ConfigHead = try await call("config.get")
         return head.version
     }
 
-    /// Writes the configuration; returns the new revision.
-    func setConfig(_ config: RouterConfig) async throws -> UInt64 {
-        struct Params: Encodable { let config: RouterConfig }
-        struct Result: Decodable { let rev: UInt64 }
-        let r: Result = try await call("config.set", Params(config: config))
+    /// Writes the configuration; returns the new revision. A write that
+    /// carries an `id` can be sent again under the same one when its
+    /// answer was lost: the router makes it once and answers both times.
+    func setConfig(_ config: RouterConfig, id: String? = nil) async throws -> UInt64 {
+        let r: RevisionResult = try await call("config.set", ConfigParams(config: config, id: id))
         return r.rev
+    }
+
+    /// Applies an edit to the router's configuration and returns what the
+    /// router holds afterwards. `known` is the copy already here, which
+    /// saves fetching it; if the router has moved on from it, the edit is
+    /// applied once more to a fresh copy.
+    ///
+    /// A write whose answer is lost with the link is sent again, as the
+    /// same write, over whatever link there is next. The router knows it
+    /// by its id: it makes the change if it had not, and only says so
+    /// again if it had. Either way the edit is made exactly once.
+    func writeConfig(known: RouterConfig?, _ edit: (inout RouterConfig) -> Void) async throws -> RouterConfig {
+        var base: RouterConfig? = known
+        for round in 0..<2 {
+            let before: RouterConfig
+            if let base {
+                before = base
+            } else {
+                before = try await config()
+            }
+            var next: RouterConfig = before
+            edit(&next)
+            if round > 0, next == before {
+                // The router already holds what the edit asks for: a write
+                // of which nothing was heard again has been made after all.
+                return before
+            }
+            let id: String = UUID().uuidString
+            do {
+                do {
+                    _ = try await setConfig(next, id: id)
+                } catch where isLinkFailure(error) {
+                    _ = try await setConfig(next, id: id)
+                }
+                break
+            } catch let error as RouterError where error.code == RouterError.conflict && round == 0 {
+                base = nil
+            }
+        }
+        return try await config()
     }
 
     /// Asks what applying a configuration would do, without applying it.
     func checkConfig(_ config: RouterConfig) async throws -> ConfigCheck {
-        struct Params: Encodable { let config: RouterConfig }
-        return try await call("config.check", Params(config: config))
+        return try await call("config.check", ConfigParams(config: config))
     }
 
     func radios() async throws -> [RadioInfo] { try await call("radios.list") }

@@ -360,6 +360,50 @@ func TestFormat1Carries(t *testing.T) {
 	}
 }
 
+// Format 3 added a field and rewrote nothing: what a router stored as
+// format 2 loads as it was, with control over its networks on.
+func TestFormat2Carries(t *testing.T) {
+	c := ready()
+	c.System.Name, c.Rev = "Kept", 41
+	c.Devices = []Device{{MAC: "02:00:00:00:00:01", Name: "TV", IP: "10.83.0.20"}}
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As format 2 wrote it: its own number, and no such field.
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["version"] = 2
+	delete(doc["system"].(map[string]any), "bluetooth_only")
+	old, _ := json.Marshal(doc)
+	dir := t.TempDir()
+	if err := WriteFileAtomic(filepath.Join(dir, "config.json"), old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := NewStore(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 3 || got.System.BluetoothOnly {
+		t.Errorf("format %d, bluetooth only %v", got.Version, got.System.BluetoothOnly)
+	}
+	want := c.Clone()
+	want.Version = 3
+	if a, b := mustJSON(got), mustJSON(want); a != b {
+		t.Errorf("a format 2 document changed on the way in:\n%s\nwant:\n%s", a, b)
+	}
+}
+
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 func ready() *Config {
 	c := Default()
 	c.System.Country, c.Wifi[0].SSID, c.Wifi[0].Passphrase = "AU", "net", "password1"

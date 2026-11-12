@@ -1,7 +1,9 @@
 # Porter control protocol
 
-The app controls the router over Bluetooth Low Energy only. This document
-is the contract between `daemon/internal/proto` + `daemon/internal/ble`
+The app controls the router over Bluetooth Low Energy and, once it is
+paired, over TCP inside the router's own networks. Both carry the same
+sessions and the same calls. This document is the contract between
+`daemon/internal/proto` + `daemon/internal/ble` + `daemon/internal/netctl`
 (Go) and `ios/PorterKit` (Swift). The shared test vectors in
 `ios/PorterKit/Tests/PorterKitTests/Resources/vectors.json` are generated
 by the Go implementation and checked by both.
@@ -10,8 +12,8 @@ Layers, bottom up:
 
 | Layer    | Unit     | Purpose                                             |
 |----------|----------|-----------------------------------------------------|
-| GATT     | fragment | one ATT write or notification                       |
-| Link     | packet   | fragments reassembled; ≤ 65535 bytes                |
+| GATT     | fragment | one ATT write or notification (Bluetooth)           |
+| Link     | packet   | fragments reassembled, or a length-prefixed packet on TCP; ≤ 65535 bytes |
 | Session  | message  | Noise XX encrypted; any size up to 1 MiB            |
 | RPC      | JSON     | requests, responses, events                         |
 
@@ -61,6 +63,38 @@ it.)
 The app should use write-without-response and honour
 `canSendWriteWithoutResponse`.
 
+## Link: TCP
+
+The router listens on TCP port **7678** for as long as
+`system.bluetooth_only` is false. A packet on the stream is its length as
+two bytes, big endian, followed by that many bytes; there is nothing
+else. The local control socket (`porterctl`) is framed the same way.
+
+Who may connect:
+
+- The firewall accepts the port from the router's own networks that are
+  not isolated, and from nowhere else: not from an uplink, a tunnel or an
+  isolated network. The listener checks the same again for each
+  connection (to one of the router's addresses in such a network, from an
+  address inside one), because it exists before the first ruleset does.
+- Only paired phones get a session. The handshake is what shows the
+  router whose connection it is, so it runs to the end; a key that is not
+  in the pairing list is then disconnected without a single call
+  answered, `hello` and `pair` included. Pairing is done over Bluetooth.
+- A connection has 10 seconds to finish the handshake. At most 4
+  connections may be in the handshake at once and at most 8 sessions
+  open; a phone that opens a third session loses its oldest, which it
+  has usually lost already without the router having noticed. TCP
+  keepalive is on (15 s idle, then 3 probes 5 s apart), and unacknowledged
+  data ends a connection after 30 s.
+
+The router tells the app where to connect in `hello` and in the status
+(`control`). The addresses follow the networks: when one is renumbered
+the status changes, and with it what the app remembers.
+
+How the app chooses between the two links, and moves from one to the
+other, is described in [DEVELOPMENT.md](DEVELOPMENT.md#two-links-one-connection).
+
 ## Session: Noise
 
 `Noise_XX_25519_ChaChaPoly_SHA256`, prologue = ASCII `porter/1`, empty
@@ -78,8 +112,9 @@ After the handshake each side holds the other's static public key.
 - The **app** must compare the router's key with the one stored when it
   paired, and refuse the session if it differs. On first pairing the key
   is stored (trust on first use; see *Pairing*).
-- The **router** looks the app's key up in its pairing list. Unknown apps
-  get a session in which only `hello` and `pair` work.
+- The **router** looks the app's key up in its pairing list. Over
+  Bluetooth, unknown apps get a session in which only `hello` and `pair`
+  work; over TCP they get none (see *Link: TCP*).
 
 Transport packets are Noise transport messages (ChaCha20-Poly1305, 64-bit
 counter nonce per direction, no rekeying). The plaintext of each is:
@@ -111,11 +146,14 @@ for people and may be shown as is.
 A router with no paired phone accepts the first `pair` it receives.
 After that, pairing is open only for two minutes after a short press of
 the Pi's power button, or after `pairing.open` from an already paired
-phone; it closes again as soon as one phone has paired.
+phone; it closes again as soon as one phone has paired. `pair` is only
+ever accepted over Bluetooth: being within its range, and the button,
+are what pairing rests on.
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `hello` | – | `{name,id,version,paired,claimed,pairing,ready}` |
+| `hello` | – | `{name,id,version,paired,claimed,pairing,ready,control?}` – `control` as in the status, for a paired phone |
+| `ping` | – | `{}` – answered without involving the control loop; the app's sign that a link works |
 | `pair` | `{name}` | `{}` or `pairing_closed` |
 | `pairing.open` | – | `{}` |
 | `pairing.list` | – | `[{key,name,added,last_seen,self}]` |
@@ -127,7 +165,7 @@ phone; it closes again as soon as one phone has paired.
 |--------|--------|--------|
 | `status.get` | – | Status |
 | `config.get` | – | Config |
-| `config.set` | `{config}` | `{rev}`; `conflict` if `config.rev` is stale |
+| `config.set` | `{config, id?}` | `{rev}`; `conflict` if `config.rev` is stale |
 | `config.check` | `{config}` | `{error?, notes[], effects[]}`; changes nothing |
 | `events.list` | – | `[{t,kind,msg,mac?}]` |
 
@@ -138,6 +176,14 @@ stale writes with `conflict`, and applies the change atomically: a
 change to several things at once never passes through a state in which
 only some of them have been made.
 
+A write may name itself with an `id` (any string of up to 64 bytes; the
+app uses a random one per write). The router remembers the last 32 it
+carried out, until it restarts, and answers a `config.set` with one of
+those ids with the revision that write produced, without looking at the
+document again. An app whose link went before the answer arrived sends
+the same request again over the next link: the change is made if it had
+not been, and not made twice if it had.
+
 Beyond every field being well formed, a change has to describe a router
 that can work: at most one radio joins upstream networks, and something
 is left to carry the router's own network. `config.check` answers what
@@ -146,9 +192,13 @@ it would be refused, `notes` what the hardware cannot do of it (a Wi-Fi
 network that fits on no radio), `effects` what will be noticed (Wi-Fi
 restarting, devices having to rejoin or getting new addresses).
 
-The document's format is `version` 2. Its parts, briefly:
+The document's format is `version` 3. (Format 3 added
+`system.bluetooth_only` to format 2 and changed nothing else; a router
+that stored format 2 carries it over as it is.) Its parts, briefly:
 
 ```
+system      {name country ssh{enabled authorized_keys[]} bluetooth_only}
+            bluetooth_only: the router does not listen on TCP
 wifi[]      {id ssid passphrase security hidden isolate network enabled}
             the Wi-Fi networks broadcast; the first ("main") always exists
 networks[]  {id name address ula_prefix isolated route}
@@ -183,6 +233,10 @@ stas[]     {radio iface state ssid bssid freq signal failed fail_reason}
 off_air[]  ids of Wi-Fi networks that are switched on but fit on no radio
 ports[]    {name label phone carrier}   wired interfaces that are plugged in
 lan        {address ula clients networks{id: devices online}}
+control    {port addrs[]}   where the app connects over TCP: the router's
+           addresses in its networks that are not isolated (IPv4, and the
+           ULA where IPv6 is on). port 0 and no addresses while it does
+           not listen.
 vpns[]     {id name type if state error endpoint handshake rx tx paths? of?}
            type "wireguard" | "mpquic"; paths of an MPQUIC tunnel working, of how many
 geoip      {available date}   country database for country rules and flows

@@ -1,6 +1,7 @@
 import Foundation
 
-/// Carries whole packets, in order. Implemented by the BLE link.
+/// Carries whole packets, in order. Implemented by the BLE link and the
+/// TCP link.
 public protocol PacketTransport: AnyObject {
     func send(_ packet: Data) async throws
     /// The next packet from the router; throws when the link is gone.

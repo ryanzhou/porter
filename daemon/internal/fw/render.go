@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+
+	"github.com/ryanzhou/porter/daemon/internal/proto"
 )
 
 // Render produces a complete nftables script that atomically replaces the
@@ -23,7 +25,7 @@ func Fingerprint(p *Plan) string { return render(p, false) }
 // it would stall every one of them.
 func ClassKey(p *Plan) string {
 	q := *p
-	q.WANIfs, q.SSH, q.Intercept, q.Learned = nil, false, false, nil
+	q.WANIfs, q.SSH, q.Control, q.Intercept, q.Learned = nil, false, false, false, nil
 	return render(&q, false)
 }
 
@@ -228,6 +230,12 @@ func render(p *Plan, full bool) string {
 	if p.SSH && len(open) > 0 {
 		// Not from an isolated network: that is where guests are.
 		w("\t\tiifname { %s } tcp dport 22 accept", strings.Join(quoteAll(sorted(open)), ", "))
+	}
+	if p.Control && len(open) > 0 {
+		// The app, from a phone on one of the router's networks. Like
+		// SSH, not from an isolated one, and never from an uplink: no
+		// rule lets anything in from there but replies and DHCP.
+		w("\t\tiifname { %s } tcp dport %d accept", strings.Join(quoteAll(sorted(open)), ", "), proto.ControlPort)
 	}
 	w("\t\tiifname @wan_ifs udp dport { 68, 546 } accept")
 	w("\t}")

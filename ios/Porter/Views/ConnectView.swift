@@ -28,8 +28,13 @@ struct ConnectView: View {
     private var searching: some View {
         if let reason = model.central.unavailableReason {
             Card {
-                Label(reason, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(reason, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(withoutBluetooth)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         if model.central.discovered.isEmpty {
@@ -60,6 +65,15 @@ struct ConnectView: View {
     }
 
     private var forgettable: [KnownRouter] { model.knownRouters }
+
+    /// What the app still does, and cannot do, while Bluetooth is not
+    /// usable.
+    private var withoutBluetooth: String {
+        if model.knownRouters.isEmpty {
+            return "Pairing with a router needs Bluetooth."
+        }
+        return "Porter is still looking for your router on the network this phone is on. Pairing with another router needs Bluetooth."
+    }
 }
 
 /// Shown while nothing has been found yet.
@@ -121,6 +135,9 @@ private struct PairedRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button("Connect") { model.connect(to: router) }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             Button("Forget", role: .destructive) { model.forget(router) }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

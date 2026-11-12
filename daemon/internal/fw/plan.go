@@ -56,9 +56,11 @@ func VPNIfName(id string) string { return "wg-" + id }
 type Plan struct {
 	WANIfs []string
 	// LANs are the router's own networks, the main one first.
-	LANs       []PlanLAN
-	VPNs       []PlanVPN
-	SSH        bool
+	LANs []PlanLAN
+	VPNs []PlanVPN
+	SSH  bool
+	// Control: the app may connect over the router's own networks.
+	Control    bool
 	Intercept  bool
 	Paused     []string // MACs
 	PortalDevs []string // MACs allowed to bypass policy while captive
@@ -159,6 +161,7 @@ func BuildPlan(c *config.Config, rt Runtime) *Plan {
 	p := &Plan{
 		WANIfs:      append([]string(nil), rt.WANIfs...),
 		SSH:         c.System.SSH.Enabled,
+		Control:     !c.System.BluetoothOnly,
 		Intercept:   c.DNS.Intercept,
 		PortalDevs:  append([]string(nil), rt.PortalDevs...),
 		DeviceMarks: map[string]uint32{},

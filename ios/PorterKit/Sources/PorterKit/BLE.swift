@@ -51,6 +51,8 @@ public final class BLECentral: NSObject, ObservableObject {
     private var peripherals: [UUID: CBPeripheral] = [:]
     private var links: [UUID: BLELink] = [:]
     private var wantsScan = false
+    /// Attempts waiting to hear whether Bluetooth can be used.
+    private var stateWaiters: [CheckedContinuation<Void, Never>] = []
 
     public override init() {
         super.init()
@@ -86,14 +88,40 @@ public final class BLECentral: NSObject, ObservableObject {
         if state == .poweredOn { central?.stopScan() }
     }
 
+    /// Waits, briefly, for the system to say whether Bluetooth can be
+    /// used. A central that has only just been created does not know.
+    private func settle() async {
+        guard state == .unknown || state == .resetting else { return }
+        let limit = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+            } catch {
+                return // cancelled: the system has said
+            }
+            self?.releaseStateWaiters()
+        }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in stateWaiters.append(c) }
+        limit.cancel()
+    }
+
+    private func releaseStateWaiters() {
+        let waiting: [CheckedContinuation<Void, Never>] = stateWaiters
+        stateWaiters.removeAll()
+        for waiter in waiting { waiter.resume() }
+    }
+
     /// Connects to a router by peripheral identifier and prepares its
     /// GATT link. Works for routers seen in this scan and for ones
-    /// remembered from earlier.
+    /// remembered from earlier, which need not have been seen at all.
+    /// Cancelling the task gives the attempt up. If it never gets as far
+    /// as a Bluetooth connection, what is thrown is `RouterNotFound`.
     public func connect(to id: UUID, timeout: TimeInterval = 15) async throws -> BLELink {
         let central = manager()
+        await settle()
         guard state == .poweredOn else {
-            throw BLEError.bluetoothUnavailable(unavailableReason ?? "Bluetooth is not ready yet.")
+            throw RouterNotFound(BLEError.bluetoothUnavailable(unavailableReason ?? "Bluetooth is not ready yet."))
         }
+        try Task.checkCancellation()
         let peripheral: CBPeripheral
         if let known = peripherals[id] {
             peripheral = known
@@ -101,7 +129,7 @@ public final class BLECentral: NSObject, ObservableObject {
             peripherals[id] = restored
             peripheral = restored
         } else {
-            throw BLEError.connectionFailed("the router is not in range")
+            throw RouterNotFound(BLEError.connectionFailed("the router is not in range"))
         }
         // An earlier link to this router has to be torn down now, not
         // later: its teardown cancels the peripheral's connection, and
@@ -121,8 +149,39 @@ public final class BLECentral: NSObject, ObservableObject {
             if let link { link.fail(BLEError.stalled(link.step)) }
         }
         defer { watchdog.cancel() }
-        try await link.waitUntilReady()
+        do {
+            try await withTaskCancellationHandler {
+                try await link.waitUntilReady()
+            } onCancel: {
+                Task { @MainActor in link.fail(BLEError.disconnected) }
+            }
+        } catch {
+            // Out of range or switched off, as opposed to there and not
+            // answering as it should.
+            if !link.hasConnected { throw RouterNotFound(error) }
+            throw error
+        }
         return link
+    }
+}
+
+/// Opens the two kinds of link to one router for a supervisor: Bluetooth
+/// through the central, the network over TCP.
+public struct RouterDialer: LinkDialer {
+    private let central: BLECentral
+    private let peripheral: UUID
+
+    public init(central: BLECentral, peripheral: UUID) {
+        self.central = central
+        self.peripheral = peripheral
+    }
+
+    public func openBluetooth() async throws -> PacketTransport {
+        try await central.connect(to: peripheral)
+    }
+
+    public func openNetwork(host: String, port: Int, timeout: TimeInterval) async throws -> PacketTransport {
+        try await TCPTransport.connect(host: host, port: port, timeout: timeout)
     }
 }
 
@@ -130,6 +189,7 @@ extension BLECentral: CBCentralManagerDelegate {
     public nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
         MainActor.assumeIsolated {
             state = central.state
+            if central.state != .unknown && central.state != .resetting { releaseStateWaiters() }
             if central.state == .poweredOn {
                 if wantsScan { startScanning() }
             } else {

@@ -89,6 +89,9 @@ func TestRender(t *testing.T) {
 		`iifname @lan_ifs oifname @lan_ifs jump lan_lan`,
 		`iifname { "br-guest" } jump refuse`,
 		`iifname { "br-iot", "br-lan" } tcp dport 22 accept`,
+		// The app over the network: the same networks as SSH, the
+		// isolated one left out.
+		`iifname { "br-iot", "br-lan" } tcp dport 7678 accept`,
 		// What the router sends itself for a kill-switched tunnel leaves
 		// by that tunnel or not at all.
 		`meta mark & 0xff == 0x10 oifname != "wg-home" jump refuse`,
@@ -117,7 +120,7 @@ func TestRender(t *testing.T) {
 	// Who may reach the router, and the list of uplinks, are not part of
 	// what decides a connection's way.
 	alt := *p
-	alt.SSH, alt.Intercept, alt.WANIfs = !p.SSH, !p.Intercept, []string{"eth9"}
+	alt.SSH, alt.Control, alt.Intercept, alt.WANIfs = !p.SSH, !p.Control, !p.Intercept, []string{"eth9"}
 	if ClassKey(&alt) != ClassKey(p) || Fingerprint(&alt) == Fingerprint(p) {
 		t.Error("ClassKey follows changes that reroute nothing")
 	}
@@ -155,6 +158,20 @@ func TestRender(t *testing.T) {
 	}
 	if !strings.Contains(one, `set lan_ifs { type ifname; elements = { "br-lan" } }`) {
 		t.Errorf("one network:\n%s", one)
+	}
+
+	// Bluetooth only: the port is closed again. Every network kept apart:
+	// there is nowhere to open it from.
+	if !strings.Contains(one, `iifname { "br-lan" } tcp dport 7678 accept`) {
+		t.Error("one network: the app's port is not open")
+	}
+	single.System.BluetoothOnly = true
+	if closed := Render(BuildPlan(single, Runtime{WANIfs: []string{"eth0"}})); strings.Contains(closed, "7678") {
+		t.Error("set to Bluetooth only, the ruleset still mentions the app's port")
+	}
+	single.System.BluetoothOnly, single.Networks[0].Isolated = false, true
+	if apart := Render(BuildPlan(single, Runtime{WANIfs: []string{"eth0"}})); strings.Contains(apart, "7678") {
+		t.Error("the app's port is open to a network that is kept apart")
 	}
 
 	// If nft is usable (root, netfilter available), let the kernel judge.

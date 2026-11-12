@@ -50,7 +50,8 @@ const (
 )
 
 // StreamConn adapts a byte stream to a PacketConn with a 2-byte big-endian
-// length prefix. It is used by the local debug socket.
+// length prefix. It is used by the TCP listener and the local debug
+// socket.
 type StreamConn struct {
 	c   net.Conn
 	wmu sync.Mutex

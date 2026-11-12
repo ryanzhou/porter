@@ -3,12 +3,12 @@ import Foundation
 import PorterKit
 import UIKit
 
-/// The app's single source of truth: the Bluetooth link, the session with
-/// the router, and the router state the views show and edit.
+/// The app's single source of truth: the connection to the router and the
+/// router state the views show and edit.
 @MainActor
 final class AppModel: ObservableObject {
     enum Phase: Equatable {
-        /// Looking for a router (none paired, or the paired one is not in range).
+        /// Looking for a router (none paired, or the paired one does not answer).
         case searching
         case connecting(name: String)
         /// Connected, but the router wants its power button pressed
@@ -40,17 +40,34 @@ final class AppModel: ObservableObject {
     /// The state of a software update being installed, if the router has
     /// reported one in this session.
     @Published private(set) var firmwareProgress: FirmwareProgress?
+    /// Which way the router is reached right now: over one of its own
+    /// networks or over Bluetooth. Nil while it is not.
+    @Published private(set) var link: LinkKind?
+    /// The connection has been gone for a moment and is being brought
+    /// back. What is on screen stays; this is for the sign that says so.
+    @Published private(set) var reconnecting = false
     /// A message for the user; views present it as an alert and clear it.
     @Published var errorMessage: String?
 
     let central = BLECentral()
     private let store = KeyStore()
-    private var connection: RouterConnection?
-    private var link: BLELink?
+    /// The connection to the router. It keeps itself up over whichever
+    /// link works, and for as long as it exists it is trying to; the
+    /// model follows what it reports.
+    private var supervisor: ConnectionSupervisor?
+    /// The router the supervisor is for, as Bluetooth knows it.
+    private var target: (peripheral: UUID, name: String)?
+    /// Reads what the supervisor reports.
+    private var watcher: Task<Void, Never>?
+    /// Takes the router's events one at a time.
+    private var eventTask: Task<Void, Never>?
+    private var eventSink: AsyncStream<RouterEvent>.Continuation?
+    /// Brings the model up to date after a link has come up.
+    private var syncTask: Task<Void, Never>?
     /// The configuration as the router last reported it. `config`, which
     /// the views show, is this with the edits applied that have been sent
     /// and not yet confirmed: a control shows its new value the moment it
-    /// is touched, not a Bluetooth round trip later.
+    /// is touched, not a round trip later.
     private var confirmedConfig: RouterConfig?
     private var pendingEdits: [(id: Int, edit: (inout RouterConfig) -> Void)] = []
     private var nextEditID = 0
@@ -58,16 +75,9 @@ final class AppModel: ObservableObject {
     /// that each is written on top of what the one before it left on the
     /// router and none finds the router a revision ahead of it.
     private var updateTail: Task<Bool, Never>?
-    private var connectTask: Task<Void, Never>?
-    /// Counts the attempts to connect and the disconnects. An attempt
-    /// whose number is no longer this one has been cancelled or replaced,
-    /// and leaves everything to whatever came after it.
-    private var generation = 0
-    /// How many attempts nobody asked for have failed in a row.
-    private var automaticFailures = 0
-    private var eventTask: Task<Void, Never>?
     private var subscriptions: Set<AnyCancellable> = []
-    /// Set when the user disconnects on purpose, to stop auto-reconnect.
+    /// Set when the user disconnects on purpose, and after a failure that
+    /// was announced, to stop connecting again unasked.
     private var holdOff = false
 
     init() {
@@ -95,21 +105,28 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        guard supervisor == nil else { return }
         if isDemo {
-            startDemo()
-        } else {
-            central.startScanning()
+            watch(ConnectionSupervisor(demo: DemoRouter.makeConnection()))
+            return
+        }
+        central.startScanning()
+        // The router used last is tried straight away, over its network
+        // and over Bluetooth, without waiting for it to show up in a
+        // scan: with Bluetooth off it never would.
+        if !holdOff, let router = knownRouters.last {
+            open(peripheral: router.peripheral, name: router.name, automatic: true)
         }
     }
 
-    private func startDemo() {
-        guard connection == nil else { return }
-        let demo = DemoRouter.makeConnection()
-        connection = demo
-        Task {
-            try? await reload()
-            activity = (try? await demo.activity()) ?? []
-            phase = .connected
+    /// The app has come to the front: the moment to see whether the link
+    /// still works, and whether there is a better one.
+    func foreground() {
+        guard !isDemo else { return }
+        if let supervisor {
+            Task { await supervisor.poke() }
+        } else {
+            start()
         }
     }
 
@@ -117,194 +134,208 @@ final class AppModel: ObservableObject {
 
     // MARK: - Connecting
 
-    /// Connects to the paired router as soon as it shows up.
+    /// A paired router has been seen over Bluetooth, or Bluetooth has
+    /// just become usable.
     private func autoConnect(_ routers: [DiscoveredRouter]) {
-        guard !isDemo, phase == .searching, connectTask == nil, !holdOff else { return }
+        guard !isDemo, !holdOff, phase == .searching else { return }
+        if let supervisor, let target, routers.isEmpty || routers.contains(where: { $0.id == target.peripheral }) {
+            // The router the app is already looking for: now is the
+            // moment to try.
+            Task { await supervisor.poke() }
+            return
+        }
         guard let match = routers.first(where: { seen in knownRouters.contains { $0.peripheral == seen.id } }) else { return }
-        connect(to: match, automatic: true)
+        // Another paired router than the one used last is here.
+        open(peripheral: match.id, name: match.name, automatic: true)
     }
 
-    /// Connects to a router. `automatic` marks the attempt nobody asked
-    /// for, made because the paired router came into view.
-    func connect(to router: DiscoveredRouter, automatic: Bool = false) {
+    /// Connects to a router picked from the list of those in range.
+    func connect(to router: DiscoveredRouter) {
         holdOff = false
-        if !automatic { automaticFailures = 0 }
-        if connectTask != nil {
-            // An attempt still under way is replaced, and what it has
-            // opened so far goes now rather than when it next looks.
-            connectTask?.cancel()
-            connectTask = nil
-            teardown()
-        }
-        generation += 1
-        let attempt: Int = generation
-        connectTask = Task { [weak self] in
-            await self?.runConnection(peripheral: router.id, name: router.name, attempt: attempt, automatic: automatic)
-            // An attempt that was cancelled or replaced has no task to
-            // clear: the one stored by now belongs to a newer attempt.
-            guard let self, self.generation == attempt else { return }
-            self.connectTask = nil
-        }
+        open(peripheral: router.id, name: router.name, automatic: false)
     }
 
-    /// Whether a connection attempt is still the one under way. One that
-    /// is not has been cancelled or replaced: the link it opened itself,
-    /// if any, is dropped here, and the caller returns without touching
-    /// anything else.
-    private func isCurrent(_ attempt: Int, link: BLELink?) -> Bool {
-        if attempt == generation && !Task.isCancelled { return true }
-        link?.abandon(BLEError.disconnected)
-        return false
+    /// Connects to a paired router, which need not be in Bluetooth range:
+    /// it may answer on the network the phone is on.
+    func connect(to router: KnownRouter) {
+        holdOff = false
+        open(peripheral: router.peripheral, name: router.name, automatic: false)
     }
 
-    private func runConnection(peripheral: UUID, name: String, attempt: Int, automatic: Bool) async {
-        guard isCurrent(attempt, link: nil) else { return }
-        phase = .connecting(name: name)
-        // The link this attempt opens. Cancel may come before the model
-        // has it, and then nothing but the attempt itself can drop it.
-        var opened: BLELink? = nil
+    /// Starts a connection to a router in place of whatever there was.
+    /// `automatic` marks the one nobody asked for.
+    private func open(peripheral: UUID, name: String, automatic: Bool) {
+        close()
+        let identity: Identity
         do {
-            let link = try await central.connect(to: peripheral)
-            opened = link
-            guard isCurrent(attempt, link: link) else { return }
-            self.link = link
-            let known = knownRouters.first { $0.peripheral == peripheral }
-            // The secure handshake and the first exchange get a deadline of
-            // their own: a router that accepts the Bluetooth connection but
-            // never answers must not leave the app waiting for ever.
-            let deadline = Task { [weak link] in
-                do {
-                    try await Task.sleep(nanoseconds: 15_000_000_000)
-                } catch {
-                    return // cancelled: the router answered
-                }
-                link?.abandon(BLEError.stalled("securing the connection"))
-            }
-            defer { deadline.cancel() }
-            let connection = try await RouterConnection.connect(
-                transport: link, identity: try store.identity(), expectedRouterKey: known?.publicKey)
-            guard isCurrent(attempt, link: link) else { return }
-            self.connection = connection
-            var hello = try await connection.hello()
-            guard isCurrent(attempt, link: link) else { return }
-            deadline.cancel()
+            identity = try store.identity()
+        } catch {
+            holdOff = true
+            errorMessage = describe(error)
+            return
+        }
+        let known: KnownRouter? = knownRouters.first { $0.peripheral == peripheral }
+        target = (peripheral: peripheral, name: name)
+        if !automatic { phase = .connecting(name: name) }
+        watch(ConnectionSupervisor(
+            identity: identity, routerKey: known?.publicKey, endpoints: known?.endpoints,
+            dialer: RouterDialer(central: central, peripheral: peripheral),
+            phoneName: UIDevice.current.name, automatic: automatic))
+    }
 
-            // Not paired yet: ask, and keep asking while the user goes to
-            // press the button.
-            while !hello.paired {
-                do {
-                    try await connection.pair(name: UIDevice.current.name)
-                    guard isCurrent(attempt, link: link) else { return }
-                    hello = try await connection.hello()
-                    guard isCurrent(attempt, link: link) else { return }
-                } catch let error as RouterError where error.code == RouterError.pairingClosed {
-                    guard isCurrent(attempt, link: link) else { return }
-                    phase = .awaitingPairing(name: hello.name)
-                    try await Task.sleep(nanoseconds: 1_500_000_000)
-                    guard isCurrent(attempt, link: link) else { return }
+    private func watch(_ supervisor: ConnectionSupervisor) {
+        self.supervisor = supervisor
+        // The router's events are taken one at a time, each with whatever
+        // it makes the model fetch, as they were over a single link.
+        let (events, sink) = AsyncStream<RouterEvent>.makeStream()
+        eventSink = sink
+        eventTask = Task { [weak self] in
+            for await event in events {
+                await self?.take(event)
+            }
+        }
+        watcher = Task { [weak self] in
+            await supervisor.start()
+            for await event in supervisor.events {
+                guard let self, self.supervisor === supervisor else { return }
+                switch event {
+                case .state(let state): self.follow(state, of: supervisor)
+                case .router(let event): sink.yield(event)
+                case .identified(let hello, let routerKey): self.remember(hello, routerKey: routerKey)
+                case .endpoints(let endpoints): self.remember(endpoints)
+                case .failed(let error): self.failed(error)
                 }
             }
-            let router = KnownRouter(id: hello.id, name: hello.name, publicKey: connection.routerKey, peripheral: peripheral)
-            store.save(router)
-            knownRouters = store.routers()
+        }
+    }
 
-            try? await connection.setTime()
-            guard isCurrent(attempt, link: link) else { return }
+    private func follow(_ state: ConnectionSupervisor.State, of supervisor: ConnectionSupervisor) {
+        switch state {
+        case .searching:
+            // Nothing has answered for a while. What is on screen is of a
+            // router that is not there; the supervisor goes on looking.
+            if phase != .searching {
+                clear()
+                phase = .searching
+            }
+            central.startScanning()
+        case .connecting:
+            if phase == .searching, let target { phase = .connecting(name: target.name) }
+        case .awaitingPairing(let name):
+            phase = .awaitingPairing(name: name)
+        case .connected(let kind):
+            link = kind
+            reconnecting = false
+            if phase == .searching, let target { phase = .connecting(name: target.name) }
+            syncTask?.cancel()
+            syncTask = Task { [weak self] in await self?.linkCameUp(supervisor) }
+        case .reconnecting(let noticeable):
+            // The screens stay as they are. Calls wait for the new link.
+            reconnecting = noticeable
+            if noticeable { link = nil }
+        case .stopped:
+            break
+        }
+    }
+
+    private func isCurrent(_ supervisor: ConnectionSupervisor) -> Bool {
+        self.supervisor === supervisor && !Task.isCancelled
+    }
+
+    /// A link has come up. The first time, everything is fetched and the
+    /// screens appear. After a change of link the same is fetched again
+    /// without anything showing, because events may have been missed on
+    /// the way from one link to the other.
+    private func linkCameUp(_ supervisor: ConnectionSupervisor) async {
+        let first: Bool = phase != .connected
+        do {
+            if first { try? await supervisor.setTime() }
             // A router of another generation: nothing of it can be shown,
             // but it can still be reached, which is enough to update it.
-            let format = try await connection.configFormat()
-            guard isCurrent(attempt, link: link) else { return }
+            let format: Int = try await supervisor.configFormat()
+            guard isCurrent(supervisor) else { return }
             if format != RouterConfig.format {
                 mismatch = format < RouterConfig.format ? .routerOlder : .appOlder
                 phase = .connected
-                automaticFailures = 0
                 central.stopScanning()
-                listen(to: connection)
                 return
             }
             mismatch = nil
             try await reload()
-            guard isCurrent(attempt, link: link) else { return }
-            let recent: [ActivityEvent] = (try? await connection.activity()) ?? []
-            guard isCurrent(attempt, link: link) else { return }
+            guard isCurrent(supervisor) else { return }
+            let recent: [ActivityEvent] = (try? await supervisor.activity()) ?? []
+            guard isCurrent(supervisor) else { return }
             activity = recent
             phase = .connected
-            automaticFailures = 0
             central.stopScanning()
-            listen(to: connection)
         } catch {
-            // However it ended, an attempt that was cancelled or replaced
-            // says nothing: the model is no longer its to clear.
-            guard isCurrent(attempt, link: opened) else { return }
-            if let sessionError = error as? SessionError, sessionError == .routerKeyMismatch {
-                // No automatic retry after a failure: it would fail the same
-                // way and put the message up again every few seconds. The
-                // user taps the router to try again.
-                holdOff = true
-                teardown()
-                errorMessage = "This router's identity is different from the one this phone paired with. If you have reset the router, forget it under Paired routers and connect again. If you have not, another device may be pretending to be it."
-                return
+            guard isCurrent(supervisor) else { return }
+            // The link went again before everything was read. The
+            // supervisor is bringing up another, and this starts over
+            // when it has.
+            if isLinkFailure(error) || error is SupervisorError { return }
+            if first { failed(error) }
+        }
+    }
+
+    /// Takes one event from the router.
+    private func take(_ event: RouterEvent) async {
+        switch event {
+        case .status(let status):
+            let revChanged = status.rev != config?.rev
+            self.status = status
+            if revChanged {
+                try? await reloadConfig()
+                // What each radio is used for is part of what
+                // the radio list says.
+                try? await refreshRadios()
             }
-            if automatic {
-                // A router restarting after a software update is seen
-                // before it answers, and the first tries can run out of
-                // time. Four in a row end quietly: scanning goes on, and
-                // the next sight of the router starts another. The fifth
-                // is told like any other failure.
-                automaticFailures += 1
-                if automaticFailures < 5 {
-                    teardown()
-                    return
-                }
-            }
-            // Told once, and no automatic retry after it, as above.
-            holdOff = true
-            teardown()
+        case .activity(let entry):
+            activity.append(entry)
+            if entry.kind == "device" { try? await refreshDevices() }
+            if entry.kind == "radio" { try? await refreshRadios() }
+        case .speedTest(let progress):
+            speedTestProgress = progress.phase == "done" ? nil : progress
+        case .firmware(let progress):
+            firmwareProgress = progress
+        }
+    }
+
+    /// Keeps what a router said of itself as a link came up: its name,
+    /// the key it proved, and where it can be reached over its networks.
+    private func remember(_ hello: HelloInfo, routerKey: Data) {
+        guard hello.paired, let target else { return }
+        store.save(KnownRouter(
+            id: hello.id, name: hello.name, publicKey: routerKey, peripheral: target.peripheral,
+            endpoints: hello.control ?? ControlEndpoints()))
+        knownRouters = store.routers()
+    }
+
+    /// The router's addresses have changed, or it has stopped or started
+    /// listening on them.
+    private func remember(_ endpoints: ControlEndpoints) {
+        guard let target, var router = knownRouters.first(where: { $0.peripheral == target.peripheral }) else { return }
+        router.endpoints = endpoints
+        store.save(router)
+        knownRouters = store.routers()
+    }
+
+    /// The supervisor has stopped over something worth telling. Told
+    /// once, and no connecting again unasked after it: it would fail the
+    /// same way and put the message up again every few seconds. The user
+    /// picks the router to try again.
+    private func failed(_ error: Error) {
+        holdOff = true
+        close()
+        if let sessionError = error as? SessionError, sessionError == .routerKeyMismatch {
+            errorMessage = "This router's identity is different from the one this phone paired with. If you have reset the router, forget it under Paired routers and connect again. If you have not, another device may be pretending to be it."
+        } else {
             errorMessage = describe(error)
         }
     }
 
-    private func listen(to connection: RouterConnection) {
-        eventTask?.cancel()
-        eventTask = Task { [weak self] in
-            for await event in connection.events {
-                guard let self else { return }
-                switch event {
-                case .status(let status):
-                    let revChanged = status.rev != self.config?.rev
-                    self.status = status
-                    if revChanged {
-                        try? await self.reloadConfig()
-                        // What each radio is used for is part of what
-                        // the radio list says.
-                        try? await self.refreshRadios()
-                    }
-                case .activity(let entry):
-                    self.activity.append(entry)
-                    if entry.kind == "device" { try? await self.refreshDevices() }
-                    if entry.kind == "radio" { try? await self.refreshRadios() }
-                case .speedTest(let progress):
-                    self.speedTestProgress = progress.phase == "done" ? nil : progress
-                case .firmware(let progress):
-                    self.firmwareProgress = progress
-                }
-            }
-            // The stream ends when the link is lost.
-            guard let self, !Task.isCancelled else { return }
-            self.teardown()
-        }
-    }
-
-    private func teardown() {
-        eventTask?.cancel()
-        eventTask = nil
-        let old = connection
-        connection = nil
-        // Dropped here and now: an attempt that failed before a session
-        // existed has nothing else that would end the Bluetooth connection.
-        link?.abandon(BLEError.disconnected)
-        link = nil
-        Task { await old?.close() }
+    /// Forgets everything of the router that is on screen.
+    private func clear() {
         status = nil
         mismatch = nil
         pendingEdits.removeAll()
@@ -317,25 +348,42 @@ final class AppModel: ObservableObject {
         radios = []
         speedTestProgress = nil
         firmwareProgress = nil
+        link = nil
+        reconnecting = false
+    }
+
+    /// Ends the connection and everything that follows it.
+    private func close() {
+        watcher?.cancel()
+        watcher = nil
+        syncTask?.cancel()
+        syncTask = nil
+        eventTask?.cancel()
+        eventTask = nil
+        eventSink?.finish()
+        eventSink = nil
+        if let old = supervisor {
+            Task { await old.stop() }
+        }
+        supervisor = nil
+        target = nil
+        clear()
         phase = .searching
-        central.startScanning()
+        if !isDemo { central.startScanning() }
     }
 
     /// Drops the connection; the app reconnects when the user picks the
     /// router again.
     func disconnect() {
         holdOff = true
-        generation += 1
-        connectTask?.cancel()
-        connectTask = nil
-        teardown()
+        close()
     }
 
     /// Forgets a paired router on this phone.
     func forget(_ router: KnownRouter) {
         store.remove(routerID: router.id)
         knownRouters = store.routers()
-        if connection != nil { disconnect() }
+        if target?.peripheral == router.peripheral { disconnect() }
     }
 
     func cancelConnecting() {
@@ -344,9 +392,9 @@ final class AppModel: ObservableObject {
 
     // MARK: - Reading
 
-    private func requireConnection() throws -> RouterConnection {
-        guard let connection else { throw BLEError.disconnected }
-        return connection
+    private func requireConnection() throws -> ConnectionSupervisor {
+        guard let supervisor else { throw SupervisorError.notConnected }
+        return supervisor
     }
 
     func reload() async throws {
@@ -357,7 +405,7 @@ final class AppModel: ObservableObject {
         let radios: [RadioInfo] = try await connection.radios()
         // The connection may have been dropped while the router answered.
         // What it said is then about nothing the model still holds.
-        guard self.connection === connection else { throw BLEError.disconnected }
+        guard self.supervisor === connection else { throw SupervisorError.notConnected }
         self.status = status
         setConfirmed(config)
         self.devices = devices
@@ -415,9 +463,10 @@ final class AppModel: ObservableObject {
 
     /// Applies an edit to the configuration. The edit shows at once and is
     /// taken back if the router refuses it. If the router's copy changed
-    /// in the meantime the edit is re-applied to the fresh copy once.
-    /// Updates reach the router one at a time, in the order they were
-    /// made.
+    /// in the meantime the edit is re-applied to the fresh copy once, and
+    /// if the link goes with the write on it the write is seen through
+    /// over the next one (`RouterAPI.writeConfig`). Updates reach the
+    /// router one at a time, in the order they were made.
     @discardableResult
     func update(_ edit: @escaping (inout RouterConfig) -> Void) async -> Bool {
         let id = nextEditID
@@ -443,25 +492,9 @@ final class AppModel: ObservableObject {
         // the edit with it: there is nothing to send.
         guard pendingEdits.contains(where: { $0.id == id }) else { return false }
         let ok = await attempt { connection in
-            for attemptNumber in 0..<2 {
-                // The first try builds on the copy already here, which
-                // saves fetching the whole configuration over Bluetooth;
-                // if the router has moved on, the second fetches it.
-                var next: RouterConfig
-                if attemptNumber == 0, let known = self.confirmedConfig {
-                    next = known
-                } else {
-                    next = try await connection.config()
-                }
-                edit(&next)
-                do {
-                    _ = try await connection.setConfig(next)
-                    break
-                } catch let error as RouterError where error.code == RouterError.conflict && attemptNumber == 0 {
-                    continue
-                }
-            }
-            let fresh = try await connection.config()
+            // Built on the copy already here, which saves fetching the
+            // whole configuration first.
+            let fresh: RouterConfig = try await connection.writeConfig(known: self.confirmedConfig, edit)
             self.pendingEdits.removeAll(where: { $0.id == id })
             self.setConfirmed(fresh)
             self.status = try await connection.status()
@@ -477,9 +510,9 @@ final class AppModel: ObservableObject {
     /// when the question could not be asked; that is not worth an alert,
     /// the change itself will say what is wrong when it is applied.
     func check(_ edit: @escaping (inout RouterConfig) -> Void) async -> ConfigCheck? {
-        guard let connection, var next = confirmedConfig else { return nil }
+        guard let supervisor, var next = confirmedConfig else { return nil }
         edit(&next)
-        return try? await connection.checkConfig(next)
+        return try? await supervisor.checkConfig(next)
     }
 
     /// Chooses the radio that joins upstream Wi-Fi networks ("" for none).
@@ -496,7 +529,7 @@ final class AppModel: ObservableObject {
 
     /// Runs a router operation, turning failures into `errorMessage`.
     @discardableResult
-    func attempt(_ operation: @escaping (RouterConnection) async throws -> Void) async -> Bool {
+    func attempt(_ operation: @escaping (ConnectionSupervisor) async throws -> Void) async -> Bool {
         do {
             try await operation(try requireConnection())
             return true
@@ -509,7 +542,7 @@ final class AppModel: ObservableObject {
     /// Like `attempt` and `fetch`, for what is done without being asked
     /// (loading a list as a screen appears): a failure is not announced.
     @discardableResult
-    func quietly(_ operation: @escaping (RouterConnection) async throws -> Void) async -> Bool {
+    func quietly(_ operation: @escaping (ConnectionSupervisor) async throws -> Void) async -> Bool {
         do {
             try await operation(try requireConnection())
             return true
@@ -518,12 +551,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func fetchQuietly<T>(_ operation: @escaping (RouterConnection) async throws -> T) async -> T? {
+    func fetchQuietly<T>(_ operation: @escaping (ConnectionSupervisor) async throws -> T) async -> T? {
         try? await operation(try requireConnection())
     }
 
     /// Runs a router operation that returns a value; nil on failure.
-    func fetch<T>(_ operation: @escaping (RouterConnection) async throws -> T) async -> T? {
+    func fetch<T>(_ operation: @escaping (ConnectionSupervisor) async throws -> T) async -> T? {
         do {
             return try await operation(try requireConnection())
         } catch {
@@ -556,7 +589,7 @@ final class AppModel: ObservableObject {
     private func describe(_ error: Error) -> String {
         if let error = error as? RouterError { return error.msg }
         if let error = error as? LocalizedError, let text = error.errorDescription { return text }
-        if error is NoiseError || error is SessionError { return "The secure connection to the router failed. Move closer to the router and try again." }
+        if error is NoiseError || error is SessionError { return "The secure connection to the router failed. Try again." }
         return error.localizedDescription
     }
 

@@ -454,6 +454,21 @@ extension AppModel {
         )
     }
 
+    /// Whether the router can also be reached over its own networks. The
+    /// router stores it the other way round.
+    var networkControl: Binding<Bool> {
+        Binding(
+            get: { !(self.config?.system.bluetoothOnly ?? false) },
+            set: { value in
+                Task {
+                    await self.update { cfg in
+                        cfg.system.bluetoothOnly = !value
+                    }
+                }
+            }
+        )
+    }
+
     func vpnEnabled(_ id: String) -> Binding<Bool> {
         Binding(
             get: { self.config?.vpns.first(where: { $0.id == id })?.enabled ?? false },

@@ -8,22 +8,22 @@ the project's GitHub releases, and only when asked for from the app.
 
 | Part | Where | What |
 |------|-------|------|
-| Router daemon | [`daemon/`](../daemon) | `porterd` (Go): radios, uplinks, LAN, firewall, policy routing, DNS, VPN, BLE control |
+| Router daemon | [`daemon/`](../daemon) | `porterd` (Go): radios, uplinks, LAN, firewall, policy routing, DNS, VPN, control over BLE and over its own networks |
 | OS image | [`image/`](../image) | Build script and root file system overlay for the SD card image |
 | iOS app | [`ios/`](../ios) | SwiftUI app and `PorterKit`, the Swift protocol implementation |
-| Protocol | [`PROTOCOL.md`](PROTOCOL.md) | The BLE control protocol both sides implement |
+| Protocol | [`PROTOCOL.md`](PROTOCOL.md) | The control protocol both sides implement |
 
 ## How the pieces fit
 
 ```
- iPhone app ── BLE GATT ── bluetoothd ── porterd ─┬─ hostapd          (access points)
-                                                  ├─ wpa_supplicant   (Wi-Fi uplink)
-                                                  ├─ dhcpcd           (uplink DHCP / RA / DHCPv6)
-                                                  ├─ dnsmasq          (LAN DHCP and router advertisements)
-                                                  ├─ nftables         (firewall, NAT44/NAT66, classification)
-                                                  ├─ policy routing   (one table per VPN profile)
-                                                  ├─ WireGuard        (kernel)
-                                                  └─ DNS forwarder    (built in)
+ iPhone app ─┬─ BLE GATT ── bluetoothd ─┬─ porterd ─┬─ hostapd          (access points)
+             └─ TCP, on the router's ───┘           ├─ wpa_supplicant   (Wi-Fi uplink)
+                own networks                        ├─ dhcpcd           (uplink DHCP / RA / DHCPv6)
+                                                    ├─ dnsmasq          (LAN DHCP and router advertisements)
+                                                    ├─ nftables         (firewall, NAT44/NAT66, classification)
+                                                    ├─ policy routing   (one table per VPN profile)
+                                                    ├─ WireGuard        (kernel)
+                                                    └─ DNS forwarder    (built in)
 ```
 
 `porterd` owns one configuration document and continuously reconciles
@@ -129,9 +129,20 @@ every subsystem against it and against what the network is doing.
   being uplinks are released, then stations start, then access points.
   `config.check` runs the same checks, and the radio planning, on a
   document without applying it.
-- **Control.** A Noise XX channel above GATT, independent of BLE
-  pairing; see [PROTOCOL.md](PROTOCOL.md). Pairing is trust-on-first-use,
-  gated by the power button.
+- **Control.** A Noise XX channel, independent of BLE pairing, above
+  GATT and above TCP; see [PROTOCOL.md](PROTOCOL.md). Pairing is
+  trust-on-first-use, gated by the power button, and only over
+  Bluetooth: `core.Serve` is told which way a session came in
+  (`Transport`), and that decides what the session is before it has
+  asked for anything. The TCP listener (`internal/netctl`) hands over
+  only sessions of phones that are paired already. It listens on every
+  address and is fenced in twice: by the firewall's input rule, which
+  names the networks that are not isolated the way the rule for SSH
+  does, and by a check of each connection's two addresses, because the
+  listener is there before the first ruleset is. `ping` and the
+  listener's own checks do not go through the control loop, which can
+  be busy for seconds while a radio restarts: whether a link works must
+  not depend on whether the router has time.
 - **Firewall replacement** is atomic, and the ruleset is left in place
   when the daemon stops, so a restarting daemon never leaves the router
   open.
@@ -212,12 +223,16 @@ system takes now, and as much as two of them can be on an 8 GB card.
 an update keeps settings, pairings and the router's identity without
 doing anything. Two cases need care:
 
-- *A newer version changes the format of the settings.* New fields need
-  nothing; `Normalize` fills in their defaults. A change to existing
-  fields means raising `SchemaVersion` in `daemon/internal/config` and
-  adding the step from the old version to `migrations` there. Without
-  that step the new version would reject the stored settings and start
-  in the factory state.
+- *A newer version changes the format of the settings.* A change to
+  existing fields means raising `SchemaVersion` in
+  `daemon/internal/config` and adding the step from the old version to
+  `migrations` there. Without that step the new version would reject
+  the stored settings and start in the factory state. A field that is
+  only new needs no step (`Normalize` fills in its default), but the
+  number is raised for it all the same, as it was for format 3: the app
+  writes the whole document back, an app that does not know the field
+  would drop it, and the number is how that app finds out that it must
+  not write.
 - *An update does not hold and the old version starts again.* The new
   version ran for a while on the shared partition and may have rewritten
   the settings in a form the old one cannot read. So the installer copies
@@ -282,10 +297,15 @@ CI runs the end-to-end tests this way.
   what actually crosses the router: NAT44, NAT66, DNS interception,
   pause and block, VPN splits by device, domain, country and port,
   per-path DNS, the kill switch, the captive portal bypass, ad blocking,
-  flows, traffic history and speed tests; a second network (its own
-  addresses, isolation, a route and a rule of its own, and its removal);
-  and a second uplink standing in for a phone (the order of uplinks, and
-  falling back when the first stops reaching the internet).
+  flows, traffic history and speed tests; the app's way in over the
+  network (a paired phone from the main network, a phone that is not
+  paired, the internet side, an isolated network, and the setting that
+  switches it off); a second network (its own addresses, isolation, a
+  route and a rule of its own, and its removal); and a second uplink
+  standing in for a phone (the order of uplinks, and falling back when
+  the first stops reaching the internet). There is no Bluetooth in the
+  namespaces, so the phone these tests connect as is written into the
+  pairing list before the daemon starts.
 - `TestWifi` uses simulated radios (`mac80211_hwsim`): hostapd and
   wpa_supplicant for real, scanning, wrong and right passwords, a
   wireless client through the router, a second Wi-Fi network on a
@@ -309,10 +329,12 @@ cd ios/PorterKit && swift test
 
 `PorterKit` holds everything below the user interface: the Noise
 handshake, framing, the RPC client, the data models, the CoreBluetooth
-link, and a sample-data router for demo mode. Its tests check the Swift
-protocol code against vectors generated by the Go implementation
-(`go test ./internal/proto -run TestVectors -update` regenerates them)
-and that the demo data decodes through the real models. With
+link and the TCP link, the supervisor that keeps a connection up over
+the two, and a sample-data router for demo mode. Its tests check the
+Swift protocol code against vectors generated by the Go implementation
+(`go test ./internal/proto -run TestVectors -update` regenerates them),
+that the demo data decodes through the real models, and how the
+supervisor behaves when links come and go (below). With
 `PORTER_CONTROL_SOCKET=/run/porter/control.sock` set they also drive a
 running `porterd`. The package builds on Linux as well, where it is used
 only for these tests.
@@ -334,6 +356,62 @@ the router refuses. The settings that depend on each other (Wi-Fi names,
 networks, what radios and ports are for) are edited as a draft instead
 (`NetworkSetupPage`): the router is asked what the draft would do
 (`config.check`) as it changes, and Apply sends it as one `config.set`.
+
+### Two links, one connection
+
+The app reaches a router over Bluetooth or, much faster, over TCP on the
+router's own network. Which of the two is there changes as the phone
+moves about, and nothing on screen is to change with it. So the app
+does not hold a link. It holds a `ConnectionSupervisor` (PorterKit,
+`Supervisor.swift`), which is *the connection to the router* for as
+long as the app wants one: calls are made on it, events come from it,
+and it sees to the links underneath. `AppModel` follows the states it
+reports and otherwise does not know which link is in use.
+
+What it does, with the times the app runs with (`Timing`; the tests
+shorten them):
+
+| | |
+|---|---|
+| Start | Every remembered address (TCP, 2 s to connect) and Bluetooth are tried at the same time. The first to finish the handshake and `hello` is used; the others are cancelled. |
+| The router's key | The key pinned at pairing is checked on every link. Another key over the network only ends that attempt (the address is somebody else's; it happens on any network numbered like yours). Another key over Bluetooth ends the connection, with a message. |
+| On Bluetooth | The network is tried again every 30 s, when the app comes to the front, and when the router reports other addresses. When it answers, the new link takes over at once: new calls go to it, calls under way finish on the old link, which is closed after the last of them (or after 100 s, past the longest deadline a call has). |
+| On the network | A `ping` every 2 s has to be answered within 3 s, so a link that has gone silent is noticed within 5 s; one that breaks with an error, at once. |
+| A link is lost | Everything is tried again straight away, and then every second. Calls made meanwhile wait for the new link, up to 10 s. Calls that change nothing on the router (the list is in the supervisor) are made once more if they were lost with the link; others fail as they would have. After 2 s the app shows a small sign, which goes when the link is back. |
+| Nothing answers for 20 s | The supervisor reports `searching` and the app returns to the search screen. The supervisor goes on trying every 5 s. |
+| After any change of link | The state `connected` is reported again, and the app reads the status, the configuration, the devices and the radios afresh without anything showing: events may have been missed in between. Events are taken from the link in use only. |
+
+Why it is built like this:
+
+- *One object that outlives its links.* The trouble with switching
+  between two transports is everything that hangs off a connection: a
+  screen that is torn down with it, a call that fails with it, an edit
+  that is forgotten. If the thing the app holds never goes away while a
+  link is being replaced, there is nothing to put back afterwards.
+- *Make before break.* On the way to the faster link there is never a
+  moment without one, so no call has anything to wait for or fail on.
+- *Writes are made once.* A configuration write whose answer was lost
+  cannot be judged from the phone: the router may or may not have made
+  it. `config.set` therefore carries an id, and the router remembers the
+  ids of the writes it made. The app sends the very same request again
+  over the next link (`RouterAPI.writeConfig`) and is told what became of
+  the first. Should the router have restarted in between and forgotten,
+  the write comes back as a conflict; the app then fetches what the
+  router holds and writes only if the edit is not in it yet.
+- *Quiet unless it matters.* The network not answering is the normal
+  case whenever the phone is somewhere else, so nothing on that link is
+  ever an error to show. An attempt the person asked for (picking a
+  router) reports how it went. One the app makes by itself reports only
+  a router that is there over Bluetooth and fails to connect five times
+  running.
+
+`SupervisorTests` are the check on all of this. They run the supervisor
+against a router that speaks the real protocol (`FakeRouter`: the
+responder's side of the handshake, the session, a handful of calls)
+over links that can be cut, or made to swallow everything in silence,
+at a chosen moment. On Linux as on a Mac.
+
+`TCPTransport` and the Bluetooth link only build on Apple platforms.
 
 ## Continuous integration
 

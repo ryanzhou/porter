@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // Config is the whole user-controllable state of the router. It is sent to
 // the app as JSON and written back section by section.
@@ -65,6 +65,9 @@ type System struct {
 	Country string `json:"country"`
 	// SSH enables an OpenSSH server reachable from the LAN only.
 	SSH SSH `json:"ssh"`
+	// BluetoothOnly switches off control over the router's own networks
+	// (see internal/netctl), leaving Bluetooth as the only way in.
+	BluetoothOnly bool `json:"bluetooth_only"`
 }
 
 type SSH struct {
@@ -663,6 +666,10 @@ func (s *Store) Load() (*Config, error) {
 //
 // When SchemaVersion is raised, the step from the previous version goes
 // here. Without it a router that updates itself would lose its settings.
+//
+// Format 3 only added system.bluetooth_only, so format 2 has no entry. The
+// number was raised all the same: an app that knows format 2 would write
+// the document back without the field, and has to be told that it cannot.
 var migrations = map[int]func(doc map[string]any) error{
 	1: networksAndOrder,
 }

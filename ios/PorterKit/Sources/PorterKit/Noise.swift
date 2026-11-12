@@ -81,7 +81,9 @@ private func hkdf(_ chainingKey: Data, _ material: Data) -> (Data, Data) {
     return (out1, out2)
 }
 
-private struct SymmetricState {
+/// Not private to this file: the tests play the router's side of the
+/// handshake with it.
+struct SymmetricState {
     var chainingKey: Data
     var hash: Data
     var cipher = CipherState()

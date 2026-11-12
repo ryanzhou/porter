@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/dnsfwd"
 	"github.com/ryanzhou/porter/daemon/internal/flows"
 	"github.com/ryanzhou/porter/daemon/internal/fw"
+	"github.com/ryanzhou/porter/daemon/internal/netctl"
 	"github.com/ryanzhou/porter/daemon/internal/netx"
 	"github.com/ryanzhou/porter/daemon/internal/proto"
 	"github.com/ryanzhou/porter/daemon/internal/speedtest"
@@ -29,39 +31,65 @@ import (
 	"github.com/ryanzhou/porter/daemon/internal/wifi"
 )
 
+// Transport is the way a control session came in. It decides what the
+// session is before it has asked for anything.
+type Transport int
+
+const (
+	// OverBluetooth: from within radio range of the router. A phone that
+	// is not paired gets a session in which it can ask to be: being that
+	// close, and the power button, are what pairing rests on.
+	OverBluetooth Transport = iota
+	// OverNetwork: from one of the router's own networks (see netctl).
+	// For paired phones only; nobody is paired this way.
+	OverNetwork
+	// OverSocket: the local control socket, which only root can open, and
+	// which is trusted as it is.
+	OverSocket
+)
+
 // apiSession is one connected app.
 type apiSession struct {
 	s      *proto.Session
 	paired bool
-	local  bool
+	via    Transport
 	out    chan []byte
 	// trust tells the link that the session has become a paired one.
 	trust func()
 }
 
 // Serve runs one control session over an established packet link.
-func (c *Core) Serve(pc proto.PacketConn, local bool) {
+func (c *Core) Serve(pc proto.PacketConn, via Transport) {
 	defer pc.Close()
 	s, err := proto.Accept(pc, c.identity)
 	if err != nil {
 		c.log.Debug("control handshake failed", "err", err)
 		return
 	}
-	sess := &apiSession{s: s, local: local, out: make(chan []byte, 64)}
-	sess.paired = local || c.pairings.Known(s.Remote)
-	if sess.paired && !local {
-		c.pairings.Touch(s.Remote)
-	}
 	// The link may want to know whose session this is (see ble).
-	trust := func() {
+	c.serve(s, via, func() {
 		if t, ok := pc.(interface{ Trust() }); ok {
 			t.Trust()
 		}
+	})
+}
+
+// serve runs a control session after its handshake.
+func (c *Core) serve(s *proto.Session, via Transport, trust func()) {
+	defer s.Close()
+	sess := &apiSession{s: s, via: via, out: make(chan []byte, 64), trust: trust}
+	sess.paired = via == OverSocket || c.pairings.Known(s.Remote)
+	if via == OverNetwork && !sess.paired {
+		// The listener has looked already; this is a phone removed in
+		// the moment between.
+		return
+	}
+	if sess.paired && via != OverSocket {
+		c.pairings.Touch(s.Remote)
 	}
 	if sess.paired {
 		trust()
 	}
-	sess.trust = trust
 	c.sessMu.Lock()
 	c.sessions[sess] = struct{}{}
 	c.sessMu.Unlock()
@@ -78,7 +106,7 @@ func (c *Core) Serve(pc proto.PacketConn, local bool) {
 			select {
 			case m := <-sess.out:
 				if err := s.Send(m); err != nil {
-					pc.Close()
+					s.Close()
 					return
 				}
 			case <-done:
@@ -165,7 +193,7 @@ func routerID(pub []byte) string {
 
 // RunBLE runs the Bluetooth control service until ctx ends.
 func (c *Core) RunBLE(ctx context.Context, dial ble.Dialer) {
-	srv := &ble.Server{Log: c.log, Name: c.BLEName, Info: c.BLEInfo, Handle: func(pc proto.PacketConn) { c.Serve(pc, false) }}
+	srv := &ble.Server{Log: c.log, Name: c.BLEName, Info: c.BLEInfo, Handle: func(pc proto.PacketConn) { c.Serve(pc, OverBluetooth) }}
 	for ctx.Err() == nil {
 		if err := srv.Run(dial, ctx.Done()); err != nil {
 			c.log.Warn("bluetooth control service", "err", err)
@@ -194,10 +222,101 @@ func (c *Core) serveControlSocket(ctx context.Context) error {
 			if err != nil {
 				return
 			}
-			go c.Serve(proto.NewStreamConn(conn), true)
+			go c.Serve(proto.NewStreamConn(conn), OverSocket)
 		}
 	}()
 	return nil
+}
+
+// controlNets is where the app may connect from over the network: the
+// router's networks that are not isolated, and the router's own address
+// in each.
+type controlNets struct {
+	addrs []netip.Addr
+	nets  []netip.Prefix
+}
+
+// applyControl starts or stops the listener for the app on the router's
+// own networks, and keeps what it accepts in step with the networks.
+func (c *Core) applyControl(cfg *config.Config) {
+	nets := &controlNets{}
+	for _, n := range cfg.Networks {
+		if n.Isolated {
+			continue
+		}
+		a, p := n.Prefix()
+		nets.addrs, nets.nets = append(nets.addrs, a), append(nets.nets, p)
+		if cfg.LAN.IPv6 && fw.HaveIPv6() {
+			a, p := n.ULA()
+			nets.addrs, nets.nets = append(nets.addrs, a), append(nets.nets, p)
+		}
+	}
+	c.ctlNets.Store(nets)
+	switch {
+	case cfg.System.BluetoothOnly && c.ctl != nil:
+		// Sessions that came in this way end with it.
+		c.ctl.Close()
+		c.ctl = nil
+		c.log.Info("control over the router's networks switched off")
+	case !cfg.System.BluetoothOnly && c.ctl == nil:
+		srv := &netctl.Server{
+			Log: c.log, Identity: c.identity, Known: c.pairings.Known, Allowed: c.controlAllowed,
+			Serve: func(s *proto.Session) { c.serve(s, OverNetwork, func() {}) },
+		}
+		if err := srv.Listen(fmt.Sprintf(":%d", proto.ControlPort)); err != nil {
+			// Tried again on every pass; said once.
+			if !c.ctlFailed {
+				c.log.Warn("listening for the app on the router's networks", "err", err)
+			}
+			c.ctlFailed = true
+			return
+		}
+		c.ctl, c.ctlFailed = srv, false
+		c.log.Info("listening for the app on the router's networks", "port", proto.ControlPort)
+	}
+}
+
+// controlAllowed reports whether a connection to the listener is one the
+// firewall would let in: to one of the router's addresses, from inside a
+// network that is not isolated. The listener is asked from its own
+// goroutines and must not wait for the control loop, which can be busy
+// for seconds.
+func (c *Core) controlAllowed(local, remote netip.Addr) bool {
+	nets := c.ctlNets.Load()
+	if nets == nil {
+		return false
+	}
+	to, from := false, false
+	for _, a := range nets.addrs {
+		to = to || a == local
+	}
+	for _, p := range nets.nets {
+		from = from || p.Contains(remote)
+	}
+	return to && from
+}
+
+// ControlStatus says where the app finds the router on its own networks.
+type ControlStatus struct {
+	// Port is 0 while nothing listens there.
+	Port int `json:"port"`
+	// Addrs are the router's addresses in its networks that are not
+	// isolated: IPv4, and the ULA where IPv6 is on.
+	Addrs []string `json:"addrs"`
+}
+
+// controlStatus must run on the control loop.
+func (c *Core) controlStatus() ControlStatus {
+	st := ControlStatus{Addrs: []string{}}
+	nets := c.ctlNets.Load()
+	if c.ctl == nil || nets == nil {
+		return st
+	}
+	st.Port = proto.ControlPort
+	for _, a := range nets.addrs {
+		st.Addrs = append(st.Addrs, a.String())
+	}
+	return st
 }
 
 // HookMessage is what the dhcpcd and dnsmasq hook helpers send.
@@ -281,6 +400,7 @@ type Status struct {
 	// Ports are the wired interfaces that are plugged in, uplinks or not.
 	Ports   []PortStatus   `json:"ports"`
 	LAN     LANStatus      `json:"lan"`
+	Control ControlStatus  `json:"control"`
 	VPNs    []VPNStatus    `json:"vpns"`
 	GeoIP   GeoIPStatus    `json:"geoip"`
 	Adblock adblock.Status `json:"adblock"`
@@ -335,7 +455,8 @@ func (c *Core) status() Status {
 		Ready: cfg.Ready(), Rev: cfg.Rev, Pairing: c.pairingOpen(),
 		Internet: wan.StDown, WAN: states, APs: []wifi.APStatus{}, STAs: []wifi.STAStatus{}, VPNs: []VPNStatus{},
 		OffAir: append([]string{}, c.offAir...), Ports: []PortStatus{},
-		LAN: LANStatus{Address: cfg.Main().Address, Networks: map[string]int{}},
+		LAN:     LANStatus{Address: cfg.Main().Address, Networks: map[string]int{}},
+		Control: c.controlStatus(),
 	}
 	for _, p := range c.ports {
 		st.Ports = append(st.Ports, PortStatus{Name: p.Name, Label: p.Label, Phone: p.Phone, Carrier: netx.Carrier(p.Name)})
@@ -465,6 +586,11 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 				"paired": sess.paired, "claimed": c.pairings.Count() > 0, "pairing": c.pairingOpen(),
 				"ready": c.cfg.Ready(),
 			}
+			// Where to find the router on its networks is for phones
+			// that may use it.
+			if sess.paired {
+				out["control"] = c.controlStatus()
+			}
 		})
 		return out, nil
 	case "pair":
@@ -481,6 +607,10 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		var out *proto.Error
 		c.do(func() {
 			if sess.paired {
+				return
+			}
+			if sess.via == OverNetwork {
+				out = proto.Errf(proto.ErrUnpaired, "a phone is paired over Bluetooth, next to the router")
 				return
 			}
 			if !c.pairingOpen() {
@@ -505,6 +635,11 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 	}
 
 	switch req.Method {
+	case "ping":
+		// Answered without the control loop, so that it says whether the
+		// link works and not whether the router is busy.
+		return nil, nil
+
 	case "status.get":
 		var st Status
 		c.do(func() { st = c.status() })
@@ -518,6 +653,7 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 	case "config.set":
 		p, perr := decode[struct {
 			Config *config.Config `json:"config"`
+			ID     string         `json:"id"`
 		}](req)
 		if perr != nil {
 			return nil, perr
@@ -525,9 +661,22 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		if p.Config == nil {
 			return nil, proto.Errf(proto.ErrInvalid, "missing config")
 		}
+		if len(p.ID) > 64 {
+			return nil, proto.Errf(proto.ErrInvalid, "malformed parameters")
+		}
 		var out *proto.Error
 		var rev uint64
 		c.do(func() {
+			// The same write again: the app did not get the answer to
+			// the first (its link went), and is told again what became
+			// of it instead of having it judged against a document that
+			// it has itself changed.
+			for _, w := range c.writes {
+				if p.ID != "" && w.id == p.ID {
+					rev = w.rev
+					return
+				}
+			}
 			if p.Config.Rev != c.cfg.Rev {
 				out = proto.Errf(proto.ErrConflict, "the configuration changed; reload and try again")
 				return
@@ -537,6 +686,12 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 				return
 			}
 			rev = c.cfg.Rev
+			if p.ID != "" {
+				c.writes = append(c.writes, appliedWrite{p.ID, rev})
+				if len(c.writes) > 32 {
+					c.writes = c.writes[1:]
+				}
+			}
 		})
 		if out != nil {
 			return nil, out
@@ -985,7 +1140,7 @@ func (c *Core) dispatch(sess *apiSession, req *proto.Request) (any, *proto.Error
 		// Cut off any session the revoked phone still has.
 		c.sessMu.Lock()
 		for s := range c.sessions {
-			if !s.local && base64.StdEncoding.EncodeToString(s.s.Remote) == p.Key {
+			if s.via != OverSocket && base64.StdEncoding.EncodeToString(s.s.Remote) == p.Key {
 				s.paired = false
 				s.s.Close()
 			}

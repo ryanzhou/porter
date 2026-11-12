@@ -187,6 +187,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Porter;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Porter uses Bluetooth to find and control your travel router.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Porter reaches your router over your own network when this phone is on it, which is faster than Bluetooth.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -215,6 +216,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Porter;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Porter uses Bluetooth to find and control your travel router.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Porter reaches your router over your own network when this phone is on it, which is faster than Bluetooth.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

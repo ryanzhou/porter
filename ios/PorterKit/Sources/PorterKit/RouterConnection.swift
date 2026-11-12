@@ -23,8 +23,41 @@ public enum RouterEvent {
 
 public struct Empty: Codable, Equatable { public init() {} }
 
+/// Something calls to a router can be made on: one connection, or the
+/// supervisor that keeps one up over whichever link works. Everything the
+/// router can be asked is written once, against this.
+public protocol RouterAPI {
+    /// Calls a method and decodes its result.
+    func call<P: Encodable, R: Decodable>(_ method: String, _ params: P) async throws -> R
+}
+
+public extension RouterAPI {
+    /// Calls a method without parameters.
+    func call<R: Decodable>(_ method: String, as: R.Type = R.self) async throws -> R {
+        try await call(method, Empty())
+    }
+
+    /// Calls a method whose result is not needed.
+    func run<P: Encodable>(_ method: String, _ params: P) async throws {
+        let _: Empty = try await call(method, params)
+    }
+
+    func run(_ method: String) async throws {
+        let _: Empty = try await call(method, Empty())
+    }
+}
+
+/// Whether a call failed because the link it was made on went, and not
+/// because of anything the router said about it. Such a call may or may
+/// not have reached the router.
+public func isLinkFailure(_ error: Error) -> Bool {
+    if error is RouterError || error is DecodingError || error is EncodingError { return false }
+    if let error = error as? SupervisorError, error == .notConnected { return false }
+    return true
+}
+
 /// The RPC layer: requests, responses and events over a secure session.
-public actor RouterConnection {
+public actor RouterConnection: RouterAPI {
     private let session: SecureSession?
     /// Answers calls locally instead of over a session (demo mode).
     private let demo: ((String, Data) throws -> Data)?
@@ -164,9 +197,12 @@ public actor RouterConnection {
         readTask?.cancel()
     }
 
+    /// Whether the connection has ended.
+    public var isClosed: Bool { closedError != nil }
+
     /// How long a call may wait for its reply, in seconds. Most answers
     /// come at once; a few are of work the router does first.
-    private static func deadline(for method: String) -> UInt64 {
+    private static func deadline(for method: String) -> Double {
         switch method {
         case "speedtest.run": return 90
         case "firmware.check", "firmware.install": return 45
@@ -203,7 +239,13 @@ public actor RouterConnection {
     }
 
     /// Calls a method and decodes its result.
-    public func call<P: Encodable, R: Decodable>(_ method: String, _ params: P, as: R.Type = R.self) async throws -> R {
+    public func call<P: Encodable, R: Decodable>(_ method: String, _ params: P) async throws -> R {
+        try await call(method, params, within: Self.deadline(for: method))
+    }
+
+    /// Calls a method that has to be answered within `seconds`. As with
+    /// every deadline, missing it ends the connection.
+    public func call<P: Encodable, R: Decodable>(_ method: String, _ params: P, within seconds: Double) async throws -> R {
         if let closedError { throw closedError }
         let id = nextID
         nextID &+= 1
@@ -219,7 +261,7 @@ public actor RouterConnection {
         payload.append(paramData)
         payload.append(Data("}".utf8))
 
-        let limit: UInt64 = Self.deadline(for: method) * deadlineUnit
+        let limit: UInt64 = UInt64(seconds * Double(deadlineUnit))
         let reply: Data = try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             // A reply that never comes must not leave the caller waiting
@@ -249,19 +291,5 @@ public actor RouterConnection {
             pending.removeValue(forKey: id)?.resume(throwing: error)
             fail(error)
         }
-    }
-
-    /// Calls a method without parameters.
-    public func call<R: Decodable>(_ method: String, as: R.Type = R.self) async throws -> R {
-        try await call(method, Empty(), as: R.self)
-    }
-
-    /// Calls a method whose result is not needed.
-    public func run<P: Encodable>(_ method: String, _ params: P) async throws {
-        let _: Empty = try await call(method, params)
-    }
-
-    public func run(_ method: String) async throws {
-        let _: Empty = try await call(method, Empty())
     }
 }

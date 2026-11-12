@@ -3,6 +3,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -21,6 +22,16 @@ struct RootView: View {
                 NavigationStack { ConnectView() }
             }
         }
+        .overlay(alignment: .top) {
+            if model.reconnecting {
+                ReconnectingSign()
+                    .transition(.opacity)
+            }
+        }
+        .animation(.default, value: model.reconnecting)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { model.foreground() }
+        }
         .alert("Porter", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -29,6 +40,25 @@ struct RootView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+    }
+}
+
+/// Shown above whatever is on screen while a connection that was lost is
+/// being brought back. Everything under it stays as it is and can still
+/// be used; what is asked of the router waits for the connection.
+private struct ReconnectingSign: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Reconnecting to the router")
+                .font(.footnote)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: Capsule())
+        .padding(.top, 4)
+        .allowsHitTesting(false)
     }
 }
 

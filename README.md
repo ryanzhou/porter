@@ -20,8 +20,9 @@ and can send some or all of your traffic through your VPN.
   them; if the first stops working the router moves on to the next.
 - **More than one network.** A second Wi-Fi name for guests or for work,
   on addresses of its own, kept apart from your devices if you like.
-- **Controlled over Bluetooth.** The app talks to the router directly,
-  so it works whether or not anything has internet yet. No account, no
+- **Controlled from your phone, directly.** The app talks to the router
+  over Bluetooth, or over your own network when the phone is on it, so
+  it works whether or not anything has internet yet. No account, no
   cloud service: the router and the app are the only two parts.
 - **Sign-in pages handled once.** One device signs in to the venue's
   network; every device behind the router is then online.
@@ -234,6 +235,29 @@ the kill switch on, directly without it.
   use Settings → Power off. Simply pulling the plug is safe as well: the
   system is read-only and cannot be corrupted that way.
 
+### From anywhere on your network
+
+The first time, the app finds the router over Bluetooth, and that is how
+a phone pairs with it. From then on the app also reaches the router
+through your own network whenever the phone is on your Wi-Fi (or on a
+wired port of the router), which is a good deal faster and works from
+the other end of the house, or with the router in a cupboard.
+
+There is nothing to set up. The app uses whichever of the two works and
+moves between them by itself as you come and go; the first time it tries
+your network, iOS asks whether Porter may find devices on your local
+network. Settings shows under **Connection** which one is in use.
+
+- Only phones that are already paired are let in this way, and only from
+  your own networks: never from the internet side, and not from a
+  network you keep apart from the others (a guest network).
+- Bluetooth stays the way back in. If the phone is not on your Wi-Fi, or
+  you said no to the local network question, the app carries on over
+  Bluetooth as before. Pairing a new phone always happens over
+  Bluetooth, next to the router.
+- To have the router answer over Bluetooth only, switch off
+  Settings → **Connect over your network too**.
+
 ### The light and the button
 
 | Green light | Meaning |
@@ -253,7 +277,9 @@ the kill switch on, directly without it.
 **The router does not appear in the app.** Give it a full minute after
 power-on and stay within a few metres. Check that Bluetooth is on and
 that the app is allowed to use it (Settings → Porter). If the light is
-not blinking at all, the Pi did not boot: re-flash the card.
+not blinking at all, the Pi did not boot: re-flash the card. A router
+you have already paired with is also found without Bluetooth, as long
+as the phone is on its Wi-Fi.
 
 **"Press the power button".** The router already belongs to another
 phone. Press the button briefly, then try again.
@@ -332,8 +358,10 @@ settings and pairings. Re-flashing the card does the same.
   github.com for a newer version only when you open Settings → Software. Nothing reports to
   the authors of this project; there is nowhere for it to report to.
 - **Security.** The app's connection to the router is encrypted and
-  authenticated independently of Bluetooth pairing, and a phone can only
-  pair while the router is new or its button has just been pressed.
+  authenticated independently of Bluetooth pairing and of your Wi-Fi
+  password, the same way over Bluetooth and over your network, and a
+  phone can only pair while the router is new or its button has just
+  been pressed, and only over Bluetooth.
   There are no passwords to log in to the router itself; SSH is off
   unless you enable it in Settings, and then only from your own network
   with your key.
