@@ -215,8 +215,15 @@ func TestSessionCaps(t *testing.T) {
 	}
 	// One phone: a third session takes the place of its oldest.
 	phone := r.phone(true)
-	first, second := r.connect(phone), r.connect(phone)
-	if !alive(first) || !alive(second) {
+	// The first is known to the router before the second is begun: the
+	// router counts a session from the end of its handshake, and two begun
+	// together can finish in either order.
+	first := r.connect(phone)
+	if !alive(first) {
+		t.Fatal("the phone's first session does not work")
+	}
+	second := r.connect(phone)
+	if !alive(second) {
 		t.Fatal("a phone's two sessions do not both work")
 	}
 	third := r.connect(phone)
